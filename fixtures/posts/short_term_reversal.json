@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-blog",
+    "url": "https://example.invalid/quant-blog/short_term_reversal",
+    "author": "样例作者F",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T20:15:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-short_term_reversal"
+  },
+  "content": {
+    "title": "短期反转：大跌次日抄底，持有一天",
+    "format": "markdown",
+    "body": "思路：当日跌幅超过 threshold=-1% 时，收盘买入，次日收盘卖出。\n假设：震荡市中存在短期过度反应。已考虑手续费与印花税，但滑点估计偏乐观。\n\n```python\ndef generate_signals(df, threshold=-0.01):\n    r = df[\"close\"].pct_change()\n    # buy after a down day beyond threshold, hold one day\n    return (r < threshold).astype(float)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

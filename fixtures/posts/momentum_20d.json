@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-blog",
+    "url": "https://example.invalid/quant-blog/momentum_20d",
+    "author": "样例作者B",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T10:40:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-momentum_20d"
+  },
+  "content": {
+    "title": "20日动量 + 波动率过滤",
+    "format": "markdown",
+    "body": "过去 lookback=20 天涨幅为正且波动率低于阈值 vol_cap=0.03 时持有。\n假设：动量效应在 A 股中短期存在；低波动期信号更可靠。风险：行情反转时回撤大。\n\n```python\nimport numpy as np\n\ndef generate_signals(df, lookback=20, vol_cap=0.03):\n    r = df[\"close\"].pct_change()\n    mom = df[\"close\"] / df[\"close\"].shift(lookback) - 1\n    vol = r.rolling(lookback).std()\n    return ((mom > 0) & (vol < vol_cap)).astype(float)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

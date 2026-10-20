@@ -1,0 +1,12 @@
+{
+  "symbol": "SAMPLE_RANGE",
+  "source": "synthetic",
+  "label": "SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES",
+  "generator": "scripts/gen_sample_data.py",
+  "seed": 11,
+  "calendar": "huquant SSE trade_date_sse",
+  "start": "2015-01-05",
+  "end": "2019-12-31",
+  "bars": 1221,
+  "adjustment": "n/a"
+}

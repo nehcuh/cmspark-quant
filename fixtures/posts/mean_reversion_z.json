@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-forum",
+    "url": "https://example.invalid/quant-forum/mean_reversion_z",
+    "author": "样例作者C",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T14:05:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-mean_reversion_z"
+  },
+  "content": {
+    "title": "布林带均值回归（超跌买入）",
+    "format": "markdown",
+    "body": "价格低于 window=20 日均线 z=1.5 个标准差时买入，回到均线卖出。\n假设：价格围绕均值震荡，适合震荡市。\n\n```python\nimport numpy as np\nimport pandas as pd\n\ndef generate_signals(df, window=20, z=1.5):\n    m = df[\"close\"].rolling(window).mean()\n    sd = df[\"close\"].rolling(window).std()\n    zs = (df[\"close\"] - m) / sd\n    pos = pd.Series(np.nan, index=df.index)\n    pos[zs < -z] = 1.0\n    pos[zs > 0] = 0.0\n    return pos.ffill().fillna(0.0)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}
