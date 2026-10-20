@@ -28,4 +28,8 @@ pub enum CoreError {
     DataIntegrity(String),
     #[error("vault already spent for this idea: {0}")]
     VaultSpent(String),
+    #[error("invalid input: {0}")]
+    Invalid(String),
+    #[error("concurrent update conflict: {0}")]
+    Conflict(String),
 }

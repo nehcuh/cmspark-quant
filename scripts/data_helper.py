@@ -48,8 +48,23 @@ def baostock(mkt, code, start, end):
         with contextlib.redirect_stdout(io.StringIO()):
             bs.logout()
 
+def akshare_fut(contract, start, end):
+    """Raw daily bars of ONE futures contract (sina), for cross-validation."""
+    import akshare as ak
+    df = ak.futures_zh_daily_sina(symbol=contract)
+    rows = [[str(r["date"])[:10], float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r["volume"])]
+            for _, r in df.iterrows() if start <= str(r["date"])[:10].replace("-", "") <= end]
+    return rows, {"endpoint": "sina futures_zh_daily_sina", "akshare": ak.__version__, "contract": contract}
+
 if __name__ == "__main__":
     src, sym, start, end = sys.argv[1:5]
+    if sym.startswith("FUT:"):
+        c = sym[4:]
+        assert src == "akshare" and 3 <= len(c) <= 8 and c.isalnum(), "bad contract"
+        with contextlib.redirect_stdout(sys.stderr):
+            rows, meta = akshare_fut(c, start, end)
+        print(json.dumps({"bars": rows, "meta": meta}))
+        sys.exit(0)
     mkt, code = sym[:2].upper(), sym[2:]
     assert mkt in ("SH", "SZ", "BJ") and len(code) == 6 and code.isdigit(), "bad symbol"
     with contextlib.redirect_stdout(sys.stderr):

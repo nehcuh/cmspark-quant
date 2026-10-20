@@ -49,7 +49,48 @@ enum Cmd {
         /// JSON object overriding extracted params, e.g. '{"fast":5}'
         #[arg(long)]
         params: Option<String>,
+        /// comma list of symbols (overrides --symbol): every id × every symbol, run concurrently
+        #[arg(long)]
+        symbols: Option<String>,
+        /// concurrent strategies (containers are additionally bounded by CMSQ_CONTAINER_SLOTS)
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
     },
+    /// P1: parameter grid sweep; every point is a probed sandbox run AND a trial in the DSR ledger
+    Sweep {
+        id: String,
+        #[arg(long)]
+        symbol: String,
+        /// JSON object name -> array, e.g. '{"fast":[5,10,20],"slow":[30,60]}'
+        #[arg(long)]
+        grid: String,
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+        #[arg(long, value_enum, default_value = "docker")]
+        backend: Backend,
+    },
+    /// P1: multi-symbol portfolio backtest (one account, shared cash) on common development dates
+    Portfolio {
+        id: String,
+        /// comma list, e.g. SH600519,SZ000858,SH600036
+        #[arg(long)]
+        symbols: String,
+        /// equal | inverse_vol[:LOOKBACK] | fixed:W1,W2,...
+        #[arg(long, default_value = "equal")]
+        alloc: String,
+        #[arg(long)]
+        params: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        workers: usize,
+        #[arg(long, value_enum, default_value = "docker")]
+        backend: Backend,
+    },
+    /// Research runs (sweeps, portfolios)
+    Runs { #[arg(long)] kind: Option<String> },
+    /// Database (PostgreSQL primary / SQLite offline)
+    Db { #[command(subcommand)] cmd: DbCmd },
+    /// P3: CTP market data (observe-only; no trading API is compiled in)
+    Md { #[command(subcommand)] cmd: MdCmd },
     /// Manually promote a GatePassed strategy: type `PROMOTE <id8>` (prompted if --confirm
     /// is omitted), then the one-time vault holdout runs in Docker; only a vault pass promotes.
     Promote { id: String, #[arg(long)] confirm: Option<String> },
@@ -87,7 +128,10 @@ enum DataCmd {
     /// Fetch daily bars: SAMPLE_* from bundled fixtures; SH/SZ/BJ codes through the
     /// multi-source router (default priority tushare,akshare,baostock,tdx), cross-validated
     Fetch {
+        /// one symbol or a comma list (fetched concurrently; per-source rate limits still apply)
         symbol: String,
+        #[arg(long, default_value_t = 3)]
+        concurrency: usize,
         #[arg(long, default_value_t = 1500)]
         count: usize,
         /// comma list in priority order (env CMSQ_DATA_SOURCES)
@@ -114,6 +158,35 @@ enum DataCmd {
     },
     /// List cached datasets
     List,
+}
+
+#[derive(Subcommand)]
+enum DbCmd {
+    /// Apply migrations with the owner URL (CMSQ_DATABASE_MIGRATE_URL / <secrets>/db.env)
+    Migrate,
+    /// Backend, schema, row counts
+    Status,
+}
+
+#[derive(Subcommand)]
+enum MdCmd {
+    /// Subscribe to instruments on a CTP market-data front, store ticks, build 1-minute bars
+    Run {
+        /// comma list of instruments, e.g. rb2601,IF2512
+        #[arg(long)]
+        instruments: String,
+        /// front address (default: OpenCTP 7x24 tcp://trading.openctp.cn:30011)
+        #[arg(long)]
+        front: Option<String>,
+        /// stop after N seconds
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+        /// use the built-in replay feed instead of a live front (offline / CI)
+        #[arg(long)]
+        mock: bool,
+    },
+    /// Probe whether the CTP front is reachable from this machine
+    Probe { #[arg(long)] front: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -194,23 +267,40 @@ async fn main() -> Result<()> {
             }
             out(serde_json::Value::Array(js), lines.join("\n"));
         }
-        Cmd::Backtest { id, all, symbol, backend, params } => {
+        Cmd::Backtest { id, all, symbol, backend, params, symbols, workers } => {
             let exec = executor(backend).await?;
-            let ov = params.map(|p| serde_json::from_str(&p)).transpose().context("--params must be JSON")?;
+            let ov: Option<serde_json::Value> = params.map(|p| serde_json::from_str(&p)).transpose().context("--params must be JSON")?;
             let ids: Vec<String> = if all {
                 o.store.list_strategies(Some(StrategyStatus::Extracted))?.into_iter().map(|s| s.id).collect()
             } else {
                 vec![id.context("give an id or --all")?]
             };
-            let mut lines = vec![format!("backend: {} (hardened={})  symbol: {symbol}", exec.name(), exec.hardened())];
+            let syms: Vec<String> = symbols.map(|s| s.split(',').map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).collect()).unwrap_or_else(|| vec![symbol.clone()]);
+            let mut lines = vec![format!("backend: {} (hardened={})  symbols: {}  workers: {workers}  container slots: {}", exec.name(), exec.hardened(), syms.join(","), o.slots.available_permits())];
             let mut js = vec![];
-            for i in ids {
-                let r = o.backtest(&i, &symbol, exec.as_ref(), ov.clone()).await?;
+            let results: Vec<(String, String, Result<cmsq_core::orchestrator::BacktestSummary>)> = if syms.len() == 1 && ids.len() == 1 && ov.is_some() {
+                vec![(ids[0].clone(), syms[0].clone(), o.backtest(&ids[0], &syms[0], exec.as_ref(), ov.clone()).await)]
+            } else if ov.is_some() {
+                anyhow::bail!("--params applies to a single id and symbol");
+            } else {
+                let pairs: Vec<(String, String)> = ids.iter().flat_map(|i| syms.iter().map(move |s| (i.clone(), s.clone()))).collect();
+                o.backtest_batch(&pairs, exec.as_ref(), workers).await
+            };
+            let mut failed = 0;
+            for (i, sym, r) in results {
+                let r = match r {
+                    Ok(r) => r,
+                    Err(e) => {
+                        failed += 1;
+                        lines.push(format!("ERROR      {}  {sym}: {e:#}", &i[..8.min(i.len())]));
+                        continue;
+                    }
+                };
                 let title = o.store.get_strategy(&r.strategy_id)?.title;
                 let m = r.oos.clone().unwrap_or_default();
                 let job = o.store.list_jobs(Some(&r.strategy_id))?.into_iter().find(|j| j.id == r.job_id);
                 let dsr = job.as_ref().and_then(|j| j.result.as_ref()).map(|v| v["dsr"].clone()).unwrap_or_default();
-                lines.push(format!("{:<10} {}  job={} [{}]  dev ret {} sharpe {} maxDD {} DSR {} (N={})  — {}", r.status.as_str(), &r.strategy_id[..8], &r.job_id[..8], r.job_status,
+                lines.push(format!("{:<10} {}  {sym:<10} job={} [{}]  dev ret {} sharpe {} maxDD {} DSR {} (N={})  — {}", r.status.as_str(), &r.strategy_id[..8], &r.job_id[..8], r.job_status,
                     pct(&m, "total_return"), m["sharpe"].as_f64().map(|x| format!("{x:.2}")).unwrap_or("-".into()), pct(&m, "max_drawdown"),
                     dsr["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into()), dsr["trials"], title));
                 for why in &r.reasons {
@@ -222,7 +312,68 @@ async fn main() -> Result<()> {
                 js.push(serde_json::to_value(&r)?);
             }
             out(serde_json::Value::Array(js), lines.join("\n"));
+            if failed > 0 && syms.len() == 1 && ids.len() == 1 {
+                std::process::exit(1);
+            }
         }
+        Cmd::Sweep { id, symbol, grid, workers, backend } => {
+            let exec = executor(backend).await?;
+            let g: serde_json::Value = serde_json::from_str(&grid).context("--grid must be a JSON object")?;
+            let g = g.as_object().context("--grid must be a JSON object")?;
+            let r = o.sweep(&id, &symbol.to_uppercase(), g, exec.as_ref(), workers).await?;
+            let mut lines = vec![format!("sweep {} on {}: {} points, workers {workers}", &r.run_id[..8], symbol.to_uppercase(), r.points.len())];
+            for p in &r.points {
+                lines.push(format!("  #{:<3} {:<34} {:<15} sharpe {:>6}  ret {:>9}  DSR@record {}{}", p["point"], p["params"].to_string(), p["status"].as_str().unwrap_or(""),
+                    p["sharpe"].as_f64().map(|x| format!("{x:.2}")).unwrap_or("-".into()), pct(p, "total_return"),
+                    p["dsr_at_record"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into()), if p["lookahead"].as_bool() == Some(true) { "  [LOOK-AHEAD]" } else { "" }));
+            }
+            lines.push(format!("best: {}  params {}  → {}  DSR(final ledger) {} N={}", r.best_job.as_deref().map(|j| &j[..8]).unwrap_or("-"),
+                r.best_params.clone().unwrap_or_default(), r.status, r.dsr.as_ref().map(|d| format!("{:.3}", d.dsr)).unwrap_or("-".into()), r.dsr.as_ref().map(|d| d.trials).unwrap_or(0)));
+            for why in &r.reasons {
+                lines.push(format!("  ✗ {why}"));
+            }
+            out(serde_json::to_value(&r)?, lines.join("\n"));
+        }
+        Cmd::Portfolio { id, symbols, alloc, params, workers, backend } => {
+            let exec = executor(backend).await?;
+            let syms: Vec<String> = symbols.split(',').map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).collect();
+            let alloc = parse_alloc(&alloc)?;
+            let ov = params.map(|p| serde_json::from_str(&p)).transpose().context("--params must be JSON")?;
+            let r = o.portfolio(&id, &syms, alloc, ov, exec.as_ref(), workers).await?;
+            let p = &r.result["portfolio"];
+            let mut lines = vec![format!("portfolio {} [{}] {}", &r.run_id[..8], syms.join("+"), r.result["alloc"])];
+            if p.is_null() {
+                lines.extend(r.reasons.iter().map(|x| format!("  ✗ {x}")));
+            } else {
+                lines.push(format!("  window {} .. {} ({} bars, development only)", r.result["window"]["start"].as_str().unwrap_or(""), r.result["window"]["end"].as_str().unwrap_or(""), r.result["window"]["bars"]));
+                lines.push(format!("  return {}  sharpe {:.2}  maxDD {}  exposure {}  trades {}  DSR {:.3} (N={})", pct(p, "total_return"), p["sharpe"].as_f64().unwrap_or(0.0), pct(p, "max_drawdown"),
+                    pct(p, "exposure"), r.result["trades"], r.result["dsr"]["dsr"].as_f64().unwrap_or(0.0), r.result["dsr"]["trials"]));
+                for l in r.result["legs"].as_array().into_iter().flatten() {
+                    lines.push(format!("    leg {:<10} sharpe {:.2}  ret {}", l["symbol"].as_str().unwrap_or(""), l["development"]["sharpe"].as_f64().unwrap_or(0.0), pct(&l["development"], "total_return")));
+                }
+                lines.push(format!("  gate (informational): {}", if r.passed { "PASS".to_string() } else { format!("FAIL — {}", r.reasons.join("; ")) }));
+            }
+            out(serde_json::to_value(&r)?, lines.join("\n"));
+        }
+        Cmd::Runs { kind } => {
+            let v = o.store.list_runs(kind.as_deref())?;
+            let lines: Vec<String> = v.iter().map(|r| format!("{}  {:<9} {:<9} {}  {}", &r.id[..8], r.kind, r.status, &r.created_at[..19], r.spec)).collect();
+            out(serde_json::to_value(&v)?, lines.join("\n"));
+        }
+        Cmd::Db { cmd: DbCmd::Migrate } => {
+            let c = o.home.db_config();
+            let mu = c.migrate_url.clone().context("no CMSQ_DATABASE_MIGRATE_URL (run scripts/db_up.sh)")?;
+            cmsq_core::store::Store::migrate_pg(&mu, c.schema.as_deref())?;
+            out(serde_json::json!({"migrated": true, "schema": c.schema}), format!("migrations applied (schema {})", c.schema.unwrap_or_default()));
+        }
+        Cmd::Db { cmd: DbCmd::Status } => {
+            let c = o.home.db_config();
+            let v = serde_json::json!({"backend": o.store.backend(), "schema": c.schema, "url": c.url.as_deref().map(cmsq_core::store::redact_url),
+                "strategies": o.store.list_strategies(None)?.len(), "trials": o.store.trial_count()?, "audit": o.store.audit_entries(None, 1)?.first().map(|a| a.seq),
+                "runs": o.store.list_runs(None)?.len(), "ticks": o.store.tick_count(None)?});
+            out(v.clone(), format!("backend {}  schema {}  url {}\n  strategies {}  trials {}  audit head {}  research runs {}  ticks {}", v["backend"], v["schema"], v["url"], v["strategies"], v["trials"], v["audit"], v["runs"], v["ticks"]));
+        }
+        Cmd::Md { cmd } => md_cmd(&o, cmd, &out).await?,
         Cmd::Promote { id, confirm } => {
             let s0 = o.get(&id)?;
             let confirm = match confirm {
@@ -302,22 +453,47 @@ async fn main() -> Result<()> {
             let lines: Vec<String> = v.iter().map(|(s, t, _)| format!("{}  {}  target={:.2}  {}  [OBSERVE ONLY]", s.date, s.symbol, s.target_position, t)).collect();
             out(serde_json::to_value(v.iter().map(|x| &x.0).collect::<Vec<_>>())?, if lines.is_empty() { "no signals (only promoted strategies emit observe-only signals)".into() } else { lines.join("\n") });
         }
-        Cmd::Data { cmd: DataCmd::Fetch { symbol, count, sources, no_validate } } => {
-            let sym = symbol.to_uppercase();
-            let meta = if sym.starts_with("SAMPLE") {
-                o.fetch_data(&SampleSource, &sym, count).await?
-            } else {
-                let (router, notes) = o.data_router(sources.as_deref(), !no_validate);
-                for n in notes {
-                    eprintln!("  · {n}");
+        Cmd::Data { cmd: DataCmd::Fetch { symbol, concurrency, count, sources, no_validate } } => {
+            use futures_util::stream::{self, StreamExt};
+            let syms: Vec<String> = symbol.split(',').map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).collect();
+            let (router, notes) = o.data_router(sources.as_deref(), !no_validate);
+            for n in notes {
+                eprintln!("  · {n}");
+            }
+            let (o_ref, r_ref) = (&o, &router);
+            // one router shared by all tasks: tushare's token bucket (400/min) and akshare's
+            // serial ≥1 s spacing are per source, so concurrency cannot exceed them
+            let res: Vec<(String, Result<cmsq_core::market::DataMeta>)> = stream::iter(syms.clone())
+                .map(|sym| async move {
+                    let r = if sym.starts_with("SAMPLE") { o_ref.fetch_data(&SampleSource, &sym, count).await } else {
+                        if r_ref.sources.is_empty() { Err(anyhow::anyhow!("no data source available")) } else { o_ref.fetch_routed(r_ref, &sym, count).await }
+                    };
+                    (sym, r)
+                })
+                .buffer_unordered(concurrency.max(1))
+                .collect().await;
+            let mut lines = vec![];
+            let mut js = vec![];
+            let mut fail = false;
+            for (sym, r) in res {
+                match r {
+                    Ok(meta) => {
+                        let v = &meta.extra["validation"];
+                        let val = if v.is_null() { String::new() } else { format!("\n  cross-validation: {} vs {} — {}", v["status"].as_str().unwrap_or("?"), v["against"].as_str().unwrap_or("-"), v["note"].as_str().unwrap_or("")) };
+                        lines.push(format!("cached {} bars {} .. {} for {} from {} [{}]\n  adjustment: {}\n  snapshot sha256 {}{val}", meta.bars, meta.start, meta.end, meta.symbol, meta.source, meta.label,
+                            meta.adjustment, meta.extra["snapshot_sha256"].as_str().unwrap_or("-")));
+                        js.push(serde_json::to_value(&meta)?);
+                    }
+                    Err(e) => {
+                        fail = true;
+                        lines.push(format!("FAILED {sym}: {e:#}"));
+                    }
                 }
-                anyhow::ensure!(!router.sources.is_empty(), "no data source available");
-                o.fetch_routed(&router, &sym, count).await?
-            };
-            let v = &meta.extra["validation"];
-            let val = if v.is_null() { String::new() } else { format!("\n  cross-validation: {} vs {} — {}", v["status"].as_str().unwrap_or("?"), v["against"].as_str().unwrap_or("-"), v["note"].as_str().unwrap_or("")) };
-            out(serde_json::to_value(&meta)?, format!("cached {} bars {} .. {} for {} from {} [{}]\n  adjustment: {}\n  snapshot sha256 {}{val}", meta.bars, meta.start, meta.end, meta.symbol, meta.source, meta.label,
-                meta.adjustment, meta.extra["snapshot_sha256"].as_str().unwrap_or("-")));
+            }
+            out(if js.len() == 1 { js[0].clone() } else { serde_json::Value::Array(js) }, lines.join("\n"));
+            if fail {
+                std::process::exit(1);
+            }
         }
         Cmd::Data { cmd: DataCmd::Calendar { start } } => {
             let t = cmsq_core::data::tushare::Tushare::from_secrets(&o.home.secrets)?;
@@ -385,6 +561,37 @@ async fn main() -> Result<()> {
             let v = o.store.audit_entries(None, n)?;
             let lines: Vec<String> = v.iter().rev().map(|a| format!("#{:<4} {} {:<14} {:<34} {} {}", a.seq, &a.ts[..19], a.actor, a.action, a.target.as_deref().map(|t| &t[..t.len().min(8)]).unwrap_or("-"), if a.success { "" } else { "FAIL" })).collect();
             out(serde_json::to_value(&v)?, lines.join("\n"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_alloc(s: &str) -> Result<cmsq_core::scorer::Alloc> {
+    use cmsq_core::scorer::Alloc;
+    let (k, v) = s.split_once(':').unwrap_or((s, ""));
+    Ok(match k {
+        "equal" => Alloc::Equal,
+        "inverse_vol" | "invvol" => Alloc::InverseVol { lookback: if v.is_empty() { 60 } else { v.parse().context("lookback")? } },
+        "fixed" => Alloc::Fixed { weights: v.split(',').map(|x| x.trim().parse::<f64>()).collect::<std::result::Result<_, _>>().context("fixed:W1,W2,...")? },
+        _ => anyhow::bail!("--alloc must be equal | inverse_vol[:N] | fixed:W1,W2,..."),
+    })
+}
+
+async fn md_cmd(o: &Orchestrator, cmd: MdCmd, out: &dyn Fn(serde_json::Value, String)) -> Result<()> {
+    use cmsq_core::ctp::{self, MdConfig};
+    match cmd {
+        MdCmd::Probe { front } => {
+            let f = front.unwrap_or_else(|| ctp::OPENCTP_7X24_MD.into());
+            let r = ctp::probe_front(&f, std::time::Duration::from_secs(6)).await;
+            out(serde_json::json!({"front": f, "reachable": r.is_ok(), "error": r.as_ref().err().map(|e| e.to_string())}),
+                match r { Ok(ms) => format!("{f}: TCP reachable in {ms} ms"), Err(e) => format!("{f}: NOT reachable from this machine: {e:#}") });
+        }
+        MdCmd::Run { instruments, front, seconds, mock } => {
+            let cfg = MdConfig { front: front.unwrap_or_else(|| ctp::OPENCTP_7X24_MD.into()), instruments: instruments.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
+                broker_id: "9999".into(), duration: std::time::Duration::from_secs(seconds) };
+            let feed: Box<dyn ctp::MdFeed> = if mock { Box::new(ctp::ReplayFeed::demo(&cfg.instruments)) } else { ctp::live_feed()? };
+            let rep = ctp::run_md(o, feed, &cfg).await?;
+            out(serde_json::to_value(&rep)?, format!("md [{}] {}: {} ticks stored, {} one-minute bars, {} rejected; instruments {:?}", rep.feed, cfg.front, rep.ticks, rep.bars, rep.rejected, cfg.instruments));
         }
     }
     Ok(())

@@ -207,6 +207,11 @@ pub fn compare(full: &[f64], variant: &Variant, pos: &[f64], dates: &[String]) -
 
 /// Parse and validate untrusted `positions.csv`: exact dates, finite, within [0,1].
 pub fn parse_positions(text: &str, dates: &[String]) -> Result<Vec<f64>, String> {
+    parse_positions_range(text, dates, 0.0)
+}
+
+/// `lo` = 0 for long-only (A-shares), -1 for futures (short allowed).
+pub fn parse_positions_range(text: &str, dates: &[String], lo: f64) -> Result<Vec<f64>, String> {
     let mut lines = text.lines();
     if lines.next() != Some("date,position") {
         return Err("positions.csv: bad header".into());
@@ -218,8 +223,8 @@ pub fn parse_positions(text: &str, dates: &[String]) -> Result<Vec<f64>, String>
             return Err(format!("positions.csv line {}: date {:?} does not match input bar", i + 2, d.chars().take(20).collect::<String>()));
         }
         let x: f64 = p.parse().map_err(|_| format!("positions.csv line {}: not a number", i + 2))?;
-        if !x.is_finite() || !(0.0..=1.0).contains(&x) {
-            return Err(format!("positions.csv line {}: position {x} outside [0,1]", i + 2));
+        if !x.is_finite() || !(lo..=1.0).contains(&x) {
+            return Err(format!("positions.csv line {}: position {x} outside [{lo},1]", i + 2));
         }
         out.push(x);
     }

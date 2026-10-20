@@ -1,0 +1,38 @@
+# Independently deployed persistence for cmsq: PostgreSQL 16 + TimescaleDB.
+# Bring up with scripts/db_up.sh (generates passwords into the secrets dir,
+# outside any workspace, and writes the connection URLs to <secrets>/db.env).
+# Listens on 127.0.0.1 only. Two roles:
+#   cmsq_owner  owns the schema, runs migrations (`cmsq db migrate`)
+#   cmsq_app    runtime role: INSERT/SELECT only on audit/trials/signals/evaluations,
+#               no UPDATE/DELETE/TRUNCATE, cannot drop the append-only triggers
+name: cmsq
+services:
+  db:
+    image: timescale/timescaledb@sha256:${CMSQ_PG_IMAGE_DIGEST:?set by scripts/db_up.sh}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cmsq_owner
+      POSTGRES_DB: cmsq
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_owner_pw
+      CMSQ_APP_PASSWORD_FILE: /run/secrets/pg_app_pw
+      TIMESCALEDB_TELEMETRY: "off"
+    secrets: [pg_owner_pw, pg_app_pw]
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=512MB", "-c", "timescaledb.telemetry_level=off",
+              "-c", "log_statement=ddl", "-c", "password_encryption=scram-sha-256"]
+    ports: ["127.0.0.1:${CMSQ_PG_PORT:-55432}:5432"]
+    volumes:
+      - cmsq-pg:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmsq_owner -d cmsq"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    shm_size: 256mb
+secrets:
+  pg_owner_pw:
+    file: ${CMSQ_SECRETS_DIR:?}/pg_owner_pw
+  pg_app_pw:
+    file: ${CMSQ_SECRETS_DIR:?}/pg_app_pw
+volumes:
+  cmsq-pg:

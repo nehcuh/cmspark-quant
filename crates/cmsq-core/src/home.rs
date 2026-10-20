@@ -87,6 +87,14 @@ impl Home {
     pub fn abs(&self) -> PathBuf {
         std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone())
     }
+    /// Database settings; one PostgreSQL schema per workspace unless overridden.
+    pub fn db_config(&self) -> crate::store::DbConfig {
+        let mut c = crate::store::DbConfig::resolve(&self.secrets);
+        if c.schema.is_none() {
+            c.schema = Some(format!("ws_{}", hex::encode(&Sha256::digest(self.abs().display().to_string().as_bytes())[..6])));
+        }
+        c
+    }
     pub fn db(&self) -> PathBuf {
         self.root.join("cmsq.db")
     }

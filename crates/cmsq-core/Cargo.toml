@@ -8,6 +8,8 @@ license.workspace = true
 default = []
 tdx = ["dep:rstdx"]
 llm = []
+# P3: CTP market data through ctp2rs (market-data API only, no order entry)
+ctp = ["dep:ctp2rs"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -16,7 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "1"
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "fs", "io-util", "net"] }
 async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
@@ -28,6 +30,10 @@ futures-util = "0.3"
 tempfile = "3"
 rstdx = { path = "../../third_party/rstdx", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "chrono", "macros"] }
+libc = "0.2.191"
+
+ctp2rs = { version = "=0.1.11-alpha1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

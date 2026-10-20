@@ -71,7 +71,26 @@ impl MarketDataSource for PyProvider {
     fn name(&self) -> &'static str {
         self.kind
     }
+    async fn contract_closes(&self, segments: &[(String, String, String)]) -> Result<Vec<Bar>> {
+        anyhow::ensure!(self.kind == "akshare", "{} has no per-contract futures endpoint", self.kind);
+        let mut out = vec![];
+        for (c, a, b) in segments {
+            anyhow::ensure!(c.len() <= 8 && c.chars().all(|x| x.is_ascii_alphanumeric()), "bad contract code");
+            let v = self.call(&format!("FUT:{c}"), &a.replace('-', ""), &b.replace('-', "")).await?;
+            for r in v["bars"].as_array().context("no bars")? {
+                let Some(r) = r.as_array() else { continue };
+                let (Some(d), Some(cl)) = (r[0].as_str(), r[4].as_f64()) else { continue };
+                if d >= a.as_str() && d <= b.as_str() {
+                    out.push(Bar { date: d.into(), open: r[1].as_f64().unwrap_or(cl), high: r[2].as_f64().unwrap_or(cl), low: r[3].as_f64().unwrap_or(cl), close: cl,
+                        volume: r[5].as_f64().unwrap_or(0.0), adj_factor: None });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.date.cmp(&b.date));
+        Ok(out)
+    }
     async fn daily_bars(&self, symbol: &str, count: usize) -> Result<(Vec<Bar>, DataMeta)> {
+        anyhow::ensure!(!crate::futures::is_futures(symbol), "{}: futures main series come from tushare; akshare validates per contract", self.kind);
         crate::market::parse_ashare_symbol(symbol)?;
         let today = chrono::Local::now().date_naive();
         let start = today - chrono::Duration::days(((count.min(20_000) as f64) * 1.5) as i64 + 30);

@@ -63,7 +63,7 @@ async fn crash_recovery_reaps_stuck_backtests() {
         let id = add(&o, "posts", "ma_crossover").await.unwrap();
         // simulate a crash mid-backtest: status Backtesting + a running job owned by a dead pid
         o.store.set_status(&id, StrategyStatus::Backtesting, None).unwrap();
-        o.store.conn.execute("INSERT INTO jobs(id,strategy_id,backend,image,symbol,data_source,status,started_at,job_dir,owner_pid,kind) VALUES('j1',?1,'docker','x','S','s','running','2026-01-01T00:00:00Z','/tmp',2147483646,'dev')", [&id]).unwrap();
+        o.store.raw_exec("INSERT INTO jobs(id,strategy_id,backend,image,symbol,data_source,status,started_at,job_dir,owner_pid,kind) VALUES('j1',?1,'docker','x','S','s','running','2026-01-01T00:00:00Z','/tmp',2147483646,'dev')", cmsq_core::p![id.as_str()]).unwrap();
         id
     };
     let o = Orchestrator::open(home).unwrap();
