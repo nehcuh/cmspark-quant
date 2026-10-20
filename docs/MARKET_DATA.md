@@ -21,7 +21,7 @@ and the whole `data/` directory is mounted **read-only** at `/data` in every bac
   empty result against all 35 default servers, so this is server-side, not an rstdx bug. rstdx then reports
   `protocol error: Buffer too short for datetime` (it should treat a short body as "0 bars"; worth fixing upstream).
   The failure is audited (`market_data_fetch`, success=false) and `scripts/e2e.sh` falls back to SAMPLE data.
-* Caveat: TDX prices are **unadjusted**; the runner adds a `data_caveats` warning. Forward/back adjustment is a P1 item.
+* Caveat: TDX prices are **unadjusted** (rstdx has no xdxr fetch). Unadjusted data fails the `data_adjusted` gate check, so it can be backtested but never promoted. To use real data, import a CSV with an `adj_factor` column: `cmsq data import <csv> --adjustment hfq`. The container sees raw×adj_factor; price-limit checks use raw prices.
 
 ## huquant (vendored, read-only)
 Evaluated `/workspace/huquant` @ `928aff4`:

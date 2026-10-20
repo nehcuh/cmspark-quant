@@ -21,44 +21,64 @@ CMspark 抓取结果 drop (JSON) ─► 摄入/归档 ─► 结构化抽取 ─
 | 固定版本回测 Runner（容器内） | `runner/`（基础镜像按 digest 固定，pandas/numpy 锁版本） |
 | 样例（均标注 SAMPLE） | `fixtures/posts/*.json`、`fixtures/market/*.csv`（合成数据） |
 
-## 快速开始（Linux）
+## 快速开始（Linux，全新 clone）
 
 ```bash
-# 依赖：Rust stable、Docker（当前用户可访问 daemon）、bubblewrap（DEV 后端可选）
-scripts/build_runner.sh          # 构建 cmsq-runner:1.0.0（仅构建时联网）
-scripts/e2e.sh                   # 全新工作区跑完整闭环并打印结果
+# 依赖：rustup（rust-toolchain.toml 固定 1.99.1，自动安装）、Docker、bubblewrap（仅 DEV 后端/测试）
+# rstdx 已 vendored 在 third_party/rstdx（含空 bars 修复），无需同级目录。
+#
+# Docker 组配置（一次性）：当前用户必须能访问 daemon
+sudo usermod -aG docker $USER   # 然后重新登录；或在当前 shell 用：sg docker -c "<命令>"
+docker info >/dev/null && echo ok
+scripts/build_runner.sh          # 构建 cmsq-runner:2.0.0（仅构建时联网）
+cargo test --workspace           # 无需 Docker 的测试；需 Docker 的测试为 #[ignore]
+scripts/test_docker.sh           # 运行全部 Docker/bwrap 测试；缺依赖时**失败**而不是跳过
+scripts/e2e.sh                   # 全新工作区跑完整闭环；任一结果不符预期即非零退出（缺 Docker 即失败，除非 --allow-dev）
 scripts/dashboard_demo.sh        # 准备演示工作区并打开 Dashboard
 ```
 
-CLI（`CMSQ_HOME` 默认 `./var`）：
+CLI（`CMSQ_HOME` 默认 `./var`；密钥目录 `CMSQ_SECRETS_DIR` 默认 `~/.config/cmsq`，必须在 CMSQ_HOME 之外）：
 
 ```bash
-cmsq init                                   # 工作区 + 固定资产 + 样例数据
-cmsq data fetch SH600519 --count 1500       # 宿主机经 rstdx 拉 A 股日线（沙箱外）
-cmsq ingest [path]                          # 默认摄入 <home>/drop
-cmsq extract                                # 离线启发式抽取；CMSQ_EXTRACTOR=llm 用 LLM（需 --features llm）
-cmsq backtest <id>|--all --symbol SAMPLE_RANGE [--backend docker|process|auto] [--params '{"fast":5}']
-cmsq promote <id> --confirm <id 前 8 位>    # 门禁通过 + Docker 结果 + 手动确认
-cmsq list | show <id> | jobs | signals | audit verify | audit tail
+cmsq init
+cmsq data fetch SH600519 --count 1500            # 宿主机经 rstdx 拉日线（未复权 → data_adjusted 门禁不通过）
+cmsq data import <csv> --adjustment hfq          # 导入带 adj_factor 的复权数据
+cmsq ingest [path] | extract
+cmsq backtest <id>|--all --symbol SAMPLE_REGIME [--backend docker|process]   # 默认 docker；process 大声警告且永不可晋升
+cmsq promote <id>                                # 需键入 "PROMOTE <id前8位>"；一次性运行 vault；未晋升退出码 3
+cmsq list | show <id> | jobs | jobs reap | trials | signals | audit verify | audit tail
 ```
 
-## 关键设计
-* **沙箱（默认 Docker / bollard）**：`NetworkMode=none`、只读 rootfs、`CapDrop=ALL`、`no-new-privileges`、非 root、
-  pids/内存（无 swap）/CPU 限制、超时强杀+删除、`/tmp` tmpfs noexec；`/data`、`/job`、`/vendor` 只读，仅 `/out` 可写；
-  从不挂载 docker.sock。DEV 后端为 bubblewrap（全部 namespace 隔离含网络 + prlimit），其结果**不能通过门禁**。
-* **Runner**：信号统一延后一根 bar 成交；A 股成本（双边佣金 2.5bp、卖出印花税 5bp、滑点 5bp）；时间序 70/30 切分；
-  输出 IS/OOS/2 倍成本/OOS 两半/买入持有基准、换手、回撤、数据出处、huquant 交易日历校验、**前视探针**。
-* **门禁**：OOS 样本量、成本后 OOS 收益 > 0、OOS Sharpe ≥ 0.3 + 0.15·ln(尝试次数)、OOS 两半均为正、最大回撤 ≥ −35%、
-  最低持仓暴露、2 倍成本仍为正、必须来自加固沙箱、前视探针干净。失败一律归档并写明原因。
-* **状态机**：Ingested→Extracted→Backtesting→Evaluated→Promoted/Rejected，Failed 归档；Rejected/Failed/Evaluated 可重跑
-  （尝试次数 +1）。非法转换被拒绝并审计。
-* **审计**：追加写（触发器禁止 UPDATE/DELETE）+ sha256 哈希链，`cmsq audit verify` 检出修改/删除。
+## 信任模型
+* **容器内不可信**：策略代码 + `runner/signal_runner.py` 只读 `/input/bars.csv`、`/job/strategy.py`、`/job/job.json`，
+  只写 `/out/positions.csv`（目标仓位）。容器的任何其他输出均被忽略；宿主机以 O_NOFOLLOW 读取并严格解析。
+  容器以 `/out` 目录属主 uid 运行（非 root，镜像默认 `USER 10001`），`NetworkMode=none`、只读 rootfs、CapDrop=ALL、
+  no-new-privileges、pids/内存/CPU 限制、超时强杀、输出上限；从不挂载 docker.sock。
+* **宿主机可信（Rust，`cmsq-core::scorer`）**：成交、成本、指标、前视探针、DSR、walk-forward、门禁全部在宿主机计算。
+  门禁只读取容器的运行状态与 runner 镜像身份（`docker image inspect` 标签 `cmsq.runner.version=2.0.0`），从不读取策略可控字段。
+* **前视探针**：每个变体（截断/块自助重采样，共 10 个）在**全新容器**中、**随机顺序**运行，比较重叠区间仓位。
+* **成交**：t 日收盘信号 → t+1 开盘成交（含滑点），按收盘盯市；起始 ¥1,000,000。
+* **A 股规则**：100 股一手；佣金 max(¥5, 2.5bp)；卖出印花税按日期（0.3%→0.1%@2008-04-24→0.05%@2023-08-28）；
+  涨跌停（主板 10%，科创 20%@2019-07-22，创业板 20%@2020-08-24，北交所 30%；按未复权价判断）涨停不买、跌停不卖；
+  成交量 0 视为停牌；adj_factor 后复权供策略使用。
+* **多重检验**：全库 trial 账本（相近重复识别），Deflated Sharpe ≥ 0.95；开发段 80%（20% 预热 + 4 折 walk-forward，≥3 折为正），
+  最后 20% 为 vault，仅在人工确认晋升时运行**一次**（先记录消耗再运行）。
+* **状态机**：Ingested→Extracted→Backtesting→GatePassed→(promote+vault)→Promoted/Rejected；Failed 归档；
+  启动时回收死进程遗留的 running 作业（→ abandoned，策略 → Failed "interrupted"）。错误类型为 `CoreError`。
+* **审计**：追加写 + HMAC-SHA256 链（密钥 `~/.config/cmsq/audit.key`，0600，位于 CMSQ_HOME 之外）+ 外部锚点文件
+  （`<secrets>/anchors/*.anchor`）记录链头；`audit verify` 检出修改、删除、截断、回滚、无密钥/有密钥重链。
 
 ## 验证结果（本机，2026-10-20）
-* `cargo test --workspace`：30 通过（含真实 Docker 隔离/超时/内存与全链路测试，`CMSQ_REQUIRE_DOCKER=1`）。
-* `cargo clippy --workspace --all-targets --all-features -- -D warnings`：通过。
-* `scripts/e2e.sh`（Docker 后端）：6 个样例 → 1 晋升、3 门禁拒绝、2 失败（前视、联网），篡改检测通过。
-* 截图：`docs/screenshots/01-overview.png` … `09-audit-chain.png`。
+* `cargo test --workspace`：core 37 + pipeline 3 通过（Docker 测试 #[ignore]）。
+* `scripts/test_docker.sh`：pipeline 3 + sandbox 6 + rstdx security_bars 13 通过（含全部攻击贴回归）。
+* `cargo clippy --workspace --all-targets -- -D warnings`：通过。
+* `scripts/e2e.sh`：输出见 `docs/e2e-output.txt`，全部符合预期；无策略被晋升（双均线门禁通过但 vault 段亏损被拒）。
+* 截图：`docs/screenshots/01-overview.png` … `13-no-docker-banner.png`。
+* 外部审查问题 → 修复映射：`docs/reviews/04-external-review-fixes.md`。
+
+## 已知局限
+ST ±5% 未建模；rstdx 无除权除息数据（真实 TDX 数据为未复权，门禁拒绝）；同时持有密钥并改写锚点的攻击者仍可伪造历史；
+DEV（bwrap）后端隔离较弱且永不可晋升；相近重复识别为启发式；SAMPLE_REGIME 为合成数据，参数为演示调过。
 
 ## 明确不做（P0）
 实盘 / paper trading / IB；进化搜索；分布式；Redis。

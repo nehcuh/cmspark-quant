@@ -106,8 +106,8 @@ async fn dev_backend_results_can_never_be_promoted() {
 async fn docker_pipeline_gate_then_vault_promote() {
     let d = docker().await;
     let (_t, o) = setup().await;
-    let id = add(&o, "posts", "short_term_reversal").await.unwrap();
-    let r = o.backtest(&id, "SAMPLE_RANGE", &d, None).await.unwrap();
+    let id = add(&o, "posts", "ma_crossover").await.unwrap();
+    let r = o.backtest(&id, "SAMPLE_REGIME", &d, None).await.unwrap();
     assert_eq!(r.status, StrategyStatus::GatePassed, "{:?}", r.reasons);
     let job = &o.store.list_jobs(Some(&id)).unwrap()[0];
     let res = job.result.as_ref().unwrap();
