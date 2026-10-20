@@ -1,31 +1,40 @@
 //! CMspark Quant Dashboard (GPUI Kit). Reads the real SQLite store; all mutating
 //! actions go through `cmsq_core::Orchestrator` (same code path as the CLI), so
 //! every action is state-machine checked and audited.
+//!
+//! Long actions (ingest / extract / backtest / promote+vault) run on a background
+//! thread with their own runtime and Orchestrator; the UI thread only polls a
+//! shared progress log, so the window never blocks.
 use cmsq_core::market;
 use cmsq_core::orchestrator::IngestOutcome;
 use cmsq_core::sandbox::{docker::DockerSandboxExecutor, process::ProcessSandboxExecutor, SandboxExecutor};
 use cmsq_core::store::Store;
 use cmsq_core::{extract, AuditEntry, Evaluation, Home, JobRecord, Orchestrator, Strategy, StrategyStatus};
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::*;
 use gpui_kit::base::Disableable;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::*;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Overview,
     Library,
+    Compare,
     Jobs,
     Signals,
     Audit,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [Tab::Overview, Tab::Library, Tab::Jobs, Tab::Signals, Tab::Audit];
+    const ALL: [Tab; 6] = [Tab::Overview, Tab::Library, Tab::Compare, Tab::Jobs, Tab::Signals, Tab::Audit];
     fn label(&self) -> &'static str {
         match self {
             Tab::Overview => "总览 Overview",
             Tab::Library => "策略库 Strategy Library",
+            Tab::Compare => "对比 Compare",
             Tab::Jobs => "沙箱任务 Sandbox Jobs",
             Tab::Signals => "信号 Signals (observe-only)",
             Tab::Audit => "审计 Audit",
@@ -41,7 +50,20 @@ struct Snapshot {
     audit: Vec<AuditEntry>,
     audit_ok: Option<(bool, i64, String)>,
     total_attempts: i64,
+    trials: i64,
     datasets: Vec<market::DataMeta>,
+}
+
+/// Shared between the UI thread and the background job thread.
+#[derive(Default)]
+struct Progress {
+    running: Option<String>,
+    log: Vec<String>,
+    version: u64,
+    finished: Option<String>,
+    /// Some(true) = Docker reachable, Some(false) = not, None = still probing
+    docker: Option<bool>,
+    docker_detail: String,
 }
 
 struct Dashboard {
@@ -51,8 +73,12 @@ struct Dashboard {
     selected: Option<String>,
     symbol_ix: usize,
     pending_promote: Option<String>,
+    confirm: Entity<InputState>,
+    compare: Vec<String>,
     status: String,
-    rt: tokio::runtime::Runtime,
+    progress: Arc<Mutex<Progress>>,
+    seen_version: u64,
+    _poll: Option<Task<()>>,
 }
 
 fn c_bg() -> Hsla { rgb(0x0f1419).into() }
@@ -68,6 +94,7 @@ fn status_color(s: StrategyStatus) -> Hsla {
         StrategyStatus::Extracted => rgb(0x4ea1ff),
         StrategyStatus::Backtesting => rgb(0xd29922),
         StrategyStatus::Evaluated => rgb(0xa371f7),
+        StrategyStatus::GatePassed => rgb(0x2ea8a0),
         StrategyStatus::Promoted => rgb(0x3fb950),
         StrategyStatus::Rejected => rgb(0xf0883e),
         StrategyStatus::Failed => rgb(0xf85149),
@@ -98,23 +125,158 @@ fn card(title: &str, value: String, sub: String, color: Hsla) -> Div {
         .child(div().text_xs().text_color(c_muted()).child(sub))
 }
 
+/// date,equity,... from a job's equity.csv (written by the trusted host scorer)
+fn read_equity(job_dir: &str) -> Vec<(String, f64)> {
+    std::fs::read_to_string(format!("{job_dir}/equity.csv")).unwrap_or_default().lines().skip(1)
+        .filter_map(|l| {
+            let mut it = l.split(',');
+            Some((it.next()?.to_string(), it.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Column-style equity chart built from plain divs. `split` = index where the
+/// vault (final holdout) begins; those columns are drawn in a different colour.
+fn equity_chart(pts: &[(String, f64)], split: Option<usize>, height: f32) -> Div {
+    if pts.len() < 2 {
+        return div().text_xs().text_color(c_muted()).child("no equity curve");
+    }
+    const COLS: usize = 180;
+    let step = (pts.len() as f64 / COLS as f64).max(1.0);
+    let idx: Vec<usize> = (0..COLS.min(pts.len())).map(|i| ((i as f64 * step) as usize).min(pts.len() - 1)).collect();
+    let (lo, hi) = idx.iter().map(|&i| pts[i].1).fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
+    let span = (hi - lo).max(1e-9);
+    let base = pts[0].1;
+    let mut bars = div().flex().items_end().gap(px(1.)).h(px(height)).w_full();
+    for &i in &idx {
+        let v = pts[i].1;
+        let hgt = 4.0 + (height - 4.0) * ((v - lo) / span) as f32;
+        let vault = split.is_some_and(|s| i >= s);
+        let col: Hsla = if vault { rgb(0xa371f7).into() } else if v >= base { rgb(0x3fb950).into() } else { rgb(0xf85149).into() };
+        bars = bars.child(div().flex_1().h(px(hgt)).bg(col).opacity(0.8));
+    }
+    let last = pts.last().unwrap();
+    div().flex().flex_col().gap_1()
+        .child(bars)
+        .child(div().flex().text_xs().text_color(c_muted())
+            .child(div().flex_1().child(pts[0].0.clone()))
+            .child(div().child(format!("¥{:.0} → ¥{:.0} ({:+.1}%)  min ¥{lo:.0} max ¥{hi:.0}{}", base, last.1, (last.1 / base - 1.0) * 100.0,
+                if split.is_some() { "  · purple = vault holdout" } else { "" })))
+            .child(div().flex_1().flex().justify_end().child(last.0.clone())))
+}
+
 fn section(title: &str) -> Div {
     div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(c_text()).mt_2().child(title.to_string())
 }
 
 impl Dashboard {
-    fn new(home: Home) -> Self {
+    fn new(home: Home, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let confirm = cx.new(|cx| InputState::new(window, cx).placeholder("type the confirmation phrase"));
+        let progress = Arc::new(Mutex::new(Progress::default()));
+        {
+            // probe the docker daemon off the UI thread
+            let p = progress.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let r = rt.block_on(DockerSandboxExecutor::connect());
+                let mut g = p.lock().unwrap();
+                g.docker = Some(r.is_ok());
+                g.docker_detail = r.err().map(|e| e.to_string()).unwrap_or_default();
+                g.version += 1;
+            });
+        }
+        let poll = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| loop {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                break;
+            }
+        });
         let mut d = Self {
-            home, tab: Tab::Overview, snap: Snapshot::default(), selected: None, symbol_ix: 0, pending_promote: None,
-            status: "ready".into(), rt: tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap(),
+            home, tab: Tab::Overview, snap: Snapshot::default(), selected: None, symbol_ix: 0, pending_promote: None, confirm, compare: vec![],
+            status: "ready".into(), progress, seen_version: 0, _poll: Some(poll),
         };
         d.reload();
+        if let Some(i) = d.snap.datasets.iter().position(|m| m.symbol == "SAMPLE_REGIME") {
+            d.symbol_ix = i;
+        }
         d
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        let (v, finished) = {
+            let mut g = self.progress.lock().unwrap();
+            (g.version, g.finished.take())
+        };
+        if v != self.seen_version {
+            self.seen_version = v;
+            if let Some(f) = finished {
+                self.status = f;
+                self.reload();
+            }
+            cx.notify();
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.progress.lock().unwrap().running.is_some()
+    }
+
+    fn docker(&self) -> Option<bool> {
+        self.progress.lock().unwrap().docker
+    }
+
+    /// Run `f` on a background thread with its own runtime + Orchestrator; its
+    /// progress lines stream into the UI log.
+    fn run_bg<F>(&mut self, label: String, f: F)
+    where
+        F: FnOnce(&Orchestrator, &tokio::runtime::Runtime) -> anyhow::Result<String> + Send + 'static,
+    {
+        if self.busy() {
+            self.status = "a job is already running".into();
+            return;
+        }
+        {
+            let mut g = self.progress.lock().unwrap();
+            g.running = Some(label.clone());
+            g.log.push(format!("{} ▶ {label}", chrono::Local::now().format("%H:%M:%S")));
+            g.version += 1;
+        }
+        self.status = format!("running: {label}");
+        let (home, p) = (self.home.clone(), self.progress.clone());
+        std::thread::spawn(move || {
+            let push = {
+                let p = p.clone();
+                move |m: &str| {
+                    let mut g = p.lock().unwrap();
+                    g.log.push(format!("{}   {m}", chrono::Local::now().format("%H:%M:%S")));
+                    let n = g.log.len();
+                    if n > 400 {
+                        g.log.drain(..n - 400);
+                    }
+                    g.version += 1;
+                }
+            };
+            let r = (|| {
+                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+                let mut o = Orchestrator::open(home)?;
+                o.progress = Some(Arc::new(push.clone()));
+                f(&o, &rt)
+            })();
+            let msg = match r {
+                Ok(m) => m,
+                Err(e) => format!("{label} failed: {e:#}"),
+            };
+            push(&format!("■ {msg}"));
+            let mut g = p.lock().unwrap();
+            g.running = None;
+            g.finished = Some(msg);
+            g.version += 1;
+        });
     }
 
     fn reload(&mut self) {
         let r = (|| -> anyhow::Result<Snapshot> {
-            let st = Store::open_readonly(&self.home.db())?;
+            let st = Store::open_readonly(&self.home.db(), self.home.audit_config()?)?;
             let v = st.verify_audit()?;
             let mut datasets = vec![];
             if let Ok(rd) = std::fs::read_dir(self.home.data_dir()) {
@@ -131,7 +293,7 @@ impl Dashboard {
             Ok(Snapshot {
                 strategies: st.list_strategies(None)?, jobs: st.list_jobs(None)?, signals: st.list_signals()?,
                 audit: st.audit_entries(None, 200)?, audit_ok: Some((v.ok, v.entries, v.problem.unwrap_or_default())),
-                total_attempts: st.total_attempts()?, datasets,
+                total_attempts: st.total_attempts()?, trials: st.trial_count()?, datasets,
             })
         })();
         match r {
@@ -143,64 +305,49 @@ impl Dashboard {
         }
     }
 
-    fn orch(&self) -> anyhow::Result<Orchestrator> {
-        Orchestrator::open(self.home.clone())
-    }
-
     fn symbol(&self) -> String {
         self.snap.datasets.get(self.symbol_ix % self.snap.datasets.len().max(1)).map(|d| d.symbol.clone()).unwrap_or_else(|| "SAMPLE_TREND".into())
     }
 
     fn act_ingest(&mut self) {
-        self.status = match self.orch().and_then(|o| o.ingest_path(&o.home.drop_dir())) {
-            Ok(v) => {
-                let n = v.iter().filter(|x| matches!(x.1, IngestOutcome::New(_))).count();
-                let bad = v.iter().filter(|x| matches!(x.1, IngestOutcome::Invalid(_))).count();
-                format!("ingest: {} file(s) in drop/, {n} new, {} duplicate, {bad} invalid", v.len(), v.len() - n - bad)
-            }
-            Err(e) => format!("ingest failed: {e:#}"),
-        };
-        self.reload();
+        self.run_bg("ingest drop/".into(), |o, _| {
+            let v = o.ingest_path(&o.home.drop_dir())?;
+            let n = v.iter().filter(|x| matches!(x.1, IngestOutcome::New(_))).count();
+            let bad = v.iter().filter(|x| matches!(x.1, IngestOutcome::Invalid(_))).count();
+            Ok(format!("ingest: {} file(s) in drop/, {n} new, {} duplicate, {bad} invalid", v.len(), v.len() - n - bad))
+        });
     }
 
     fn act_extract(&mut self) {
-        let r: anyhow::Result<usize> = self.rt.block_on(async {
-            let o = self.orch()?;
+        self.run_bg("extract".into(), |o, rt| {
             let ex = extract::from_env()?;
             let ids: Vec<String> = o.store.list_strategies(Some(StrategyStatus::Ingested))?.into_iter().map(|s| s.id).collect();
             for i in &ids {
-                o.extract(i, ex.as_ref()).await?;
+                rt.block_on(o.extract(i, ex.as_ref()))?;
             }
-            Ok(ids.len())
+            Ok(format!("extracted {} strategy(ies)", ids.len()))
         });
-        self.status = match r { Ok(n) => format!("extracted {n} strategy(ies)"), Err(e) => format!("extract failed: {e:#}") };
-        self.reload();
     }
 
-    fn act_backtest(&mut self, id: String) {
+    fn act_backtest(&mut self, id: String, dev: bool) {
         let sym = self.symbol();
-        let r = self.rt.block_on(async {
-            let o = self.orch()?;
-            let exec: Box<dyn SandboxExecutor> = match DockerSandboxExecutor::connect().await {
-                Ok(d) => Box::new(d),
-                Err(_) => Box::new(ProcessSandboxExecutor),
-            };
-            o.backtest(&id, &sym, exec.as_ref(), None).await
+        self.run_bg(format!("backtest {} on {sym}{}", &id[..8], if dev { " (DEV backend)" } else { "" }), move |o, rt| {
+            let exec: Box<dyn SandboxExecutor> = if dev { Box::new(ProcessSandboxExecutor) } else { Box::new(rt.block_on(DockerSandboxExecutor::connect())?) };
+            let s = rt.block_on(o.backtest(&id, &sym, exec.as_ref(), None))?;
+            Ok(format!("backtest {} on {sym}: {} [{}] {}", &s.strategy_id[..8], s.status, s.job_status, s.reasons.join("; ")))
         });
-        self.status = match r {
-            Ok(s) => format!("backtest {} on {sym}: {} [{}] {}", &s.strategy_id[..8], s.status, s.job_status, s.reasons.join("; ")),
-            Err(e) => format!("backtest failed: {e:#}"),
-        };
-        self.reload();
     }
 
-    fn act_promote(&mut self, id: String) {
-        self.status = match self.orch().and_then(|o| o.promote(&id, "user:dashboard", &id[..8])) {
-            Ok(s) => format!("PROMOTED {} (observe-only signal recorded)", &s.id[..8]),
-            Err(e) => format!("promote refused: {e:#}"),
-        };
+    fn act_promote(&mut self, id: String, typed: String) {
         self.pending_promote = None;
-        self.reload();
+        self.run_bg(format!("promote {} (one-time vault holdout)", &id[..8]), move |o, rt| {
+            let exec = rt.block_on(DockerSandboxExecutor::connect())?;
+            let s = rt.block_on(o.promote(&id, "user:dashboard", &typed, &exec))?;
+            Ok(match s.status {
+                StrategyStatus::Promoted => format!("PROMOTED {} — vault passed; observe-only signal recorded", &s.id[..8]),
+                st => format!("{st} {} — {}", &s.id[..8], s.last_reason.unwrap_or_default()),
+            })
+        });
     }
 
     // ---------------- views ----------------
@@ -220,18 +367,24 @@ impl Dashboard {
             );
         }
         let (ok, n, prob) = self.snap.audit_ok.clone().unwrap_or((false, 0, String::new()));
+        let (badge, bcol): (String, Hsla) = match self.docker() {
+            Some(true) => ("sandbox: Docker (hardened) ✓".into(), rgb(0x3fb950).into()),
+            Some(false) => ("sandbox: NO DOCKER ✗".into(), rgb(0xf85149).into()),
+            None => ("sandbox: probing docker…".into(), c_muted()),
+        };
         col.child(div().flex_1())
+            .child(div().text_xs().text_color(bcol).child(badge))
             .child(div().text_xs().text_color(c_muted()).child(format!("workspace: {}", self.home.abs().display())))
             .child(div().text_xs().text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) })
-                .child(if ok { format!("审计链完整 ✓ {n} entries") } else { format!("审计链异常 ✗ {prob}") }))
+                .child(if ok { format!("审计链完整 ✓ {n} entries (HMAC + anchor)") } else { format!("审计链异常 ✗ {prob}") }))
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> Div {
         let sym = self.symbol();
         let ds = self.snap.datasets.iter().find(|d| d.symbol == sym);
         div().flex().items_center().gap_2().p_3().border_b_1().border_color(c_border()).bg(c_panel())
-            .child(Button::new("ingest").primary().label("触发摄入 Ingest drop/").on_click(cx.listener(|this, _, _, cx| { this.act_ingest(); cx.notify(); })))
-            .child(Button::new("extract").label("抽取 Extract").on_click(cx.listener(|this, _, _, cx| { this.act_extract(); cx.notify(); })))
+            .child(Button::new("ingest").primary().disabled(self.busy()).label("触发摄入 Ingest drop/").on_click(cx.listener(|this, _, _, cx| { this.act_ingest(); cx.notify(); })))
+            .child(Button::new("extract").disabled(self.busy()).label("抽取 Extract").on_click(cx.listener(|this, _, _, cx| { this.act_extract(); cx.notify(); })))
             .child(Button::new("symbol").label(format!("数据集: {sym}")).on_click(cx.listener(|this, _, _, cx| { this.symbol_ix += 1; cx.notify(); })))
             .child(div().text_xs().text_color(c_muted()).child(ds.map(|d| format!("{} · {} bars · {}", d.source, d.bars, d.label)).unwrap_or_default()))
             .child(div().flex_1())
@@ -243,15 +396,15 @@ impl Dashboard {
         let running = self.snap.jobs.iter().filter(|j| j.status == "running").count();
         let failed_jobs = self.snap.jobs.iter().filter(|j| j.status != "succeeded" && j.status != "running").count();
         let mut flow = div().flex().gap_2().items_center().flex_wrap();
-        for (i, s) in [StrategyStatus::Ingested, StrategyStatus::Extracted, StrategyStatus::Backtesting, StrategyStatus::Evaluated, StrategyStatus::Promoted].iter().enumerate() {
+        for (i, s) in [StrategyStatus::Ingested, StrategyStatus::Extracted, StrategyStatus::Backtesting, StrategyStatus::Evaluated, StrategyStatus::GatePassed, StrategyStatus::Promoted].iter().enumerate() {
             if i > 0 { flow = flow.child(div().text_color(c_muted()).child("→")); }
             flow = flow.child(chip(format!("{} {}", s, count(*s)), status_color(*s)));
         }
         flow = flow.child(div().text_color(c_muted()).ml_4().child("归档 archive:"))
             .child(chip(format!("Rejected {}", count(StrategyStatus::Rejected)), status_color(StrategyStatus::Rejected)))
             .child(chip(format!("Failed {}", count(StrategyStatus::Failed)), status_color(StrategyStatus::Failed)));
-        let best = self.snap.jobs.iter().filter_map(|j| j.result.as_ref().map(|r| (j, r)))
-            .max_by(|a, b| a.1["out_of_sample"]["sharpe"].as_f64().unwrap_or(-9.0).total_cmp(&b.1["out_of_sample"]["sharpe"].as_f64().unwrap_or(-9.0)));
+        let best = self.snap.jobs.iter().filter(|j| j.kind == "dev").filter_map(|j| j.result.as_ref().map(|r| (j, r)))
+            .max_by(|a, b| a.1["development"]["sharpe"].as_f64().unwrap_or(-9.0).total_cmp(&b.1["development"]["sharpe"].as_f64().unwrap_or(-9.0)));
         let mut recent = div().flex().flex_col().gap_1();
         for a in self.snap.audit.iter().take(12) {
             recent = recent.child(div().flex().gap_3().text_xs()
@@ -264,16 +417,17 @@ impl Dashboard {
         div().flex().flex_col().gap_4().p_4()
             .child(div().flex().gap_3()
                 .child(card("策略总数 Strategies", self.snap.strategies.len().to_string(), format!("{} sample-labelled", self.snap.strategies.iter().filter(|s| s.sample).count()), c_text()))
-                .child(card("已晋升 Promoted", count(StrategyStatus::Promoted).to_string(), format!("{} awaiting confirmation", self.snap.strategies.iter().filter(|s| s.status == StrategyStatus::Evaluated).count()), rgb(0x3fb950).into()))
+                .child(card("已晋升 Promoted", count(StrategyStatus::Promoted).to_string(), format!("{} GatePassed, awaiting typed confirmation + vault", self.snap.strategies.iter().filter(|s| s.status == StrategyStatus::GatePassed).count()), rgb(0x3fb950).into()))
                 .child(card("沙箱任务 Jobs", self.snap.jobs.len().to_string(), format!("{running} running · {failed_jobs} failed/blocked"), c_accent()))
-                .child(card("搜索尝试 Attempts", self.snap.total_attempts.to_string(), "计入多重检验门槛 multiple-testing hurdle".into(), rgb(0xd29922).into())))
+                .child(card("全库试验 Library trials", self.snap.trials.to_string(), format!("N in the Deflated Sharpe Ratio · {} runs", self.snap.total_attempts), rgb(0xd29922).into())))
             .child(section("状态流转 State machine"))
             .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).child(flow))
-            .child(section("最佳样本外 Best OOS (after costs)"))
+            .child(section("最佳开发期 Best development-window result (host-scored, after A-share costs)"))
             .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).text_sm().text_color(c_text()).child(match best {
                 Some((j, r)) => {
                     let title = self.snap.strategies.iter().find(|s| s.id == j.strategy_id).map(|s| s.title.clone()).unwrap_or_default();
-                    format!("{title} · {} · OOS return {} · Sharpe {} · MaxDD {} · data: {}", j.symbol, pct(&r["out_of_sample"], "total_return"), num(&r["out_of_sample"], "sharpe"), pct(&r["out_of_sample"], "max_drawdown"), j.data_source)
+                    format!("{title} · {} · net return {} · Sharpe {} · DSR {} (N={}) · MaxDD {} · data: {}", j.symbol, pct(&r["development"], "total_return"), num(&r["development"], "sharpe"),
+                        r["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or_default(), r["dsr"]["trials"], pct(&r["development"], "max_drawdown"), j.data_source)
                 }
                 None => "no completed backtests yet".into(),
             }))
@@ -295,7 +449,20 @@ impl Dashboard {
                         .child(div().text_xs().text_color(c_muted()).child(format!("{} · try {}", &s.id[..8], s.attempts)))
                         .when(s.sample, |d| d.child(chip("SAMPLE", c_muted()))))
                     .child(div().mt_1().text_sm().text_color(c_text()).child(s.title.clone()))
-                    .child(div().text_xs().text_color(c_muted()).child(format!("{} · {}", s.source_site, s.author.clone().unwrap_or_default()))),
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().flex_1().text_xs().text_color(c_muted()).child(format!("{} · {}", s.source_site, s.author.clone().unwrap_or_default())))
+                        .child({
+                            let on = self.compare.contains(&s.id);
+                            let cid = s.id.clone();
+                            div().id(SharedString::from(format!("cmp-{}", s.id))).px_2().rounded_md().border_1().text_xs().cursor_pointer()
+                                .border_color(if on { c_accent() } else { c_border() }).text_color(if on { c_accent() } else { c_muted() })
+                                .child(if on { "✓ compare" } else { "+ compare" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(p) = this.compare.iter().position(|x| x == &cid) { this.compare.remove(p); } else { this.compare.push(cid.clone()); }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                        })),
             );
         }
         div().flex().size_full().min_w_0().overflow_hidden().child(list).child(self.detail(cx))
@@ -307,7 +474,9 @@ impl Dashboard {
             return base.child(div().text_color(c_muted()).child("select a strategy"));
         };
         let jobs: Vec<&JobRecord> = self.snap.jobs.iter().filter(|j| j.strategy_id == s.id).collect();
-        let ev: Option<Evaluation> = Store::open_readonly(&self.home.db()).ok().and_then(|st| st.latest_evaluation(&s.id).ok().flatten());
+        let st = self.home.audit_config().ok().and_then(|c| Store::open_readonly(&self.home.db(), c).ok());
+        let ev: Option<Evaluation> = st.as_ref().and_then(|st| st.latest_evaluation(&s.id).ok().flatten());
+        let timeline: Vec<AuditEntry> = st.as_ref().and_then(|st| st.audit_entries(Some(&s.id), 200).ok()).unwrap_or_default();
         let id = s.id.clone();
         let url = s.source_url.clone();
         let raw = s.raw_path.clone();
@@ -316,7 +485,7 @@ impl Dashboard {
                 .child(div().text_lg().font_weight(FontWeight::BOLD).text_color(c_text()).child(s.title.clone())))
             .child(div().text_xs().text_color(c_muted()).child(format!("id {} · ingested {} · scraped {} · attempts {}", s.id, s.ingested_at.format("%Y-%m-%d %H:%M"), s.scraped_at.clone().unwrap_or_default(), s.attempts)));
         if let Some(r) = &s.last_reason {
-            let good = matches!(s.status, StrategyStatus::Evaluated | StrategyStatus::Promoted);
+            let good = matches!(s.status, StrategyStatus::GatePassed | StrategyStatus::Promoted);
             d = d.child(div().p_2().rounded_md().bg(if good { rgb(0x16261b) } else { rgb(0x2a1d1d) }).text_sm()
                 .text_color(if good { rgb(0x7ee2a8) } else { rgb(0xffb4a8) }).child(format!("{} {r}", if good { "状态 note:" } else { "原因 reason:" })));
         }
@@ -348,72 +517,160 @@ impl Dashboard {
             }
         }
         // actions
-        let can_bt = matches!(s.status, StrategyStatus::Extracted | StrategyStatus::Rejected | StrategyStatus::Failed | StrategyStatus::Evaluated) && s.extracted.as_ref().is_some_and(|e| e.code.is_some());
-        let can_promote = s.status == StrategyStatus::Evaluated && ev.as_ref().is_some_and(|e| e.passed);
-        let id2 = id.clone();
+        let busy = self.busy();
+        let docker = self.docker() == Some(true);
+        let has_code = s.extracted.as_ref().is_some_and(|e| e.code.is_some());
+        let can_bt = !busy && has_code && matches!(s.status, StrategyStatus::Extracted | StrategyStatus::Rejected | StrategyStatus::Failed | StrategyStatus::GatePassed);
+        let can_promote = !busy && docker && s.status == StrategyStatus::GatePassed && ev.as_ref().is_some_and(|e| e.passed);
+        let (id2, id2b) = (id.clone(), id.clone());
         let mut actions = div().flex().gap_2().items_center().mt_2()
-            .child(Button::new("bt").primary().disabled(!can_bt).label(if s.attempts > 0 { format!("重跑回测 Re-run on {}", self.symbol()) } else { format!("提交回测 Backtest on {}", self.symbol()) })
-                .on_click(cx.listener(move |this, _, _, cx| { this.act_backtest(id2.clone()); cx.notify(); })));
+            .child(Button::new("bt").primary().disabled(!can_bt || !docker).label(if s.attempts > 0 { format!("重跑回测 Re-run on {} (Docker)", self.symbol()) } else { format!("提交回测 Backtest on {} (Docker)", self.symbol()) })
+                .on_click(cx.listener(move |this, _, _, cx| { this.act_backtest(id2.clone(), false); cx.notify(); })))
+            .child(Button::new("bt-dev").disabled(!can_bt).label("DEV run (bwrap, never promotable)")
+                .on_click(cx.listener(move |this, _, _, cx| { this.act_backtest(id2b.clone(), true); cx.notify(); })));
         let id3 = id.clone();
-        actions = actions.child(Button::new("promote").disabled(!can_promote).label("晋升… Promote").on_click(cx.listener(move |this, _, _, cx| { this.pending_promote = Some(id3.clone()); cx.notify(); })));
+        actions = actions.child(Button::new("promote").disabled(!can_promote).label("晋升… Promote (vault)").on_click(cx.listener(move |this, _, window, cx| {
+            this.pending_promote = Some(id3.clone());
+            this.confirm.update(cx, |st, cx| st.set_value("", window, cx));
+            cx.notify();
+        })));
         d = d.child(actions);
         if self.pending_promote.as_deref() == Some(&s.id) {
+            let phrase = Orchestrator::confirmation_phrase(s);
+            let typed = self.confirm.read(cx).value().to_string();
+            let matches = typed.trim() == phrase;
             let id4 = id.clone();
             d = d.child(div().p_3().rounded_lg().border_1().border_color(rgb(0xd29922)).bg(rgb(0x2a2412)).flex().flex_col().gap_2()
-                .child(div().text_sm().text_color(rgb(0xf2cc60)).child(format!("确认台 Confirmation: promote {} ? Gate passed. Signals stay OBSERVE-ONLY (no broker). This is audited as user:dashboard.", &s.id[..8])))
+                .child(div().text_sm().text_color(rgb(0xf2cc60)).child(format!("确认台 Confirmation desk — \"{}\" passed the gate on development data. Promoting runs the ONE-TIME vault holdout ({} bars never shown to the strategy); a vault failure rejects it permanently. Signals stay OBSERVE-ONLY (no broker). Audited as user:dashboard.", s.title, "last 20%")))
+                .child(div().text_sm().text_color(c_text()).child(format!("Type  {phrase}  to enable the button:")))
+                .child(div().flex().gap_2().items_center()
+                    .child(div().w(px(260.)).child(Input::new(&self.confirm)))
+                    .child(div().text_xs().text_color(if matches { rgb(0x3fb950) } else { rgb(0xf85149) }).child(if matches { "✓ matches" } else { "does not match yet" })))
                 .child(div().flex().gap_2()
-                    .child(Button::new("confirm").primary().label(format!("确认晋升 Confirm {}", &s.id[..8])).on_click(cx.listener(move |this, _, _, cx| { this.act_promote(id4.clone()); cx.notify(); })))
+                    .child(Button::new("confirm").primary().disabled(!matches).label("确认晋升并运行 vault  Confirm & run vault").on_click(cx.listener(move |this, _, _, cx| {
+                        let typed = this.confirm.read(cx).value().to_string();
+                        this.act_promote(id4.clone(), typed);
+                        cx.notify();
+                    })))
                     .child(Button::new("cancel").label("取消 Cancel").on_click(cx.listener(|this, _, _, cx| { this.pending_promote = None; this.status = "promotion cancelled".into(); cx.notify(); })))));
         }
+        // state-transition timeline (from the audit chain)
+        d = d.child(section("状态时间线 State timeline (audit)"));
+        let mut tl = div().flex().flex_col().gap_0p5().pl_2().border_l_2().border_color(c_border());
+        for a in timeline.iter().rev().filter(|a| a.action.starts_with("transition") || a.action.starts_with("vault") || a.action == "evaluate" || a.action.starts_with("promote") || a.action == "ingest" || a.action == "job_reaped") {
+            let reason = a.details["reason"].as_str().map(|r| format!(" — {}", r.chars().take(140).collect::<String>())).unwrap_or_default();
+            let label = a.action.trim_start_matches("transition:").to_string();
+            tl = tl.child(div().flex().gap_2().text_xs()
+                .child(div().w(px(110.)).flex_none().text_color(c_muted()).child(local(&a.ts)))
+                .child(div().w(px(90.)).flex_none().text_color(c_accent()).child(a.actor.clone()))
+                .child(div().flex_1().min_w_0().text_color(if a.success { c_text() } else { rgb(0xf85149).into() }).child(format!("{label}{reason}"))));
+        }
+        d = d.child(tl);
         if let Some(ev) = &ev {
-            d = d.child(section(&format!("门禁 Gate: {}", if ev.passed { "PASSED ✓" } else { "FAILED ✗" })));
+            d = d.child(section(&format!("门禁 Gate: {} (inputs computed on the host; nothing read from the container)", if ev.passed { "PASSED ✓" } else { "FAILED ✗" })));
             if let Some(cs) = ev.checks["checks"].as_array() {
                 for c in cs {
                     let ok = c["ok"].as_bool().unwrap_or(false);
                     d = d.child(div().text_xs().text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) })
-                        .child(format!("{} {} — {}", if ok { "✓" } else { "✗" }, c["check"].as_str().unwrap_or(""), c["detail"].as_str().unwrap_or(""))));
+                        .child(format!("{} {} — {}", if ok { "✓" } else { "✗" }, c["name"].as_str().unwrap_or(""), c["detail"].as_str().unwrap_or(""))));
                 }
             }
         }
-        d = d.child(section("回测与日志 Backtests & logs"));
+        // equity curve: vault run (full series) if any, else the latest dev run
+        let vault = jobs.iter().find(|j| j.kind == "vault" && j.status == "succeeded");
+        let devj = jobs.iter().find(|j| j.kind == "dev" && j.status == "succeeded");
+        if let Some(j) = vault.or(devj) {
+            let pts = read_equity(&j.job_dir);
+            let split = if j.kind == "vault" { devj.and_then(|dj| dj.result.as_ref()).and_then(|r| r["split"]["development"]["bars"].as_u64()).map(|b| b as usize) } else { None };
+            d = d.child(section(&format!("权益曲线 Equity curve — {} run, ¥1,000,000 start, next-open fills", j.kind)))
+                .child(div().p_2().rounded_md().bg(c_panel()).border_1().border_color(c_border()).child(equity_chart(&pts, split, 120.)));
+        }
+        d = d.child(section("回测与日志 Runs & logs"));
         for j in jobs {
-            let m = j.result.as_ref().map(|r| r["out_of_sample"].clone()).unwrap_or_default();
-            let split = j.result.as_ref().map(|r| format!("train {}..{} | test {}..{}", r["split"]["train"]["start"].as_str().unwrap_or(""), r["split"]["train"]["end"].as_str().unwrap_or(""), r["split"]["test"]["start"].as_str().unwrap_or(""), r["split"]["test"]["end"].as_str().unwrap_or(""))).unwrap_or_default();
-            let stderr = std::fs::read_to_string(format!("{}/stderr.log", j.job_dir)).unwrap_or_default();
-            let tail: String = stderr.lines().rev().take(4).map(|l| if l.chars().count() > 160 { format!("{}…", l.chars().take(160).collect::<String>()) } else { l.to_string() }).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            let r = j.result.clone().unwrap_or_default();
+            let m = if j.kind == "vault" { r["vault"].clone() } else { r["development"].clone() };
             d = d.child(div().p_2().rounded_md().bg(c_panel()).border_1().border_color(c_border()).flex().flex_col().gap_1()
-                .child(div().text_xs().text_color(c_text()).child(format!("job {} · {} · {} · {} · {} ms · {}", &j.id[..8], j.backend, j.status, j.symbol, j.duration_ms.unwrap_or(0), j.data_source)))
-                .when(j.status == "succeeded" && !split.is_empty(), |x| x.child(div().text_xs().text_color(c_muted()).child(split)))
-                .when(j.status == "succeeded", |x| x.child(div().text_xs().text_color(c_accent()).child(format!("OOS net return {} · Sharpe {} · MaxDD {} · turnover {}x/yr", pct(&m, "total_return"), num(&m, "sharpe"), pct(&m, "max_drawdown"), num(&m, "turnover_annual")))))
-                .when(j.status == "succeeded" && j.result.is_some(), |x| {
-                    let r = j.result.as_ref().unwrap();
-                    x.child(div().text_xs().text_color(c_muted()).child(format!("2x cost stress {} · buy&hold OOS {} · in-sample {} · costs: comm {} / stamp(sell) {} / slip {} · look-ahead probe: {}",
-                        pct(&r["out_of_sample_cost_2x"], "total_return"), pct(&r["buy_and_hold_oos"], "total_return"), pct(&r["in_sample"], "total_return"),
-                        r["cost_model"]["commission"], r["cost_model"]["stamp_duty_sell"], r["cost_model"]["slippage"],
-                        if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "FLAGGED" })))
-                     .when(r["data_caveats"].as_array().is_some_and(|a| !a.is_empty()), |x| x.child(div().text_xs().text_color(rgb(0xd29922)).child(format!("⚠ {}", r["data_caveats"].as_array().unwrap().iter().filter_map(|c| c.as_str()).collect::<Vec<_>>().join(" · ")))))
-                })
-                .when(!tail.is_empty(), |x| x.child(div().text_xs().font_family("monospace").text_color(rgb(0xffb4a8)).child(tail)))
-                .child(div().text_xs().text_color(c_muted()).child(format!("logs: {}/{{stdout,stderr}}.log", j.job_dir))));
+                .child(div().text_xs().text_color(c_text()).child(format!("{} job {} · {} · {} · {} · {} ms · {}", j.kind, &j.id[..8], j.backend, j.status, j.symbol, j.duration_ms.unwrap_or(0), j.data_source)))
+                .child(div().text_xs().text_color(c_muted()).child(format!("runner (from backend): {}", j.runner_identity.clone().unwrap_or_else(|| "-".into()))))
+                .when(j.status == "succeeded" && j.kind == "dev", |x| x
+                    .child(div().text_xs().text_color(c_muted()).child(format!("dev window {}..{} ({} bars, {} warm-up) · vault {}..{} kept back",
+                        r["split"]["development"]["start"].as_str().unwrap_or(""), r["split"]["development"]["end"].as_str().unwrap_or(""), r["split"]["development"]["bars"], r["split"]["development"]["warmup_bars"],
+                        r["split"]["vault"]["start"].as_str().unwrap_or(""), r["split"]["vault"]["end"].as_str().unwrap_or(""))))
+                    .child(div().text_xs().text_color(c_accent()).child(format!("net return {} · Sharpe {} · MaxDD {} · DSR {} (N={}) · folds +{}/{} · 2x costs {} · buy&hold {}",
+                        pct(&m, "total_return"), num(&m, "sharpe"), pct(&m, "max_drawdown"), r["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or_default(), r["dsr"]["trials"],
+                        r["walk_forward_folds"].as_array().map(|f| f.iter().filter(|x| x["total_return"].as_f64().unwrap_or(0.0) > 0.0).count()).unwrap_or(0), r["walk_forward_folds"].as_array().map(|f| f.len()).unwrap_or(0),
+                        pct(&r["development_cost_2x"], "total_return"), pct(&r["buy_and_hold"], "total_return"))))
+                    .child(div().text_xs().text_color(c_muted()).child(format!("{} · trades {} · blocked limit-up {} / limit-down {} / suspended {} · costs paid ¥{:.0} · probe: {} containers, {}",
+                        r["execution"].as_str().unwrap_or(""), r["trades"], r["blocked"]["limit_up"], r["blocked"]["limit_down"], r["blocked"]["suspended"], r["costs_paid"].as_f64().unwrap_or(0.0),
+                        r["lookahead_probe"]["containers"], if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "LOOK-AHEAD" }))))
+                .when(j.status == "succeeded" && j.kind == "vault", |x| x.child(div().text_xs().text_color(rgb(0xa371f7)).child(format!("vault {}..{} · net return {} · Sharpe {} · {}",
+                    m["start"].as_str().unwrap_or(""), m["end"].as_str().unwrap_or(""), pct(&m, "total_return"), num(&m, "sharpe"), if r["passed"].as_bool() == Some(true) { "PASSED" } else { "FAILED" }))))
+                .when(j.error.is_some(), |x| x.child(div().text_xs().font_family("monospace").text_color(rgb(0xffb4a8)).child(j.error.clone().unwrap_or_default())))
+                .child(div().text_xs().text_color(c_muted()).child(format!("logs: {}/variants/NN/{{stdout,stderr}}.log", j.job_dir))));
         }
         d
+    }
+
+    fn compare_view(&self) -> Stateful<Div> {
+        let mut d = div().id("compare").p_4().flex().flex_col().gap_3().overflow_y_scroll().size_full();
+        if self.compare.is_empty() {
+            return d.child(div().text_color(c_muted()).child("在策略库中点击 “+ compare” 选择 2–4 个策略进行对比 · pick strategies with “+ compare” in the library"));
+        }
+        let cols = ["STRATEGY", "STATUS", "SYMBOL", "NET RET", "SHARPE", "DSR (N)", "FOLDS+", "MAX DD", "2x COST", "VAULT"];
+        let w = [260., 90., 120., 80., 70., 90., 60., 80., 80., 90.];
+        let mut hdr = div().flex().gap_2().text_xs().text_color(c_muted()).pb_1().border_b_1().border_color(c_border());
+        for (c, w) in cols.iter().zip(w) {
+            hdr = hdr.child(div().w(px(w)).flex_none().child(*c));
+        }
+        d = d.child(hdr);
+        for id in &self.compare {
+            let Some(s) = self.snap.strategies.iter().find(|s| &s.id == id) else { continue };
+            let dev = self.snap.jobs.iter().find(|j| &j.strategy_id == id && j.kind == "dev" && j.status == "succeeded");
+            let vault = self.snap.jobs.iter().find(|j| &j.strategy_id == id && j.kind == "vault" && j.status == "succeeded");
+            let r = dev.and_then(|j| j.result.clone()).unwrap_or_default();
+            let m = &r["development"];
+            let folds = r["walk_forward_folds"].as_array().map(|f| format!("{}/{}", f.iter().filter(|x| x["total_return"].as_f64().unwrap_or(0.0) > 0.0).count(), f.len())).unwrap_or("-".into());
+            let vret = vault.and_then(|j| j.result.as_ref()).map(|v| pct(&v["vault"], "total_return")).unwrap_or("not run".into());
+            let vals = [s.title.clone(), s.status.to_string(), dev.map(|j| j.symbol.clone()).unwrap_or("-".into()), pct(m, "total_return"), num(m, "sharpe"),
+                r["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3} ({})", r["dsr"]["trials"])).unwrap_or("-".into()), folds, pct(m, "max_drawdown"), pct(&r["development_cost_2x"], "total_return"), vret];
+            let mut row = div().flex().gap_2().text_xs().py_1();
+            for (i, (v, w)) in vals.iter().zip(w).enumerate() {
+                row = row.child(div().w(px(w)).flex_none().overflow_hidden().text_color(if i == 1 { status_color(s.status) } else { c_text() }).child(v.clone()));
+            }
+            d = d.child(row);
+            if let Some(j) = vault.or(dev) {
+                d = d.child(div().p_2().rounded_md().bg(c_panel()).border_1().border_color(c_border()).child(equity_chart(&read_equity(&j.job_dir), None, 60.)));
+            }
+        }
+        d
+    }
+
+    fn log_panel(&self) -> Div {
+        let g = self.progress.lock().unwrap();
+        let mut p = div().h(px(132.)).flex_none().border_t_1().border_color(c_border()).bg(rgb(0x0b0f14)).p_2().flex().flex_col().gap_0p5().overflow_hidden()
+            .child(div().text_xs().text_color(if g.running.is_some() { rgb(0xd29922).into() } else { c_muted() })
+                .child(match &g.running { Some(l) => format!("● RUNNING (background thread, UI stays live): {l}"), None => "job log · idle".into() }));
+        for l in g.log.iter().rev().take(7).collect::<Vec<_>>().into_iter().rev() {
+            p = p.child(div().text_xs().font_family("monospace").text_color(rgb(0xc9d1d9)).child(l.clone()));
+        }
+        p
     }
 
     fn jobs(&self) -> Stateful<Div> {
         let mut t = div().id("jobs").p_4().flex().flex_col().gap_1().overflow_y_scroll().size_full()
             .child(div().flex().gap_2().text_xs().text_color(c_muted()).pb_2().border_b_1().border_color(c_border())
                 .child(div().w(px(80.)).flex_none().child("JOB")).child(div().w(px(150.)).flex_none().child("BACKEND")).child(div().w(px(150.)).flex_none().child("STATUS"))
-                .child(div().w(px(120.)).flex_none().child("SYMBOL")).child(div().w(px(80.)).flex_none().child("MS")).child(div().w(px(110.)).flex_none().child("OOS RET")).child(div().flex_1().child("STRATEGY / ERROR")));
+                .child(div().w(px(120.)).flex_none().child("SYMBOL")).child(div().w(px(80.)).flex_none().child("MS")).child(div().w(px(110.)).flex_none().child("NET RET")).child(div().flex_1().child("STRATEGY / ERROR")));
         for j in &self.snap.jobs {
             let title = self.snap.strategies.iter().find(|s| s.id == j.strategy_id).map(|s| s.title.clone()).unwrap_or_default();
             let ok = j.status == "succeeded";
             t = t.child(div().flex().gap_2().text_xs().py_1().border_b_1().border_color(c_border())
-                .child(div().w(px(80.)).flex_none().text_color(c_text()).child(j.id[..8].to_string()))
+                .child(div().w(px(80.)).flex_none().text_color(c_text()).child(format!("{} {}", &j.id[..6], j.kind)))
                 .child(div().w(px(150.)).flex_none().text_color(if j.backend == "docker" { c_accent() } else { rgb(0xd29922).into() }).child(j.backend.clone()))
                 .child(div().w(px(150.)).flex_none().text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) }).child(j.status.clone()))
                 .child(div().w(px(120.)).flex_none().text_color(c_text()).child(j.symbol.clone()))
                 .child(div().w(px(80.)).flex_none().text_color(c_muted()).child(j.duration_ms.unwrap_or(0).to_string()))
-                .child(div().w(px(110.)).flex_none().text_color(c_text()).child(j.result.as_ref().map(|r| pct(&r["out_of_sample"], "total_return")).unwrap_or("-".into())))
+                .child(div().w(px(110.)).flex_none().text_color(c_text()).child(j.result.as_ref().map(|r| pct(if j.kind == "vault" { &r["vault"] } else { &r["development"] }, "total_return")).unwrap_or("-".into())))
                 .child(div().flex_1().min_w_0().overflow_hidden().text_color(c_muted()).child(format!("{title}{}", j.error.as_ref().map(|e| format!("  ✗ {e}")).unwrap_or_default()))));
         }
         t
@@ -456,6 +713,7 @@ impl Render for Dashboard {
         let body: AnyElement = match self.tab {
             Tab::Overview => div().id("ov").size_full().overflow_y_scroll().child(self.overview()).into_any_element(),
             Tab::Library => self.library(cx).into_any_element(),
+            Tab::Compare => self.compare_view().into_any_element(),
             Tab::Jobs => self.jobs().into_any_element(),
             Tab::Signals => self.signals().into_any_element(),
             Tab::Audit => self.audit().into_any_element(),
@@ -464,14 +722,18 @@ impl Render for Dashboard {
             .child(self.sidebar(cx))
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().overflow_hidden()
                 .child(self.toolbar(cx))
+                .when(self.docker() == Some(false), |x| x.child(div().px_3().py_2().bg(rgb(0x5a1e1e)).border_b_1().border_color(rgb(0xf85149)).text_sm().text_color(rgb(0xffd7d0))
+                    .child(format!("⚠ 未连接 Docker — NOT RUNNING ON DOCKER: {}. Only DEV (bwrap) runs are possible; their results can never pass the gate or be promoted. See README “Docker setup”.",
+                        self.progress.lock().unwrap().docker_detail.chars().take(120).collect::<String>()))))
                 .child(div().flex_1().min_h_0().child(body))
+                .child(self.log_panel())
                 .child(div().px_3().py_1().border_t_1().border_color(c_border()).bg(c_panel()).text_xs().text_color(c_muted()).child(self.status.clone())))
     }
 }
 
 fn main() {
     let home = Home::from_env();
-    if let Err(e) = home.init().and_then(|_| Store::open(&home.db()).map(|_| ())) {
+    if let Err(e) = Orchestrator::open(home.clone()) {
         eprintln!("cannot open workspace {}: {e:#}", home.root.display());
         std::process::exit(1);
     }
@@ -483,6 +745,6 @@ fn main() {
             titlebar: Some(TitlebarOptions { title: Some("CMspark Quant Dashboard".into()), ..Default::default() }),
             ..Default::default()
         };
-        gpui_kit::open_window(opts, cx, |_, cx| cx.new(|_| Dashboard::new(home.clone()))).expect("open window");
+        gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Dashboard::new(home.clone(), window, cx))).expect("open window");
     });
 }
