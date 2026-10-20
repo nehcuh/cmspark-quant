@@ -1,4 +1,4 @@
-# CMspark Quant — 项目状态（P0，2026-10-20）
+# CMspark Quant — 项目状态（P0–P3，2026-10-20）
 
 ## 1. 产品做什么
 从量化论坛/博客抓取的策略帖 → 抽取代码与参数 → 在**加固 Docker 沙箱**里只输出目标仓位 →
@@ -10,10 +10,12 @@
 ```bash
 cargo --version                      # 必须是 1.99.1（~/.cargo/bin 放在 PATH 前面）
 sudo usermod -aG docker $USER        # 或在当前 shell 里用 sg docker -c "<命令>"
-scripts/build_runner.sh              # 构建 cmsq-runner:2.1.0，并记录镜像 digest
+scripts/db_up.sh                     # 启动独立部署的 PostgreSQL+TimescaleDB（docker compose），口令写入 ~/.config/cmsq/db.env
+scripts/build_runner.sh              # 构建 cmsq-runner:2.2.0（含 vn.py shim），并记录镜像 digest
+scripts/test_pg.sh                   # PostgreSQL 并发/权限/篡改测试
 cargo test --workspace
 scripts/test_docker.sh               # Docker/bwrap 测试与全部攻击回归
-scripts/e2e.sh                       # 合成数据完整闭环
+scripts/e2e.sh                       # 合成数据完整闭环（默认 PostgreSQL；CMSQ_DB=sqlite 走离线 SQLite）
 # 真实数据：把 TUSHARE_TOKEN=... 写进 ~/.config/cmsq/secrets.env（切勿提交）
 CMSQ_PYTHON=<含 akshare 的 python> scripts/e2e_real.sh
 scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
@@ -55,7 +57,7 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 | HMAC 审计链 + 外部锚点 | 改写、截断、无密钥重链，均被检出 |
 | DSR 稳健方差池（剔除作弊 trial，用 MAD），N 下限 20 | 防止作弊结果撑大方差、压低门槛 |
 
-截图见 `docs/screenshots/01-overview.png` … `14-market-data.png`。
+截图见 `docs/screenshots/01-overview.png` … `18-futures-sweep-vnpy.png`。
 
 ## 5. 已知缺口
 * fork bomb 的 `pids_exhausted` 标签是启发式判断；稀疏偷看只能概率性抓到。
@@ -66,7 +68,49 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * e2e 的 vault 演示放在独立工作区，并把 DSR 下限设为 1，否则没有策略能通过门禁。
 * 截图 06 和 07 是同一时刻的画面（vault 运行很快，几乎抓不到"进行中"的状态）。
 
-## 6. 后续阶段（依据 research-cta-data.md）
+## 6. 本轮完成（分支 p1-onward）
+### P0 存储与并发
+* 主存储改为**独立部署的 PostgreSQL 16 + TimescaleDB**（`deploy/docker-compose.yml`，镜像按 digest 固定，仅 127.0.0.1）。
+  sqlx 连接池 + 内嵌迁移；SQLite 只保留给测试与离线（`CMSQ_DB=sqlite`），两种后端共用同一套 SQL 与语义。
+* 最小权限：迁移用 `cmsq_owner`，运行时用 `cmsq_app`（证据表只能 INSERT/SELECT，不能删改、TRUNCATE、停用或删除触发器）。
+  每个工作区一个 schema；`bars`/`ticks` 为 hypertable。
+* 并发正确性：审计追加持 advisory lock + 锚点文件锁，序号与锚点严格有序；trial 账本插入与快照原子化，每个 trial 看到不同的 N；
+  vault 去重与占用在同一把锁内完成，判定只能写一次，之后触发器冻结；状态迁移用 CAS。
+  竞争测试 `tests/store_concurrency.rs`：SQLite 4 项 + PostgreSQL 7 项，全部通过。
+* 并发能力：回测/扫描/组合的各个变体并行跑，用容器槽位信号量限流（`CMSQ_CONTAINER_SLOTS`，默认 CPU 数）；
+  `data fetch A,B,C --concurrency N` 并发拉取，tushare 限速 400 次/分钟，akshare 串行且间隔 ≥1 秒。
+### P1 组合与参数扫描
+* `cmsq sweep`（最多 64 个点，只允许已知参数）：**每个点都计入 DSR 试验账本**；最优点按最终账本重新计算 DSR。
+* `cmsq portfolio`：单账户共享现金、先卖后买；分配方式为等权 / 逆波动率（无前视）/ 固定权重；只用共同开发期。
+  组合门禁只作参考，组合不可晋升。`cmsq backtest --symbols A,B --workers N` 并发跑多标的。
+### P2 vn.py 兼容层与期货规则
+* 沙箱内提供 `CtaTemplate`/`ArrayManager`/`BarGenerator` shim（runner 2.2.0），vn.py 风格策略不改代码即可运行，仍然只输出仓位。
+* 期货：`FUT_<品种>` 主力连续（按持仓量换月，连续 3 日确认，次日生效）、合约乘数、保证金上限、最小变动价位、涨跌停、
+  夜盘交易日归属、逐合约手续费、换月两腿成本；空头仓位 [-1,1]。akshare 逐合约交叉校验，覆盖不足 90% 时记为 partial。
+### P3 CTP 行情（只观察）
+* `cmsq md run/probe`；`--features ctp` 启用 ctp2rs MdApi（只引用行情 API，有单元测试守护）；tick 校验、1 分钟 K 线、落库并写审计。
+* **本机连不上 openctp 7x24（TCP 超时）**，所以用内置回放源（带坏数据）做测试，实时源未经实网验证。
+### Dashboard
+新增"参数扫描/组合"和"期货/CTP"两页；侧栏显示数据库后端。新截图为 `15-sweep`、`16-portfolio`、`17-futures-ctp`、`18-futures-sweep-vnpy`，并重拍了 `01-overview`。
+
+## 7. 本轮真实数据结果（2026-10-20 21:58 UTC+8，PostgreSQL）
+* 参数扫描：双均线在 SH600519 上 6 个点，最优 fast=10/slow=60，Sharpe 0.69，DSR 0.432（N=20），被拒。
+* 组合：SH600519+SZ000858+SH600036，逆波动率(60)，收益 +39.30%，Sharpe 0.39，DSR 0.179；跑输等权持有（+72.8%）。
+* 期货 FUT_RB（1100 根，2022-04 至 2026-10，13 次换月，akshare 逐合约校验 1100/1100 一致）：
+  唐奇安突破 -9.77% / Sharpe -0.11；vn.py 双均线 -12.64% / -0.18。唐奇安扫描 n=10 最好，+11.78%，Sharpe 0.32；
+  vn.py 扫描最好 +0.32%。全部被拒，0 个晋升。
+* A 股交叉校验三只全部为 ok（tushare 对 akshare）。完整输出见 `docs/e2e-real-output.txt`。
+
+## 8. 本轮审查发现并已修复
+* 期货空头的平均敞口为负，被"最低敞口"规则误杀 → 改为总敞口 |x|。
+* 新浪只保留约 5 年合约，导致整段期货校验失败 → 改为逐段容错，并计算覆盖率（不足 90% 记 partial，门禁不通过）。
+* 期货 vault 结果写的是 A 股的执行标签 → 已修正。
+* DEV(bwrap) 后端缺少 vnpy_shim.py → 已随 runner 一起写入。
+* Dashboard 原来只读 SQLite → 改为按配置只读打开（PG 用运行时角色，不跑迁移）。
+* e2e 中 `| head` 触发 SIGPIPE 导致误报失败 → 改为先写文件再看。
+* 新增缺口：CLI 进程从 db.env 读取了 owner URL（只用于迁移）；交易日归属没有节假日表；回放源不能代替实网验证。
+
+## 9. 后续阶段
 * **P1：组合与参数扫描。** 多标的组合回测、参数网格扫描。每个参数点都计入全库 trial 账本和 DSR 的 N，
   并配合 walk-forward 与 vault 纪律，避免把扫描变成过拟合。同时补上 BaoStock 第二校验源，在国内节点验证 rstdx。
 * **P2：vn.py 兼容的策略层与期货规则。** 在沙箱里提供 `CtaTemplate` / `ArrayManager` 兼容 shim（只复刻接口，MIT），
