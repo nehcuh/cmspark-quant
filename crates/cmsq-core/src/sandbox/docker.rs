@@ -11,6 +11,15 @@ use std::time::{Duration, Instant};
 /// no-new-privileges, non-root user 10001, pids/memory(no swap)/cpu limits,
 /// tmpfs /tmp (noexec), only `/out` writable, never the docker socket, hard timeout
 /// (kill + force remove).
+/// Run as the (unprivileged, non-root) owner of the writable `/out` mount so no
+/// world-writable directories are needed; never root.
+pub fn run_as_user(req: &SandboxRequest) -> String {
+    use std::os::unix::fs::MetadataExt;
+    req.mounts.iter().find(|m| !m.read_only).and_then(|m| std::fs::metadata(&m.host).ok())
+        .map(|md| (md.uid(), md.gid())).filter(|(u, _)| *u != 0)
+        .map(|(u, g)| format!("{u}:{g}")).unwrap_or_else(|| "10001:10001".into())
+}
+
 pub struct DockerSandboxExecutor {
     docker: Docker,
 }
@@ -55,7 +64,7 @@ impl SandboxExecutor for DockerSandboxExecutor {
         let host = Self::host_config(req);
         let policy = serde_json::json!({
             "backend": "docker", "network_mode": "none", "readonly_rootfs": true, "cap_drop": ["ALL"],
-            "no_new_privileges": true, "user": "10001:10001", "memory_mb": req.limits.memory_mb, "swap": false,
+            "no_new_privileges": true, "user": run_as_user(req), "memory_mb": req.limits.memory_mb, "swap": false,
             "cpu_cores": req.limits.cpu_cores, "pids": req.limits.pids, "timeout_secs": req.limits.timeout_secs,
             "mounts": req.mounts, "docker_socket_mounted": false,
         });
@@ -65,7 +74,7 @@ impl SandboxExecutor for DockerSandboxExecutor {
             entrypoint: Some(req.command.clone()),
             cmd: Some(vec![]),
             env: Some(req.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
-            user: Some("10001:10001".into()),
+            user: Some(run_as_user(req)),
             working_dir: Some("/tmp".into()),
             network_disabled: Some(true),
             host_config: Some(host),
@@ -106,11 +115,12 @@ impl SandboxExecutor for DockerSandboxExecutor {
         };
         let duration_ms = t0.elapsed().as_millis() as u64;
         let (mut stdout, mut stderr) = (String::new(), String::new());
+        const CAP: usize = 1024 * 1024;
         let mut logs = self.docker.logs(&id, Some(LogsOptions::<String> { stdout: true, stderr: true, ..Default::default() }));
         while let Some(Ok(l)) = logs.next().await {
             match l {
-                LogOutput::StdOut { message } => stdout.push_str(&String::from_utf8_lossy(&message)),
-                LogOutput::StdErr { message } => stderr.push_str(&String::from_utf8_lossy(&message)),
+                LogOutput::StdOut { message } if stdout.len() < CAP => stdout.push_str(&String::from_utf8_lossy(&message)),
+                LogOutput::StdErr { message } if stderr.len() < CAP => stderr.push_str(&String::from_utf8_lossy(&message)),
                 _ => {}
             }
         }

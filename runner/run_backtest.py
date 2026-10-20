@@ -90,6 +90,16 @@ def lookahead_probe(df, full, signals, cuts=(0.3, 0.45, 0.6, 0.7, 0.8, 0.9)):
     return {"detected": bool(mismatches), "cuts_checked": len(cuts), "variants": 3, "mismatches": mismatches[:10]}
 
 
+def caveats(prov):
+    out = []
+    src = str(prov.get("source", ""))
+    if src == "sample":
+        out.append("SYNTHETIC sample data: results demonstrate the pipeline, not real alpha")
+    if "none" in str(prov.get("adjustment", "")).lower():
+        out.append("unadjusted prices: ex-dividend/split gaps distort returns")
+    return out
+
+
 def metrics(ret, pos):
     ret = ret.dropna()
     n = len(ret)
@@ -147,6 +157,7 @@ def main():
     asset_ret = df["close"].pct_change().fillna(0.0)
     gross = pos * asset_ret
     net = gross - cost
+    net_2x = gross - 2 * cost  # cost-stress scenario
 
     split_at = int(len(df) * job["split"]["train_frac"])
     idx = df.index
@@ -178,6 +189,8 @@ def main():
         "in_sample": metrics(is_net, is_pos),
         "out_of_sample": metrics(oos_net, oos_pos),
         "out_of_sample_gross": metrics(gross.iloc[split_at:], oos_pos),
+        "out_of_sample_cost_2x": metrics(net_2x.iloc[split_at:], oos_pos),
+        "data_caveats": caveats(job.get("data_provenance") or {}),
         "oos_halves": [metrics(oos_net.iloc[:half], oos_pos.iloc[:half]), metrics(oos_net.iloc[half:], oos_pos.iloc[half:])],
         "buy_and_hold_oos": metrics(asset_ret.iloc[split_at:], pd.Series(1.0, index=idx[split_at:])),
         "latest_signal": {"date": str(idx[-1].date()), "target_position": clean(float(raw.iloc[-1]))},

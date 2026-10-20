@@ -221,12 +221,6 @@ impl Orchestrator {
         let (jin, jout) = (jd.join("job"), jd.join("out"));
         std::fs::create_dir_all(&jin)?;
         std::fs::create_dir_all(&jout)?;
-        // container user 10001 must be able to write /out
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&jout, std::fs::Permissions::from_mode(0o777))?;
-        }
         let mut params = serde_json::Value::Object(e.parameters.clone());
         if let Some(serde_json::Value::Object(o)) = params_override {
             for (k, v) in o {
@@ -274,7 +268,9 @@ impl Orchestrator {
         std::fs::write(jd.join("stdout.log"), &r.stdout)?;
         std::fs::write(jd.join("stderr.log"), &r.stderr)?;
         std::fs::write(jd.join("policy.json"), serde_json::to_string_pretty(&r.policy)?)?;
-        let result: Option<serde_json::Value> = std::fs::read(jout.join("result.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        // container output is untrusted: cap size, parse as JSON only
+        let result: Option<serde_json::Value> = std::fs::metadata(jout.join("result.json")).ok().filter(|m| m.len() <= 4 * 1024 * 1024)
+            .and_then(|_| std::fs::read(jout.join("result.json")).ok()).and_then(|b| serde_json::from_slice(&b).ok());
         let ms = r.duration_ms as i64;
         match r.outcome {
             Outcome::TimedOut => return fail("timeout", format!("sandbox timeout after {}s", self.limits.timeout_secs), Some(r.exit_code), ms, result),
@@ -293,7 +289,9 @@ impl Orchestrator {
             };
             return fail(&status, why, Some(r.exit_code), ms, result);
         }
-        let result = result.unwrap();
+        let mut result = result.unwrap();
+        result["_backend_hardened"] = json!(exec.hardened());
+        result["_backend"] = json!(exec.name());
         self.store.finish_job(&job_id, "succeeded", Some(r.exit_code), ms, None, Some(&result))?;
         self.store.audit("sandbox", "sandbox_finish", Some(&s.id), json!({"job": job_id, "status": "succeeded", "ms": ms}), true)?;
         self.transition(&s, StrategyStatus::Evaluated, "orchestrator", None, json!({"job": job_id}))?;

@@ -72,7 +72,9 @@ impl SandboxExecutor for ProcessSandboxExecutor {
                 (Outcome::TimedOut, 137)
             }
         };
-        let (a, b) = rd.await.unwrap_or_default();
+        let (mut a, mut b) = rd.await.unwrap_or_default();
+        a.truncate(1024 * 1024);
+        b.truncate(1024 * 1024);
         Ok(SandboxResult {
             id: req.id.clone(), outcome, exit_code: code, stdout: String::from_utf8_lossy(&a).into(), stderr: String::from_utf8_lossy(&b).into(),
             duration_ms: t0.elapsed().as_millis() as u64,
