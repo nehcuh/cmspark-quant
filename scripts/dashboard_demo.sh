@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export CMSQ_HOME="${CMSQ_HOME:-/tmp/cmsq-demo}"
-export CMSQ_SECRETS_DIR="${CMSQ_SECRETS_DIR:-$CMSQ_HOME.secrets}"
+export CMSQ_SECRETS_DIR="$CMSQ_HOME.secrets"   # always derived: never wipe an inherited secrets dir
 rm -rf "$CMSQ_HOME" "$CMSQ_SECRETS_DIR"
 cargo build -q -p cmsq-cli -p cmsq-dashboard
 B=target/debug/cmsq
