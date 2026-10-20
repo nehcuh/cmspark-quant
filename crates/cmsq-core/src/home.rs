@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub const RUNNER_PY: &str = include_str!("../../../runner/signal_runner.py");
+pub const VNPY_SHIM_PY: &str = include_str!("../../../runner/vnpy_shim.py");
 pub const HUQUANT_TRADE_DATES: &str = include_str!("../../../vendor/huquant/trade_dates.py");
 /// sha256 of vendored huquant/trade_dates.py @ 928aff42a932888025599dd9503ec9ad7c9458f3
 pub const HUQUANT_SHA256: &str = "0b1d1bf53a0e5f9d277cd0d67b513415336263fd181d5bbce0e895c8eebbacf5";
@@ -137,6 +138,7 @@ impl Home {
         anyhow::ensure!(got == HUQUANT_SHA256, "vendored huquant checksum mismatch: {got}");
         write_readonly(&self.vendor_dir().join("trade_dates.py"), HUQUANT_TRADE_DATES)?;
         write_readonly(&self.runner_dir().join("signal_runner.py"), RUNNER_PY)?;
+        write_readonly(&self.runner_dir().join("vnpy_shim.py"), VNPY_SHIM_PY)?;
         let _ = std::fs::remove_file(self.runner_dir().join("run_backtest.py"));
         Ok(())
     }

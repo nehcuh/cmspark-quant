@@ -508,7 +508,8 @@ pub fn metrics(bars: &[Bar], sim: &SimResult, from: usize, to: usize) -> Metrics
         skew: if m2 > 1e-18 { m3 / m2.powf(1.5) } else { 0.0 },
         kurtosis: if m2 > 1e-18 { m4 / (m2 * m2) } else { 3.0 },
         max_drawdown: dd,
-        exposure: sim.exposure[from..to].iter().sum::<f64>() / n,
+        // gross exposure: futures shorts count as exposure (A-share exposure is never negative)
+        exposure: sim.exposure[from..to].iter().map(|x| x.abs()).sum::<f64>() / n,
     }
 }
 

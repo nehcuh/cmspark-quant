@@ -29,7 +29,39 @@ pub fn code_blocks(post: &ScrapeDrop) -> Vec<String> {
 
 pub fn pick_code(post: &ScrapeDrop) -> Option<String> {
     let blocks = code_blocks(post);
-    blocks.iter().find(|b| b.contains("def generate_signals")).or(blocks.first()).cloned()
+    blocks.iter().find(|b| b.contains("def generate_signals") || is_cta(b)).or(blocks.first()).cloned()
+}
+
+/// vn.py-style strategy: a class deriving from `CtaTemplate` that defines `on_bar`.
+/// The runner's shim drives it bar by bar and turns `self.pos` into target positions.
+pub fn is_cta(code: &str) -> bool {
+    Regex::new(r"(?m)^class\s+\w+\s*\(\s*CtaTemplate\s*\)\s*:").unwrap().is_match(code) && code.contains("def on_bar")
+}
+
+fn literal(raw: &str) -> serde_json::Value {
+    if let Ok(i) = raw.parse::<i64>() {
+        serde_json::json!(i)
+    } else if let Ok(f) = raw.parse::<f64>() {
+        serde_json::json!(f)
+    } else if raw == "True" || raw == "False" {
+        serde_json::json!(raw == "True")
+    } else {
+        serde_json::json!(raw.trim_matches(|c| c == '\'' || c == '"'))
+    }
+}
+
+/// vn.py `parameters = ["a", "b"]` plus the class-level defaults `a = 10`.
+fn cta_parameters(code: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    let Some(list) = Regex::new(r"(?s)\bparameters\s*(?::[^=]*)?=\s*\[(.*?)\]").unwrap().captures(code) else { return m };
+    let names: Vec<String> = Regex::new(r#"["'](\w+)["']"#).unwrap().captures_iter(&list[1]).map(|c| c[1].to_string()).collect();
+    for n in names {
+        let re = Regex::new(&format!(r#"(?m)^[ \t]+{n}\s*(?::\s*\w+)?\s*=\s*(-?\d+(?:\.\d+)?|True|False|'[^']*'|"[^"]*")\s*(?:#.*)?$"#)).unwrap();
+        if let Some(c) = re.captures(code) {
+            m.insert(n, literal(&c[1]));
+        }
+    }
+    m
 }
 
 fn prose(post: &ScrapeDrop) -> String {
@@ -44,6 +76,9 @@ fn sentences(text: &str) -> Vec<String> {
 pub fn parameters(code: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
     let sig = Regex::new(r"(?s)def\s+generate_signals\s*\((.*?)\)\s*:").unwrap();
+    if !code.contains("def generate_signals") && is_cta(code) {
+        return cta_parameters(code);
+    }
     if let Some(c) = sig.captures(code) {
         let kv = Regex::new(r"(\w+)\s*=\s*(-?\d+(?:\.\d+)?|True|False|'[^']*'|\x22[^\x22]*\x22)").unwrap();
         for p in kv.captures_iter(&c[1]) {
@@ -86,8 +121,8 @@ pub fn static_risks(code: Option<&str>, text: &str) -> Vec<Risk> {
     match code {
         None => add("no_code", Severity::High, "帖子中没有可执行的 Python 代码，无法回测"),
         Some(c) => {
-            if !c.contains("def generate_signals") {
-                add("contract", Severity::High, "代码未定义 generate_signals(df, **params)，不符合 Runner 契约");
+            if !c.contains("def generate_signals") && !is_cta(c) {
+                add("contract", Severity::High, "代码未定义 generate_signals(df, **params)，也不是 vn.py CtaTemplate 子类（需定义 on_bar），不符合 Runner 契约");
             }
             // advisory only: the dynamic probe is the real control
             let peeks = [
@@ -262,6 +297,7 @@ mod tests {
 
 #[cfg(test)]
 mod idea_tests {
+    use super::*;
     #[test]
     fn idea_key_ignores_numbers_comments_whitespace() {
         let a = "def generate_signals(df, fast=5, slow=20):\n    # comment\n    return df.close.rolling(fast).mean() > df.close.rolling(slow).mean()\n";
@@ -276,5 +312,19 @@ mod idea_tests {
             assert!(super::static_risks(Some(c), "").iter().any(|r| r.code == "lookahead"), "{c}");
         }
         assert!(!super::static_risks(Some("f = df.close.rolling(5).mean() > df.close.shift(1)"), "").iter().any(|r| r.code == "lookahead"));
+    }
+
+    #[test]
+    fn vnpy_cta_strategy_is_a_valid_contract() {
+        let code = "from vnpy_ctastrategy import CtaTemplate, ArrayManager\n\nclass DoubleMa(CtaTemplate):\n    fast_window = 10\n    slow_window: int = 40\n    fixed_size = 1  # lots\n    note = 'x'\n    parameters = [\"fast_window\", \"slow_window\", \"fixed_size\"]\n\n    def on_bar(self, bar):\n        pass\n";
+        assert!(is_cta(code));
+        let p = parameters(code);
+        assert_eq!(p.get("fast_window"), Some(&serde_json::json!(10)));
+        assert_eq!(p.get("slow_window"), Some(&serde_json::json!(40)));
+        assert_eq!(p.get("fixed_size"), Some(&serde_json::json!(1)));
+        assert!(!p.contains_key("note"));
+        assert!(!static_risks(Some(code), "").iter().any(|r| r.code == "contract"));
+        // a class that merely mentions CtaTemplate without on_bar is not a contract
+        assert!(!is_cta("class X(CtaTemplate):\n    pass\n"));
     }
 }

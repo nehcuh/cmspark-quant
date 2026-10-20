@@ -312,6 +312,14 @@ impl Store {
         conn.execute_batch(SQLITE_LATE_TRIGGERS)?;
         Ok(())
     }
+    /// Read-side open for viewers (dashboard): never runs migrations; PostgreSQL uses
+    /// the runtime role with a small pool, SQLite opens the file read-only.
+    pub fn open_configured_readonly(sqlite_path: &Path, db: &DbConfig, cfg: AuditConfig) -> Result<Self> {
+        match (&db.url, db.offline) {
+            (Some(url), false) => Self::open_pg(url, None, db.schema.as_deref(), 2, cfg),
+            _ => Self::open_readonly(sqlite_path, cfg),
+        }
+    }
     pub fn open_readonly(path: &Path, cfg: AuditConfig) -> Result<Self> {
         let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;

@@ -183,6 +183,13 @@ impl Router {
                     Ok(other) => {
                         let raw: Vec<Bar> = bars.iter().map(|b| Bar { adj_factor: None, ..b.clone() }).collect();
                         validation = compare(&raw, &other, s.name());
+                        validation.note = format!("{} (per-contract raw closes; {} of {} main-series days covered by the validator — older expired contracts are not served)",
+                            validation.note, validation.overlap_days, raw.len());
+                        // agreement on a small recent slice is not validation of the whole series
+                        if validation.status.starts_with("ok") && (validation.overlap_days as f64) < 0.9 * raw.len() as f64 {
+                            validation.status = "partial".into();
+                            validation.note = format!("only partly validated — {}; fetch a shorter history (e.g. --count 1100) for full coverage", validation.note);
+                        }
                         vattempts.push(json!({"source": s.name(), "ok": true, "status": validation.status, "segments": segs.len()}));
                         if validation.status != "unvalidated" {
                             break;

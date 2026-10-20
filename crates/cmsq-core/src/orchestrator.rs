@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub use crate::scorer::CostModel;
 
-pub const RUNNER_IMAGE: &str = "cmsq-runner:2.1.0";
+pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.0";
 pub const RUNNER_CMD: [&str; 4] = ["python3", "-I", "-B", "/runner/signal_runner.py"];
 
 /// Progress sink (dashboard log stream / CLI stderr). Called from the job thread.
@@ -1037,7 +1037,7 @@ impl Orchestrator {
         }
         let passed = reasons.is_empty();
         let result = json!({"kind": "vault", "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "params": params, "vault": vm, "lookahead_probe": rep,
-            "runner_identity": identity, "execution": scorer::EXECUTION_LABEL, "passed": passed, "reasons": reasons,
+            "runner_identity": identity, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL }, "passed": passed, "reasons": reasons,
             "latest_position": {"date": bars[n - 1].date, "target_position": full[n - 1]}});
         std::fs::write(jd.join("result.json"), serde_json::to_string_pretty(&result)?)?;
         self.store.finish_job(&job_id, "succeeded", Some(0), ms, None, Some(&result))?;

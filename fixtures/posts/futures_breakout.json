@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-forum",
+    "url": "https://example.invalid/quant-forum/futures_breakout",
+    "author": "样例作者H",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T09:12:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-futures_breakout"
+  },
+  "content": {
+    "title": "期货唐奇安通道突破（多空）",
+    "format": "markdown",
+    "body": "经典海龟式通道突破：收盘创 N 日新高做多，创 N 日新低做空。适合趋势明显的商品期货。\n假设：突破后趋势延续；日线；不考虑换月成本。\n\n```python\nimport pandas as pd\n\ndef generate_signals(df, n=20):\n    hi = df[\"high\"].rolling(n).max().shift(1)\n    lo = df[\"low\"].rolling(n).min().shift(1)\n    pos = pd.Series(float(\"nan\"), index=df.index)\n    pos[df[\"close\"] > hi] = 1.0\n    pos[df[\"close\"] < lo] = -1.0\n    return pos.ffill().fillna(0.0)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

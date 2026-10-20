@@ -1,0 +1,577 @@
+
+[1m== build ==[0m
+workspace: /tmp/cmsq-e2e.Mum3   secrets: /tmp/cmsq-e2e.Mum3.secrets   backend: docker   db: sqlite
+
+[1m== init + market data (host-side; containers never see the dataset) ==[0m
+  · SAMPLE_TREND: 1221 bars mirrored to sqlite (snapshot 1dfad3764285)
+  · SAMPLE_RANGE: 1221 bars mirrored to sqlite (snapshot 70a239ea570d)
+  · SAMPLE_REGIME: 1221 bars mirrored to sqlite (snapshot 91ce495cb6f6)
+workspace ready at /tmp/cmsq-e2e.Mum3
+cached 1200 bars 2021-11-05 .. 2026-10-20 for SH600519 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 a30b2fc173cb994b2f86396843717fb59266151464d0826a72b2de55c73ceba6
+  cross-validation: unvalidated vs - — no independent source reachable
+real data cached via the multi-source router (see adjustment + cross-validation above)
+SAMPLE_RANGE   1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
+SAMPLE_REGIME  1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
+SAMPLE_TREND   1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
+SH600519       1200 bars  2021-11-05 .. 2026-10-20  tushare  [REAL A-SHARE DAILY (tushare pro)]
+
+[1m== 1. CMspark drop → ingest (posts + reviewer attack posts) ==[0m
+NEW       2f3ab011  bigout.json
+INVALID   broken.json: invalid drop JSON: missing field `scraped_at` at line 1 column 50
+NEW       864dc4b0  data_peek.json
+NEW       f1b4b624  escape.json
+INVALID   evil_deep.json: invalid drop JSON: missing field `source` at line 1 column 400033
+INVALID   evil_path.json: scraped_at must be RFC3339: premature end of input
+NEW       8afd24eb  forge.json
+NEW       9b95f0f4  forkbomb.json
+NEW       dba636a8  future_peek.json
+NEW       352122a3  futures_breakout.json
+NEW       6a6b65de  hidden_peek.json
+NEW       a9752e2e  length_tell.json
+NEW       ad5076b1  ma_crossover.json
+NEW       8d54f676  mean_reversion_z.json
+NEW       3474c47f  memo_peek.json
+NEW       81dd97ef  momentum_20d.json
+NEW       a79dde82  phone_home.json
+NEW       4531f1af  r2_clock_dev.json
+NEW       1c396eb3  r2_clock_dev_bh.json
+NEW       dcadb2c4  r2_clock_probe.json
+NEW       db791df7  r2_clock_vault.json
+NEW       1dbb927f  r2_cut_aware.json
+NEW       1bbf83e2  r2_rng_alias.json
+NEW       9085df23  r2_sparse_peek.json
+NEW       b65080fe  short_term_reversal.json
+INVALID   symlink_attack.json: not a regular file (symlinks are not followed)
+NEW       6c4a57e8  symlink_out.json
+NEW       932c22cc  vnpy_double_ma.json
+-- re-dropping one file (dedupe):
+DUPLICATE ad5076b1  again.json
+
+[1m== 2. extract (offline heuristic extractor) ==[0m
+Extracted 2f3ab011  ADV_bigout  params={}  risks=[system_access,no_costs,survivorship]
+Extracted 864dc4b0  ADV_data_peek  params={}  risks=[lookahead,survivorship]
+Extracted f1b4b624  ADV_escape  params={}  risks=[system_access,no_costs,survivorship]
+Extracted 8afd24eb  ADV_forge  params={}  risks=[no_costs,survivorship]
+Extracted 9b95f0f4  ADV_forkbomb  params={}  risks=[system_access,no_costs,survivorship]
+Extracted dba636a8  收益率惊人的“明日涨跌”策略（年化 300%！）  params={}  risks=[lookahead,no_costs,too_good,survivorship]
+Extracted 352122a3  期货唐奇安通道突破（多空）  params={"n":20}  risks=[survivorship]
+Extracted 6a6b65de  ADV_hidden_peek  params={}  risks=[lookahead,survivorship]
+Extracted a9752e2e  ADV_length_tell  params={}  risks=[lookahead,survivorship]
+Extracted ad5076b1  双均线金叉死叉，简单但有效？  params={"fast":10,"slow":30}  risks=[no_costs,survivorship]
+Extracted 8d54f676  布林带均值回归（超跌买入）  params={"window":20,"z":1.5}  risks=[no_costs,survivorship]
+Extracted 3474c47f  ADV_memo_peek  params={}  risks=[lookahead,no_costs,survivorship]
+Extracted 81dd97ef  20日动量 + 波动率过滤  params={"lookback":20,"vol_cap":0.03}  risks=[no_costs,survivorship]
+Extracted a79dde82  带云端参数同步的网格策略  params={"step":0.02}  risks=[network,no_costs,survivorship]
+Extracted 4531f1af  ADV2_clock_dev  params={}  risks=[lookahead,survivorship]
+Extracted 1c396eb3  ADV2_clock_dev_bh  params={}  risks=[lookahead,survivorship]
+Extracted dcadb2c4  ADV2_clock_probe  params={}  risks=[system_access,survivorship]
+Extracted db791df7  ADV2_clock_vault  params={"fast":20,"slow":60}  risks=[lookahead,survivorship]
+Extracted 1dbb927f  均线趋势 + 大波动过滤  params={"fast":10,"slow":40,"thr":0.03}  risks=[survivorship]
+Extracted 1bbf83e2  ADV2_rng_alias  params={}  risks=[lookahead,survivorship]
+Extracted 9085df23  ADV2_sparse_peek  params={"cut":-0.02,"fast":10,"slow":30}  risks=[lookahead,survivorship]
+Extracted b65080fe  短期反转：大跌次日抄底，持有一天  params={"threshold":-0.01}  risks=[survivorship]
+Extracted 6c4a57e8  ADV_symlink_out  params={}  risks=[survivorship]
+Extracted 932c22cc  vn.py 双均线 CTA 策略（螺纹钢主力）  params={"fast_window":10,"fixed_size":1,"slow_window":40}  risks=[no_costs,survivorship]
+
+[1m== 3+4. backtests: one fresh container per probe variant, scored on the host ==[0m
+backend: docker (hardened=true)  symbols: SAMPLE_REGIME  workers: 2  container slots: 8
+Rejected   ad5076b1  SAMPLE_REGIME job=a753be13 [succeeded]  dev ret +101.00% sharpe 1.85 maxDD -8.46% DSR 0.913 (N=20)  — 双均线金叉死叉，简单但有效？
+           ✗ deflated_sharpe: DSR 0.913 (min 0.95) over N=20 library trials, SR0/day 0.0680
+backend: docker (hardened=true)  symbols: SAMPLE_REGIME  workers: 2  container slots: 8
+Rejected   81dd97ef  SAMPLE_REGIME job=387cdefc [succeeded]  dev ret +50.68% sharpe 1.09 maxDD -22.05% DSR 0.508 (N=20)  — 20日动量 + 波动率过滤
+           ✗ deflated_sharpe: DSR 0.508 (min 0.95) over N=20 library trials, SR0/day 0.0680
+backend: docker (hardened=true)  symbols: SAMPLE_RANGE  workers: 2  container slots: 8
+Rejected   8d54f676  SAMPLE_RANGE job=6690e303 [succeeded]  dev ret +17.67% sharpe 0.39 maxDD -14.00% DSR 0.039 (N=20)  — 布林带均值回归（超跌买入）
+           ✗ sharpe: Sharpe 0.39 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.039 (min 0.95) over N=20 library trials, SR0/day 0.0874
+           ✗ beats_buy_and_hold: Sharpe 0.39 vs buy-and-hold 0.60 (return +17.7% vs +51.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_RANGE  workers: 2  container slots: 8
+Rejected   b65080fe  SAMPLE_RANGE job=4ff5da27 [succeeded]  dev ret -44.47% sharpe -0.97 maxDD -49.04% DSR 0.000 (N=20)  — 短期反转：大跌次日抄底，持有一天
+           ✗ net_return_positive: net return -44.47%
+           ✗ sharpe: Sharpe -0.97 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1439
+           ✗ walk_forward: 1/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -64.48%
+           ✗ max_drawdown: max DD -49.0% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.97 vs buy-and-hold 0.60 (return -44.5% vs +51.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   dba636a8  SAMPLE_TREND job=a900cd3a [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=20)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (7 variant(s))
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return -45.34%
+           ✗ sharpe: Sharpe -0.96 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1439
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -66.09%
+           ✗ max_drawdown: max DD -57.7% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.96 vs buy-and-hold -0.75 (return -45.3% vs -48.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Failed     a79dde82  SAMPLE_TREND job=27a964fe [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   8afd24eb  SAMPLE_TREND job=3f665bec [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.000 (N=20)  — ADV_forge
+           ✗ net_return_positive: net return 0.00%
+           ✗ sharpe: Sharpe 0.00 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1240
+           ✗ walk_forward: 0/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs 0.00%
+           ✗ exposure: avg exposure 0.0%
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   3474c47f  SAMPLE_TREND job=2e8e4b21 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=20)  — ADV_memo_peek
+           ✗ no_lookahead: positions changed when the future changed (5 variant(s))
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return -45.34%
+           ✗ sharpe: Sharpe -0.96 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1240
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -66.09%
+           ✗ max_drawdown: max DD -57.7% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.96 vs buy-and-hold -0.75 (return -45.3% vs -48.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Failed     864dc4b0  SAMPLE_TREND job=97c8d178 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_data_peek
+           ✗ runner exit 2: strategy error: FileNotFoundError(2, 'No such file or directory')
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   6a6b65de  SAMPLE_TREND job=9bfd90ba [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=20)  — ADV_hidden_peek
+           ✗ no_lookahead: positions changed when the future changed (1 variant(s))
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return -45.34%
+           ✗ sharpe: Sharpe -0.96 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1240
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -66.09%
+           ✗ max_drawdown: max DD -57.7% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.96 vs buy-and-hold -0.75 (return -45.3% vs -48.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   a9752e2e  SAMPLE_TREND job=1ab8faf0 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=20)  — ADV_length_tell
+           ✗ no_lookahead: positions changed when the future changed (10 variant(s))
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return -45.34%
+           ✗ sharpe: Sharpe -0.96 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1240
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -66.09%
+           ✗ max_drawdown: max DD -57.7% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.96 vs buy-and-hold -0.75 (return -45.3% vs -48.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Failed     6c4a57e8  SAMPLE_TREND job=6cf73467 [bad_output]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_symlink_out
+           ✗ positions.csv is not a regular file under 8 MiB
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   f1b4b624  SAMPLE_TREND job=4c6fca43 [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.003 (N=20)  — ADV_escape
+           ✗ net_return_positive: net return 0.00%
+           ✗ sharpe: Sharpe 0.00 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.003 (min 0.95) over N=20 library trials, SR0/day 0.0968
+           ✗ walk_forward: 0/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs 0.00%
+           ✗ exposure: avg exposure 0.0%
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Failed     9b95f0f4  SAMPLE_TREND job=5dd07be0 [pids_exhausted]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_forkbomb
+           ✗ process limit (128 pids) exhausted, then out of memory
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Failed     2f3ab011  SAMPLE_TREND job=4adf7d43 [oom]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_bigout
+           ✗ out of memory (limit 512 MB)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   4531f1af  SAMPLE_TREND job=d82acfbe [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.026 (N=20)  — ADV2_clock_dev
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return 0.00%
+           ✗ sharpe: Sharpe 0.00 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.026 (min 0.95) over N=20 library trials, SR0/day 0.0697
+           ✗ walk_forward: 0/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs 0.00%
+           ✗ exposure: avg exposure 0.0%
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   1c396eb3  SAMPLE_TREND job=7135d7db [succeeded]  dev ret -48.60% sharpe -0.75 maxDD -68.91% DSR 0.000 (N=20)  — ADV2_clock_dev_bh
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return -48.60%
+           ✗ sharpe: Sharpe -0.75 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1017
+           ✗ walk_forward: 1/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -48.59%
+           ✗ max_drawdown: max DD -68.9% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.75 vs buy-and-hold -0.75 (return -48.6% vs -48.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   db791df7  SAMPLE_TREND job=73aaa429 [succeeded]  dev ret +32.95% sharpe 0.69 maxDD -35.76% DSR 0.052 (N=20)  — ADV2_clock_vault
+           ✗ no_lookahead: positions changed when the future changed (7 variant(s))
+           ✗ static_risks: lookahead
+           ✗ deflated_sharpe: DSR 0.052 (min 0.95) over N=20 library trials, SR0/day 0.1017
+           ✗ walk_forward: 1/4 walk-forward folds positive (min 3)
+           ✗ max_drawdown: max DD -35.8% (floor -35%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   dcadb2c4  SAMPLE_TREND job=da10cba5 [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.026 (N=20)  — ADV2_clock_probe
+           ✗ net_return_positive: net return 0.00%
+           ✗ sharpe: Sharpe 0.00 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.026 (min 0.95) over N=20 library trials, SR0/day 0.0697
+           ✗ walk_forward: 0/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs 0.00%
+           ✗ exposure: avg exposure 0.0%
+backend: docker (hardened=true)  symbols: SAMPLE_REGIME  workers: 2  container slots: 8
+Rejected   1dbb927f  SAMPLE_REGIME job=8139271f [succeeded]  dev ret +103.23% sharpe 1.80 maxDD -11.70% DSR 0.891 (N=20)  — 均线趋势 + 大波动过滤
+           ✗ no_lookahead: positions changed when the future changed (1 variant(s))
+           ✗ deflated_sharpe: DSR 0.891 (min 0.95) over N=20 library trials, SR0/day 0.0697
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   1bbf83e2  SAMPLE_TREND job=401a8bd1 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=20)  — ADV2_rng_alias
+           ✗ no_lookahead: positions changed when the future changed (2 variant(s))
+           ✗ static_risks: lookahead
+           ✗ net_return_positive: net return -45.34%
+           ✗ sharpe: Sharpe -0.96 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.0697
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -66.09%
+           ✗ max_drawdown: max DD -57.7% (floor -35%)
+           ✗ beats_buy_and_hold: Sharpe -0.96 vs buy-and-hold -0.75 (return -45.3% vs -48.6%)
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   9085df23  SAMPLE_TREND job=c670cabd [succeeded]  dev ret +344.21% sharpe 2.51 maxDD -13.88% DSR 0.995 (N=20)  — ADV2_sparse_peek
+           ✗ no_lookahead: positions changed when the future changed (5 variant(s))
+           ✗ static_risks: lookahead
+
+[1m== 5. typed confirmation + one-time vault holdout ==[0m
+  · SAMPLE_TREND: 1221 bars mirrored to sqlite (snapshot 1dfad3764285)
+  · SAMPLE_RANGE: 1221 bars mirrored to sqlite (snapshot 70a239ea570d)
+  · SAMPLE_REGIME: 1221 bars mirrored to sqlite (snapshot 91ce495cb6f6)
+backend: docker (hardened=true)  symbols: SAMPLE_REGIME  workers: 2  container slots: 8
+GatePassed 4a93db96  SAMPLE_REGIME job=9ad1a8b6 [succeeded]  dev ret +101.00% sharpe 1.85 maxDD -8.46% DSR 0.999 (N=1)  — 双均线金叉死叉，简单但有效？
+           ✓ gate passed on development data — to run the one-time vault holdout and promote: cmsq promote 4a93db96  (you will be asked to type the confirmation)
+-- id prefix alone is refused:
+Error: confirmation mismatch: type exactly "PROMOTE 4a93db96"
+  · container 1/16: variant trunc@1220 (1220 bars)
+  · container 2/16: variant trunc@1217 (1217 bars)
+  · container 3/16: variant resample@1044#0 (1221 bars)
+  · container 4/16: variant resample@1064#0 (1221 bars)
+  · container 5/16: variant trunc@1153 (1153 bars)
+  · container 6/16: variant trunc@1146 (1146 bars)
+  · container 7/16: variant resample@1146#0 (1221 bars)
+  · container 8/16: variant resample@976#0 (1221 bars)
+  · container 9/16: variant trunc@1044 (1044 bars)
+  · container 10/16: variant resample@1065#0 (1221 bars)
+  · container 11/16: variant trunc@976 (976 bars)
+  · container 12/16: variant full (1221 bars)
+  · container 13/16: variant trunc@1064 (1064 bars)
+  · container 14/16: variant trunc@1219 (1219 bars)
+  · container 15/16: variant resample@1153#0 (1221 bars)
+  · container 16/16: variant trunc@1065 (1065 bars)
+REJECTED 4a93db96  双均线金叉死叉，简单但有效？  — vault holdout not profitable: return -10.50%, Sharpe -0.62
+(vault decided: not promoted)
+final: Rejected
+-- the vault is one-shot:
+Error: cannot promote 4a93db96-042c-4944-a46a-5b029bd847ea: status is Rejected, promotion requires GatePassed
+-- a re-post of the same idea (new title/text) gets no fresh vault:
+backend: docker (hardened=true)  symbols: SAMPLE_REGIME  workers: 2  container slots: 8
+Error: vault already spent for this idea: 4a93db96 already used the vault (identical code)
+   (vault already spent for this idea — refused as expected)
+audit chain OK: 27 entries, HMAC-keyed, head 4d0165c04d416169 anchored at seq Some(27) in /tmp/cmsq-e2e-vault.nDUy.secrets/anchors/14e8949ea2bed4e7.anchor
+
+[1m== 6. data tampering: edit a read-only snapshot / strip the sha from meta.json ==[0m
+   ERROR      8d54f676  SAMPLE_RANGE: market data integrity failure: snapshot /tmp/cmsq-e2e.Mum3/data/snapshots/70a239ea570df8afe84f619ac7e24dc414882071cef90d903bc
+   (edited snapshot refused as expected)
+   ERROR      8d54f676  SAMPLE_RANGE: market data integrity failure: SAMPLE_RANGE.meta.json does not match the audited snapshot 70a239ea570d
+   (meta.json without snapshot sha refused as expected)
+
+[1m== 7. P1 parameter sweep (every point is a DSR trial) + concurrent multi-symbol backtest + portfolio ==[0m
+  · job 0ee48b5e [sweep] SAMPLE_REGIME: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@354 (354 bars)
+  · container 2/14: variant trunc@375 (375 bars)
+  · container 3/14: variant full (976 bars)
+  · container 4/14: variant trunc@974 (974 bars)
+  · job 53bd8e04 [sweep] SAMPLE_REGIME: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@715 (715 bars)
+  · container 2/14: variant trunc@940 (940 bars)
+  · container 3/14: variant resample@497#0 (976 bars)
+  · container 4/14: variant trunc@974 (974 bars)
+  · job 551e4e4c [sweep] SAMPLE_REGIME: 14 variants, one fresh container each, random order
+  · container 1/14: variant resample@516#0 (976 bars)
+  · container 2/14: variant trunc@831 (831 bars)
+  · container 3/14: variant full (976 bars)
+  · container 4/14: variant trunc@516 (516 bars)
+  · container 5/14: variant resample@940#0 (976 bars)
+  · container 5/14: variant resample@385#0 (976 bars)
+  · container 6/14: variant trunc@366 (366 bars)
+  · container 7/14: variant trunc@975 (975 bars)
+  · container 8/14: variant resample@708#0 (976 bars)
+  · container 6/14: variant trunc@975 (975 bars)
+  · container 7/14: variant resample@396#0 (976 bars)
+  · container 8/14: variant resample@763#0 (976 bars)
+  · container 9/14: variant trunc@972 (972 bars)
+  · container 5/14: variant trunc@974 (974 bars)
+  · container 6/14: variant trunc@636 (636 bars)
+  · container 7/14: variant resample@661#0 (976 bars)
+  · container 8/14: variant trunc@661 (661 bars)
+  · container 9/14: variant resample@354#0 (976 bars)
+  · container 10/14: variant full (976 bars)
+  · container 11/14: variant trunc@497 (497 bars)
+  · container 12/14: variant trunc@708 (708 bars)
+  · container 10/14: variant resample@375#0 (976 bars)
+  · container 11/14: variant trunc@385 (385 bars)
+  · container 12/14: variant trunc@972 (972 bars)
+  · container 13/14: variant resample@715#0 (976 bars)
+  · container 9/14: variant resample@831#0 (976 bars)
+  · container 10/14: variant trunc@691 (691 bars)
+  · container 11/14: variant resample@691#0 (976 bars)
+  · container 13/14: variant trunc@763 (763 bars)
+  · container 14/14: variant resample@366#0 (976 bars)
+  · container 12/14: variant resample@636#0 (976 bars)
+  · container 14/14: variant trunc@396 (396 bars)
+  · container 13/14: variant trunc@975 (975 bars)
+  · container 14/14: variant trunc@972 (972 bars)
+  · job 4ee18b32 [sweep] SAMPLE_REGIME: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@620 (620 bars)
+  · container 2/14: variant trunc@974 (974 bars)
+  · container 3/14: variant trunc@975 (975 bars)
+  · container 4/14: variant trunc@351 (351 bars)
+  · container 5/14: variant resample@848#0 (976 bars)
+  · container 6/14: variant resample@351#0 (976 bars)
+  · container 7/14: variant resample@842#0 (976 bars)
+  · container 8/14: variant resample@620#0 (976 bars)
+  · container 9/14: variant trunc@848 (848 bars)
+  · container 10/14: variant trunc@842 (842 bars)
+  · container 11/14: variant trunc@972 (972 bars)
+  · container 12/14: variant full (976 bars)
+  · container 13/14: variant trunc@880 (880 bars)
+  · container 14/14: variant resample@880#0 (976 bars)
+  · Rejected: Sharpe 1.85, DSR 0.419 (N=20), 3/4 folds positive
+sweep 250298d9 on SAMPLE_REGIME: 4 points, workers 3
+  #0 {"fast":5,"slow":30}               succeeded       sharpe   1.05  ret   +48.09%  DSR@record 0.030
+  #1 {"fast":5,"slow":60}               succeeded       sharpe   1.56  ret   +83.46%  DSR@record 0.464
+  #2 {"fast":10,"slow":30}              succeeded       sharpe   1.85  ret  +101.00%  DSR@record 0.141
+  #3 {"fast":10,"slow":60}              succeeded       sharpe   1.51  ret   +81.01%  DSR@record 0.211
+best: 551e4e4c  params {"fast":10,"slow":30}  → Rejected  DSR(final ledger) 0.419 N=20
+  ✗ deflated_sharpe: DSR 0.419 (min 0.95) over N=20 library trials, SR0/day 0.1240
+   (4 sweep points recorded in the trial ledger: 17 → 21)
+  · job ff70254e [single] SAMPLE_REGIME: 14 variants, one fresh container each, random order
+  · container 1/14: variant resample@466#0 (976 bars)
+  · container 2/14: variant trunc@972 (972 bars)
+  · container 3/14: variant trunc@466 (466 bars)
+  · container 4/14: variant resample@636#0 (976 bars)
+  · container 5/14: variant resample@949#0 (976 bars)
+  · container 6/14: variant trunc@636 (636 bars)
+  · container 7/14: variant resample@456#0 (976 bars)
+  · container 8/14: variant trunc@771 (771 bars)
+  · container 9/14: variant trunc@949 (949 bars)
+  · container 10/14: variant full (976 bars)
+  · container 11/14: variant resample@771#0 (976 bars)
+  · container 12/14: variant trunc@975 (975 bars)
+  · container 13/14: variant trunc@974 (974 bars)
+  · container 14/14: variant trunc@456 (456 bars)
+  · Rejected: Sharpe 1.85, DSR 0.315 (N=20), 3/4 folds positive
+  · job 5ac2785d [single] SAMPLE_RANGE: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@622 (622 bars)
+  · container 2/14: variant resample@733#0 (976 bars)
+  · container 3/14: variant trunc@402 (402 bars)
+  · container 4/14: variant resample@402#0 (976 bars)
+  · container 5/14: variant resample@797#0 (976 bars)
+  · container 6/14: variant trunc@972 (972 bars)
+  · container 7/14: variant trunc@896 (896 bars)
+  · container 8/14: variant full (976 bars)
+  · container 9/14: variant trunc@975 (975 bars)
+  · container 10/14: variant trunc@797 (797 bars)
+  · container 11/14: variant resample@896#0 (976 bars)
+  · container 12/14: variant trunc@974 (974 bars)
+  · container 13/14: variant trunc@733 (733 bars)
+  · container 14/14: variant resample@622#0 (976 bars)
+  · Rejected: Sharpe 0.37, DSR 0.002 (N=20), 3/4 folds positive
+  · job b2a58181 [single] SAMPLE_TREND: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@432 (432 bars)
+  · container 2/14: variant trunc@735 (735 bars)
+  · container 3/14: variant trunc@972 (972 bars)
+  · container 4/14: variant trunc@805 (805 bars)
+  · container 5/14: variant trunc@565 (565 bars)
+  · container 6/14: variant trunc@974 (974 bars)
+  · container 7/14: variant resample@565#0 (976 bars)
+  · container 8/14: variant resample@660#0 (976 bars)
+  · container 9/14: variant resample@805#0 (976 bars)
+  · container 10/14: variant trunc@660 (660 bars)
+  · container 11/14: variant full (976 bars)
+  · container 12/14: variant resample@432#0 (976 bars)
+  · container 13/14: variant trunc@975 (975 bars)
+  · container 14/14: variant resample@735#0 (976 bars)
+  · Rejected: Sharpe 0.07, DSR 0.000 (N=20), 2/4 folds positive
+backend: docker (hardened=true)  symbols: SAMPLE_REGIME,SAMPLE_RANGE,SAMPLE_TREND  workers: 3  container slots: 8
+Rejected   ad5076b1  SAMPLE_REGIME job=ff70254e [succeeded]  dev ret +101.00% sharpe 1.85 maxDD -8.46% DSR 0.315 (N=20)  — 双均线金叉死叉，简单但有效？
+           ✗ deflated_sharpe: DSR 0.315 (min 0.95) over N=20 library trials, SR0/day 0.1340
+Rejected   ad5076b1  SAMPLE_RANGE job=5ac2785d [succeeded]  dev ret +19.36% sharpe 0.37 maxDD -24.56% DSR 0.002 (N=20)  — 双均线金叉死叉，简单但有效？
+           ✗ sharpe: Sharpe 0.37 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.002 (min 0.95) over N=20 library trials, SR0/day 0.1240
+           ✗ beats_buy_and_hold: Sharpe 0.37 vs buy-and-hold 0.60 (return +19.4% vs +51.6%)
+Rejected   ad5076b1  SAMPLE_TREND job=b2a58181 [succeeded]  dev ret -0.21% sharpe 0.07 maxDD -32.75% DSR 0.000 (N=20)  — 双均线金叉死叉，简单但有效？
+           ✗ net_return_positive: net return -0.21%
+           ✗ sharpe: Sharpe 0.07 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=20 library trials, SR0/day 0.1225
+           ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -3.15%
+  · job 15f3d949 [portfolio_leg] SAMPLE_REGIME: 14 variants, one fresh container each, random order
+  · container 1/14: variant resample@554#0 (976 bars)
+  · container 2/14: variant trunc@972 (972 bars)
+  · container 3/14: variant resample@456#0 (976 bars)
+  · container 4/14: variant trunc@456 (456 bars)
+  · job 832afe4f [portfolio_leg] SAMPLE_RANGE: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@975 (975 bars)
+  · container 2/14: variant resample@519#0 (976 bars)
+  · container 3/14: variant trunc@356 (356 bars)
+  · container 4/14: variant full (976 bars)
+  · job 5ee06ea2 [portfolio_leg] SAMPLE_TREND: 14 variants, one fresh container each, random order
+  · container 1/14: variant trunc@748 (748 bars)
+  · container 2/14: variant full (976 bars)
+  · container 3/14: variant resample@618#0 (976 bars)
+  · container 4/14: variant trunc@972 (972 bars)
+  · container 5/14: variant trunc@347 (347 bars)
+  · container 5/14: variant resample@531#0 (976 bars)
+  · container 6/14: variant trunc@531 (531 bars)
+  · container 7/14: variant resample@544#0 (976 bars)
+  · container 8/14: variant trunc@554 (554 bars)
+  · container 6/14: variant trunc@342 (342 bars)
+  · container 7/14: variant resample@747#0 (976 bars)
+  · container 8/14: variant resample@356#0 (976 bars)
+  · container 5/14: variant trunc@624 (624 bars)
+  · container 6/14: variant resample@872#0 (976 bars)
+  · container 7/14: variant trunc@974 (974 bars)
+  · container 9/14: variant trunc@974 (974 bars)
+  · container 8/14: variant resample@477#0 (976 bars)
+  · container 9/14: variant trunc@544 (544 bars)
+  · container 10/14: variant trunc@975 (975 bars)
+  · container 11/14: variant resample@944#0 (976 bars)
+  · container 10/14: variant trunc@519 (519 bars)
+  · container 12/14: variant trunc@974 (974 bars)
+  · container 9/14: variant resample@624#0 (976 bars)
+  · container 11/14: variant resample@342#0 (976 bars)
+  · container 12/14: variant resample@347#0 (976 bars)
+  · container 10/14: variant trunc@872 (872 bars)
+  · container 11/14: variant trunc@975 (975 bars)
+  · container 13/14: variant trunc@747 (747 bars)
+  · container 12/14: variant trunc@477 (477 bars)
+  · container 13/14: variant trunc@944 (944 bars)
+  · container 14/14: variant full (976 bars)
+  · container 14/14: variant trunc@972 (972 bars)
+  · container 13/14: variant trunc@618 (618 bars)
+  · container 14/14: variant resample@748#0 (976 bars)
+  · portfolio d7633d51: Sharpe 1.23, DSR 0.097 (N=21), gate fail
+portfolio d7633d51 [SAMPLE_REGIME+SAMPLE_RANGE+SAMPLE_TREND] {"lookback":20,"scheme":"inverse_vol"}
+  window 2015-01-05 .. 2019-01-02 (976 bars, development only)
+  return +44.36%  sharpe 1.23  maxDD -18.53%  exposure +49.05%  trades 1418  DSR 0.097 (N=21)
+    leg SAMPLE_REGIME sharpe 1.85  ret +101.00%
+    leg SAMPLE_RANGE sharpe 0.37  ret +19.36%
+    leg SAMPLE_TREND sharpe 0.07  ret -0.21%
+  gate (informational): FAIL — deflated_sharpe: DSR 0.097 (min 0.95) over N=21 library trials, SR0/day 0.1239; walk_forward: 2/4 walk-forward folds positive (min 3)
+d7633d51  portfolio succeeded 2026-10-20T13:46:48  {"alloc":{"lookback":20,"scheme":"inverse_vol"},"params":{"fast":10,"slow":30},"symbols":["SAMPLE_REGIME","SAMPLE_RANGE","SAMPLE_TREND"]}
+250298d9  sweep     succeeded 2026-10-20T13:46:35  {"grid":{"fast":[5,10],"slow":[30,60]},"points":4,"symbol":"SAMPLE_REGIME","workers":3}
+
+[1m== 8. P2 vn.py CtaTemplate post (shim inside the sandbox) on bundled A-share sample ==[0m
+   params {'fast_window': 10, 'fixed_size': 1, 'slow_window': 40}
+  · job bea90ebc [single] SAMPLE_TREND: 14 variants, one fresh container each, random order
+  · container 1/14: variant resample@343#0 (976 bars)
+  · container 2/14: variant trunc@524 (524 bars)
+  · container 3/14: variant trunc@972 (972 bars)
+  · container 4/14: variant trunc@343 (343 bars)
+  · container 5/14: variant resample@890#0 (976 bars)
+  · container 6/14: variant resample@745#0 (976 bars)
+  · container 7/14: variant resample@766#0 (976 bars)
+  · container 8/14: variant resample@524#0 (976 bars)
+  · container 9/14: variant trunc@974 (974 bars)
+  · container 10/14: variant trunc@745 (745 bars)
+  · container 11/14: variant trunc@890 (890 bars)
+  · container 12/14: variant full (976 bars)
+  · container 13/14: variant trunc@975 (975 bars)
+  · container 14/14: variant trunc@766 (766 bars)
+  · Rejected: Sharpe 0.03, DSR 0.000 (N=22), 1/4 folds positive
+backend: docker (hardened=true)  symbols: SAMPLE_TREND  workers: 2  container slots: 8
+Rejected   932c22cc  SAMPLE_TREND job=bea90ebc [succeeded]  dev ret -2.49% sharpe 0.03 maxDD -32.16% DSR 0.000 (N=22)  — vn.py 双均线 CTA 策略（螺纹钢主力）
+           ✗ net_return_positive: net return -2.49%
+           ✗ sharpe: Sharpe 0.03 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=22 library trials, SR0/day 0.1238
+           ✗ walk_forward: 1/4 walk-forward folds positive (min 3)
+           ✗ cost_stress_2x: net return with 2x costs -4.97%
+
+[1m== 9. P3 CTP market data (observe-only) — replay feed with malformed ticks ==[0m
+tcp://trading.openctp.cn:30011: NOT reachable from this machine: invalid input: connect timed out after 6000ms
+md [replay] tcp://trading.openctp.cn:30011: 362 ticks stored, 8 one-minute bars, 13 rejected; instruments ["rb2601", "au2612"]
+   (362 trusted ticks stored, malformed ones rejected)
+
+[1m== expected outcomes ==[0m
+TITLE              SYMBOL         STATUS       EXPECTED
+双均线          SAMPLE_REGIME  Rejected     GatePassed|Rejected    ok
+20日动量        SAMPLE_REGIME  Rejected     Rejected               ok
+布林带          SAMPLE_RANGE   Rejected     Rejected               ok
+短期反转       SAMPLE_RANGE   Rejected     Rejected               ok
+明日涨跌       SAMPLE_TREND   Rejected     Rejected               ok
+网格             SAMPLE_TREND   Failed       Failed|Rejected        ok
+ADV_forge          SAMPLE_TREND   Rejected     Rejected               ok
+ADV_memo_peek      SAMPLE_TREND   Rejected     Rejected               ok
+ADV_data_peek      SAMPLE_TREND   Failed       Failed                 ok
+ADV_hidden_peek    SAMPLE_TREND   Rejected     Rejected               ok
+ADV_length_tell    SAMPLE_TREND   Rejected     Rejected               ok
+ADV_symlink_out    SAMPLE_TREND   Failed       Failed                 ok
+ADV_escape         SAMPLE_TREND   Rejected     Rejected               ok
+ADV_forkbomb       SAMPLE_TREND   Failed       Failed|Rejected        ok
+ADV_bigout         SAMPLE_TREND   Failed       Failed                 ok
+ADV2_clock_dev     SAMPLE_TREND   Rejected     Rejected|Failed        ok
+ADV2_clock_dev_bh  SAMPLE_TREND   Rejected     Rejected|Failed        ok
+ADV2_clock_vault   SAMPLE_TREND   Rejected     Rejected|Failed        ok
+ADV2_clock_probe   SAMPLE_TREND   Rejected     Rejected               ok
+均线趋势 + 大波动过滤 SAMPLE_REGIME  Rejected     Rejected               ok
+ADV2_rng_alias     SAMPLE_TREND   Rejected     Rejected               ok
+ADV2_sparse_peek   SAMPLE_TREND   Rejected     Rejected               ok
+
+[1m== library / jobs / trials / signals ==[0m
+ID        STATUS      TRY  SOURCE         TITLE
+2f3ab011  Failed        1  adv            ADV_bigout  [sample]
+864dc4b0  Failed        1  adv            ADV_data_peek  [sample]
+f1b4b624  Rejected      1  adv            ADV_escape  [sample]
+8afd24eb  Rejected      1  adv            ADV_forge  [sample]
+9b95f0f4  Failed        1  adv            ADV_forkbomb  [sample]
+dba636a8  Rejected      1  quant-forum    收益率惊人的“明日涨跌”策略（年化 300%！）  [sample]
+352122a3  Extracted     0  quant-forum    期货唐奇安通道突破（多空）  [sample]
+6a6b65de  Rejected      1  adv            ADV_hidden_peek  [sample]
+a9752e2e  Rejected      1  adv            ADV_length_tell  [sample]
+ad5076b1  Rejected      5  quant-forum    双均线金叉死叉，简单但有效？  [sample]
+8d54f676  Rejected      1  quant-forum    布林带均值回归（超跌买入）  [sample]
+3474c47f  Rejected      1  adv            ADV_memo_peek  [sample]
+81dd97ef  Rejected      1  quant-blog     20日动量 + 波动率过滤  [sample]
+a79dde82  Failed        1  quant-blog     带云端参数同步的网格策略  [sample]
+4531f1af  Rejected      1  adv            ADV2_clock_dev  [sample]
+1c396eb3  Rejected      1  adv            ADV2_clock_dev_bh  [sample]
+dcadb2c4  Rejected      1  adv            ADV2_clock_probe  [sample]
+db791df7  Rejected      1  adv            ADV2_clock_vault  [sample]
+1dbb927f  Rejected      1  poc            均线趋势 + 大波动过滤  [sample]
+1bbf83e2  Rejected      1  adv            ADV2_rng_alias  [sample]
+9085df23  Rejected      1  adv            ADV2_sparse_peek  [sample]
+b65080fe  Rejected      1  quant-blog     短期反转：大跌次日抄底，持有一天  [sample]
+6c4a57e8  Failed        1  adv            ADV_symlink_out  [sample]
+932c22cc  Rejected      1  quant-forum    vn.py 双均线 CTA 策略（螺纹钢主力）  [sample]
+bea90ebc  dev   docker               succeeded       SAMPLE_TREND   3647ms  strategy 932c22cc  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+5ee06ea2  portfolio_leg docker               succeeded       SAMPLE_TREND   3765ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+832afe4f  portfolio_leg docker               succeeded       SAMPLE_RANGE   3497ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+15f3d949  portfolio_leg docker               succeeded       SAMPLE_REGIME   3437ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+b2a58181  dev   docker               succeeded       SAMPLE_TREND   2355ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+5ac2785d  dev   docker               succeeded       SAMPLE_RANGE   2295ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+ff70254e  dev   docker               succeeded       SAMPLE_REGIME   2214ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+4ee18b32  sweep docker               succeeded       SAMPLE_REGIME   2391ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+551e4e4c  sweep docker               succeeded       SAMPLE_REGIME   4039ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+53bd8e04  sweep docker               succeeded       SAMPLE_REGIME   3731ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+0ee48b5e  sweep docker               succeeded       SAMPLE_REGIME   3873ms  strategy ad5076b1  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+c670cabd  dev   docker               succeeded       SAMPLE_TREND   2179ms  strategy 9085df23  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+401a8bd1  dev   docker               succeeded       SAMPLE_TREND   2325ms  strategy 1bbf83e2  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+8139271f  dev   docker               succeeded       SAMPLE_REGIME   2338ms  strategy 1dbb927f  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+da10cba5  dev   docker               succeeded       SAMPLE_TREND   2293ms  strategy dcadb2c4  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+73aaa429  dev   docker               succeeded       SAMPLE_TREND   2364ms  strategy db791df7  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+7135d7db  dev   docker               succeeded       SAMPLE_TREND   2364ms  strategy 1c396eb3  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+d82acfbe  dev   docker               succeeded       SAMPLE_TREND   2527ms  strategy 4531f1af  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+4adf7d43  dev   docker               oom             SAMPLE_TREND   3481ms  strategy 2f3ab011  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+5dd07be0  dev   docker               pids_exhausted  SAMPLE_TREND   9861ms  strategy 9b95f0f4  runner sha256:852de59d563d…cmsq.runner.version=2.2.0
+library-wide trials: 29  (distinct ideas: 18)
+ad5076b1  idea 7062daccf1  params 42ac6b203a9c26a4  SAMPLE_REGIME SR/day +0.1167
+81dd97ef  idea 8de90926e1  params 02f573e872490d1c  SAMPLE_REGIME SR/day +0.0687
+no signals (only promoted strategies emit observe-only signals)
+
+[1m== audit: verify, then reviewer tamper attacks on the live DB (restored after each) ==[0m
+audit chain OK: 227 entries, HMAC-keyed, head 1458930d82f39e51 anchored at seq Some(227) in /tmp/cmsq-e2e.Mum3.secrets/anchors/6e491683414b7d4b.anchor
+AUDIT CHAIN BROKEN at seq Some(3): HMAC mismatch (entry modified or chain re-computed without the key)
+   (edit detected as expected)
+AUDIT CHAIN BROKEN at seq Some(225): log truncated: anchor says head is seq 227, database ends at 224
+   (truncate detected as expected)
+AUDIT CHAIN BROKEN at seq Some(1): HMAC mismatch at the first entry — this workspace's audit chain was not signed with the current key: it was created by an older cmsq (unkeyed sha256 chain) or with a different audit.key / CMSQ_SECRETS_DIR. Use a fresh CMSQ_HOME, or point CMSQ_SECRETS_DIR at the key that created it
+   (rechain detected as expected)
+audit chain OK: 227 entries, HMAC-keyed, head 1458930d82f39e51 anchored at seq Some(227) in /tmp/cmsq-e2e.Mum3.secrets/anchors/6e491683414b7d4b.anchor
+
+[1m== result ==[0m
+E2E OK — workspace kept at /tmp/cmsq-e2e.Mum3
+exit=0

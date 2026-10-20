@@ -125,7 +125,7 @@ async fn docker_pipeline_gate_then_vault_promote() {
     let res = job.result.as_ref().unwrap();
     assert_eq!(res["computed_by"], "cmsq-core scorer (host, trusted)");
     assert!(res["lookahead_probe"]["containers"].as_u64().unwrap() >= 7);
-    assert!(job.runner_identity.as_deref().unwrap().contains("cmsq.runner.version=2.1.0"));
+    assert!(job.runner_identity.as_deref().unwrap().contains("cmsq.runner.version=2.2.0"));
     // typed confirmation: id prefix alone is not enough
     let e = o.promote(&id, "test", &id[..8], &d).await.unwrap_err();
     assert!(matches!(e.downcast_ref::<CoreError>(), Some(CoreError::ConfirmationMismatch { .. })));

@@ -7,8 +7,8 @@ FROM python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc1
 RUN apt-get update && apt-get install -y --no-install-recommends libfaketime && rm -rf /var/lib/apt/lists/*
 COPY requirements.lock /runner/requirements.lock
 RUN pip install --no-cache-dir -r /runner/requirements.lock
-COPY signal_runner.py /runner/signal_runner.py
-LABEL cmsq.runner.version="2.1.0" cmsq.runner.contract="positions-only"
+COPY signal_runner.py vnpy_shim.py /runner/
+LABEL cmsq.runner.version="2.2.0" cmsq.runner.contract="positions-only"
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1 FAKETIME="2000-01-01 00:00:00" FAKETIME_DONT_RESET=1 TZ=UTC
 USER 10001:10001
 WORKDIR /tmp

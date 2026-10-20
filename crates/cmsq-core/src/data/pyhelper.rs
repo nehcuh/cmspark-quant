@@ -74,9 +74,18 @@ impl MarketDataSource for PyProvider {
     async fn contract_closes(&self, segments: &[(String, String, String)]) -> Result<Vec<Bar>> {
         anyhow::ensure!(self.kind == "akshare", "{} has no per-contract futures endpoint", self.kind);
         let mut out = vec![];
+        let mut failed: Vec<String> = vec![];
         for (c, a, b) in segments {
             anyhow::ensure!(c.len() <= 8 && c.chars().all(|x| x.is_ascii_alphanumeric()), "bad contract code");
-            let v = self.call(&format!("FUT:{c}"), &a.replace('-', ""), &b.replace('-', "")).await?;
+            // sina only keeps roughly the last five years of expired contracts: an old
+            // segment that cannot be fetched is skipped (it simply stays unvalidated)
+            let v = match self.call(&format!("FUT:{c}"), &a.replace('-', ""), &b.replace('-', "")).await {
+                Ok(v) => v,
+                Err(e) => {
+                    failed.push(format!("{c}: {e:#}"));
+                    continue;
+                }
+            };
             for r in v["bars"].as_array().context("no bars")? {
                 let Some(r) = r.as_array() else { continue };
                 let (Some(d), Some(cl)) = (r[0].as_str(), r[4].as_f64()) else { continue };
@@ -86,6 +95,7 @@ impl MarketDataSource for PyProvider {
                 }
             }
         }
+        anyhow::ensure!(!out.is_empty(), "no contract segment could be fetched ({} tried): {}", segments.len(), failed.first().cloned().unwrap_or_default());
         out.sort_by(|a, b| a.date.cmp(&b.date));
         Ok(out)
     }
