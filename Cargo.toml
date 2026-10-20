@@ -1,0 +1,12 @@
+[package]
+name = "cmspark-quant"
+version = "0.1.0"
+edition = "2021"
+authors = ["nehcuh"]
+description = "CMspark Quant Strategy Discovery & Sandbox Dashboard Prototype (Rust + GPUI Kit)"
+license = "MIT"
+
+[dependencies]
+gpui-kit = "0.7.3"
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
