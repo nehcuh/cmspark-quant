@@ -415,8 +415,12 @@ impl Dashboard {
         flow = flow.child(div().text_color(c_muted()).ml_4().child("归档 archive:"))
             .child(chip(format!("Rejected {}", count(StrategyStatus::Rejected)), status_color(StrategyStatus::Rejected)))
             .child(chip(format!("Failed {}", count(StrategyStatus::Failed)), status_color(StrategyStatus::Failed)));
-        let best = self.snap.jobs.iter().filter(|j| j.kind == "dev").filter_map(|j| j.result.as_ref().map(|r| (j, r)))
-            .max_by(|a, b| a.1["development"]["sharpe"].as_f64().unwrap_or(-9.0).total_cmp(&b.1["development"]["sharpe"].as_f64().unwrap_or(-9.0)));
+        let devjobs: Vec<(&JobRecord, &serde_json::Value)> = self.snap.jobs.iter().filter(|j| j.kind == "dev").filter_map(|j| j.result.as_ref().map(|r| (j, r))).collect();
+        let cands: Vec<(StrategyStatus, Option<String>, f64)> = devjobs.iter().map(|(j, r)| {
+            let s = self.snap.strategies.iter().find(|s| s.id == j.strategy_id);
+            (s.map(|s| s.status).unwrap_or(StrategyStatus::Failed), s.and_then(|s| s.last_reason.clone()), r["development"]["sharpe"].as_f64().unwrap_or(f64::NAN))
+        }).collect();
+        let best = pick_best(&cands).map(|(i, label)| (devjobs[i].0, devjobs[i].1, label));
         let mut recent = div().flex().flex_col().gap_1();
         for a in self.snap.audit.iter().take(12) {
             recent = recent.child(div().flex().gap_3().text_xs()
@@ -434,14 +438,14 @@ impl Dashboard {
                 .child(card("全库试验 Library trials", self.snap.trials.to_string(), format!("N in the Deflated Sharpe Ratio · {} runs", self.snap.total_attempts), rgb(0xd29922).into())))
             .child(section("状态流转 State machine"))
             .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).child(flow))
-            .child(section("最佳开发期 Best development-window result (host-scored, after A-share costs)"))
+            .child(section("最佳开发期 Best development-window result (host-scored, after A-share costs; excludes Failed and lookahead/integrity rejections)"))
             .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).text_sm().text_color(c_text()).child(match best {
-                Some((j, r)) => {
+                Some((j, r, label)) => {
                     let title = self.snap.strategies.iter().find(|s| s.id == j.strategy_id).map(|s| s.title.clone()).unwrap_or_default();
-                    format!("{title} · {} · net return {} · Sharpe {} · DSR {} (N={}) · MaxDD {} · data: {}", j.symbol, pct(&r["development"], "total_return"), num(&r["development"], "sharpe"),
+                    format!("[{label}] {title} · {} · net return {} · Sharpe {} · DSR {} (N={}) · MaxDD {} · data: {}", j.symbol, pct(&r["development"], "total_return"), num(&r["development"], "sharpe"),
                         r["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or_default(), r["dsr"]["trials"], pct(&r["development"], "max_drawdown"), j.data_source)
                 }
-                None => "no completed backtests yet".into(),
+                None => "暂无诚实的回测结果 no honest completed backtest (lookahead / integrity / failed runs are excluded)".into(),
             }))
             .child(section("最近审计 Recent audit"))
             .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).child(recent))
@@ -809,4 +813,39 @@ fn main() {
         };
         gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Dashboard::new(home.clone(), window, cx))).expect("open window");
     });
+}
+
+/// Reasons that mean a result is not an honest measurement and must never be shown as "best".
+const DISHONEST: [&str; 6] = ["lookahead", "integrity", "static_risks", "pids_exhausted", "escape", "tamper"];
+
+/// Pick the Overview "best result": GatePassed/Promoted first, else the best honest
+/// Evaluated/Rejected run (rejected only for performance). Failed and lookahead/integrity
+/// rejections are never eligible. Returns (index, label).
+fn pick_best(c: &[(StrategyStatus, Option<String>, f64)]) -> Option<(usize, &'static str)> {
+    let honest = |i: &usize| {
+        let (st, reason, sr) = &c[*i];
+        sr.is_finite() && !matches!(st, StrategyStatus::Failed | StrategyStatus::Ingested | StrategyStatus::Extracted)
+            && !reason.as_deref().map(|r| DISHONEST.iter().any(|d| r.contains(d))).unwrap_or(false)
+    };
+    let best_of = |f: &dyn Fn(StrategyStatus) -> bool| (0..c.len()).filter(honest).filter(|i| f(c[*i].0)).max_by(|a, b| c[*a].2.total_cmp(&c[*b].2));
+    best_of(&|s| matches!(s, StrategyStatus::GatePassed | StrategyStatus::Promoted)).map(|i| (i, "门禁通过 gate-passed"))
+        .or_else(|| best_of(&|_| true).map(|i| (i, "最佳诚实结果，未通过门禁 best honest, NOT gate-passed")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn c(st: StrategyStatus, r: Option<&str>, sr: f64) -> (StrategyStatus, Option<String>, f64) { (st, r.map(String::from), sr) }
+    #[::core::prelude::v1::test]
+    fn best_excludes_cheaters_and_prefers_gate_passed() {
+        let v = vec![c(StrategyStatus::Rejected, Some("no_lookahead: positions changed; static_risks: lookahead"), 6.6),
+                     c(StrategyStatus::Failed, Some("runner exit 2"), 3.0),
+                     c(StrategyStatus::Rejected, Some("data integrity refused"), 5.0),
+                     c(StrategyStatus::Rejected, Some("deflated_sharpe: DSR 0.8"), 1.25),
+                     c(StrategyStatus::Rejected, Some("sharpe: 0.3"), 0.3)];
+        assert_eq!(pick_best(&v), Some((3, "最佳诚实结果，未通过门禁 best honest, NOT gate-passed")));
+        let mut w = v.clone(); w.push(c(StrategyStatus::GatePassed, None, 0.9));
+        assert_eq!(pick_best(&w).unwrap().0, 5);
+        assert_eq!(pick_best(&v[..3]), None);
+    }
 }
