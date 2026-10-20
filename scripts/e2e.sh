@@ -8,6 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ALLOW_DEV=0; [ "${1:-}" = "--allow-dev" ] && ALLOW_DEV=1
+if [ -n "${CMSQ_HOME:-}" ] && [ -n "$(ls -A "$CMSQ_HOME" 2>/dev/null)" ]; then
+  echo "refusing to run in a non-empty inherited CMSQ_HOME=$CMSQ_HOME (unset it, or point it at an empty dir)"; exit 2
+fi
 export CMSQ_HOME="${CMSQ_HOME:-$(mktemp -d /tmp/cmsq-e2e.XXXX)}"
 export CMSQ_SECRETS_DIR="${CMSQ_SECRETS_DIR:-$CMSQ_HOME.secrets}"   # outside CMSQ_HOME
 BIN=target/debug/cmsq
@@ -19,7 +22,7 @@ hr "build"
 cargo build -q -p cmsq-cli
 if docker info >/dev/null 2>&1; then
   BACKEND=docker
-  docker image inspect cmsq-runner:2.0.0 >/dev/null 2>&1 || scripts/build_runner.sh
+  docker image inspect cmsq-runner:2.1.0 >/dev/null 2>&1 || scripts/build_runner.sh
 elif [ $ALLOW_DEV = 1 ]; then
   BACKEND=process; echo "!!! DEV backend (--allow-dev): nothing may pass the gate"
 else
@@ -51,7 +54,7 @@ idof() { $BIN list --json | python3 -c "import json,sys; v=[s['id'][:8] for s in
 statusof() { $BIN show "$1" --json | python3 -c "import json,sys; print(json.load(sys.stdin)['strategy']['status'])"; }
 # title-substring | symbol | allowed final statuses after backtest
 EXPECT=(
-  "双均线|SAMPLE_REGIME|GatePassed"
+  "双均线|SAMPLE_REGIME|GatePassed|Rejected"
   "20日动量|SAMPLE_REGIME|Rejected"
   "布林带|SAMPLE_RANGE|Rejected"
   "短期反转|SAMPLE_RANGE|Rejected"
@@ -66,6 +69,13 @@ EXPECT=(
   "ADV_escape|SAMPLE_TREND|Rejected"
   "ADV_forkbomb|SAMPLE_TREND|Failed|Rejected"
   "ADV_bigout|SAMPLE_TREND|Failed"
+  "ADV2_clock_dev|SAMPLE_TREND|Rejected|Failed"
+  "ADV2_clock_dev_bh|SAMPLE_TREND|Rejected|Failed"
+  "ADV2_clock_vault|SAMPLE_TREND|Rejected|Failed"
+  "ADV2_clock_probe|SAMPLE_TREND|Rejected"
+  "均线趋势 + 大波动过滤|SAMPLE_REGIME|Rejected"
+  "ADV2_rng_alias|SAMPLE_TREND|Rejected"
+  "ADV2_sparse_peek|SAMPLE_TREND|Rejected"
 )
 [ $BACKEND = process ] && EXPECT[0]="双均线|SAMPLE_REGIME|Rejected"
 hr "3+4. backtests: one fresh container per probe variant, scored on the host"
@@ -79,17 +89,50 @@ id=$($BIN list --json | python3 -c "import json,sys; v=[s['id'][:8] for s in jso
 [ -z "$id" ] || [ "$(statusof "$id")" = Failed ] || bad "evil_path did not end Failed"
 
 hr "5. typed confirmation + one-time vault holdout"
-PASS=$($BIN list --status GatePassed --json | python3 -c "import json,sys; v=json.load(sys.stdin); print(v[0]['id'][:8] if v else '')")
-if [ -n "$PASS" ]; then
-  echo "-- id prefix alone is refused:"; $BIN promote "$PASS" --confirm "$PASS" && bad "promote accepted a non-typed confirmation" || true
-  $BIN promote "$PASS" --confirm "PROMOTE $PASS" || echo "(vault decided: not promoted)"
-  FINAL=$(statusof "$PASS"); echo "final: $FINAL"
+# In the shared library above the DSR is deflated over every idea tried (N>=20 floor),
+# so nothing reaches GatePassed. To exercise the vault path honestly we use a SEPARATE,
+# single-idea library with the trial floor explicitly lowered (CMSQ_DSR_MIN_TRIALS=1,
+# recorded in each evaluation's gate config). This is a mechanics demo, not a pass claim.
+V_HOME=$(mktemp -d /tmp/cmsq-e2e-vault.XXXX)
+V="env CMSQ_HOME=$V_HOME CMSQ_SECRETS_DIR=$V_HOME.secrets CMSQ_DSR_MIN_TRIALS=1 $BIN"
+$V init >/dev/null; cp fixtures/posts/ma_crossover.json "$V_HOME/drop/"; $V ingest >/dev/null; $V extract >/dev/null
+vid() { $V list --json | python3 -c "import json,sys; v=[s['id'][:8] for s in json.load(sys.stdin) if sys.argv[1] in s['title']]; print(v[0] if v else '')" "$1"; }
+vst() { $V show "$1" --json | python3 -c "import json,sys; print(json.load(sys.stdin)['strategy']['status'])"; }
+PASS=$(vid "双均线"); $V backtest "$PASS" --symbol SAMPLE_REGIME --backend $BACKEND 2>/dev/null | head -3 || true
+if [ "$(vst "$PASS")" = GatePassed ]; then
+  echo "-- id prefix alone is refused:"; $V promote "$PASS" --confirm "$PASS" && bad "promote accepted a non-typed confirmation" || true
+  $V promote "$PASS" --confirm "PROMOTE $PASS" || echo "(vault decided: not promoted)"
+  FINAL=$(vst "$PASS"); echo "final: $FINAL"
   case "$FINAL" in Promoted|Rejected) ;; *) bad "after vault, status $FINAL";; esac
-  echo "-- the vault is one-shot:"; $BIN promote "$PASS" --confirm "PROMOTE $PASS" && bad "vault reused" || true
-  EXPECT[0]="双均线|SAMPLE_REGIME|Promoted|Rejected"
+  echo "-- the vault is one-shot:"; $V promote "$PASS" --confirm "PROMOTE $PASS" && bad "vault reused" || true
+  echo "-- a re-post of the same idea (new title/text) gets no fresh vault:"
+  python3 - fixtures/posts/ma_crossover.json > "$V_HOME/drop/repost.json" <<'PY'
+import json,sys; d=json.load(open(sys.argv[1])); d["content"]["title"]="REPOST 双均线 v2"; d["content"]["body"]=d["content"]["body"].replace("思路","新思路"); print(json.dumps(d,ensure_ascii=False))
+PY
+  $V ingest >/dev/null; $V extract >/dev/null; R2=$(vid "REPOST 双均线")
+  $V backtest "$R2" --symbol SAMPLE_REGIME --backend $BACKEND 2>/dev/null | head -1 || true
+  if [ "$(vst "$R2")" = GatePassed ]; then
+    { $V promote "$R2" --confirm "PROMOTE $R2" 2>&1 || true; } | tail -1; [ "$(vst "$R2")" = Rejected ] && echo "   (vault already spent for this idea — refused as expected)" || bad "repost got a fresh vault"
+  else
+    echo "   repost ended $(vst "$R2") before promote"
+  fi
+  $V audit verify || bad "vault workspace audit did not verify"
 elif [ $BACKEND = docker ]; then
-  bad "expected one GatePassed strategy on docker"
+  bad "single-idea vault demo: ma_crossover did not reach GatePassed"
 fi
+
+hr "6. data tampering: edit a read-only snapshot / strip the sha from meta.json"
+BB=$(idof "布林带"); SH=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['extra']['snapshot_sha256'])" "$CMSQ_HOME/data/SAMPLE_RANGE.meta.json")
+SNAP="$CMSQ_HOME/data/snapshots/$SH.csv"; SNAPBAK=$(mktemp); cp "$SNAP" "$SNAPBAK"; chmod u+w "$SNAPBAK"
+chmod u+w "$SNAP"; sed -i '2s/,[0-9.]*,/,99.0,/' "$SNAP"
+OUT=$($BIN backtest "$BB" --symbol SAMPLE_RANGE --backend $BACKEND 2>&1 || true); echo "   $(echo "$OUT" | tail -1 | cut -c1-160)"
+echo "$OUT" | grep -q "integrity" && echo "   (edited snapshot refused as expected)" || bad "edited snapshot accepted"
+cp "$SNAPBAK" "$SNAP"; chmod 444 "$SNAP"
+cp "$CMSQ_HOME/data/SAMPLE_RANGE.meta.json" "$CMSQ_HOME/meta.bak"
+python3 -c "import json,sys; p=sys.argv[1]; m=json.load(open(p)); m['extra'].pop('snapshot_sha256'); json.dump(m,open(p,'w'))" "$CMSQ_HOME/data/SAMPLE_RANGE.meta.json"
+OUT=$($BIN backtest "$BB" --symbol SAMPLE_RANGE --backend $BACKEND 2>&1 || true); echo "   $(echo "$OUT" | tail -1 | cut -c1-160)"
+echo "$OUT" | grep -q "integrity" && echo "   (meta.json without snapshot sha refused as expected)" || bad "missing snapshot sha accepted"
+cp "$CMSQ_HOME/meta.bak" "$CMSQ_HOME/data/SAMPLE_RANGE.meta.json"
 
 hr "expected outcomes"
 printf '%-18s %-14s %-12s %s\n' TITLE SYMBOL STATUS EXPECTED

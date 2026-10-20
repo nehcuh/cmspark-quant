@@ -53,3 +53,11 @@ Evaluated `/workspace/huquant` @ `928aff4`:
 * **Trade calendar**: `cmsq data calendar` saves the SSE `trade_cal` to `data/_calendar_SSE.txt` (audited).
 * **Native replay** (replaces huquant BarPlayer/Strategy): `cmsq_core::replay` provides `Calendar`, `Strategy` trait, `BarPlayer` (the strategy only ever gets `bars[..=i]`), and `MaCrossover`/`Momentum`/`BuyAndHold`. `cmsq replay <SYM> --strategy …` is a reference run, **not gated**. The Docker test asserts that BarPlayer reproduces the sandboxed runner's ma_crossover positions bar for bar.
 * **Real-data e2e**: `scripts/e2e_real.sh` (output in `docs/e2e-real-output.txt`).
+
+## 第二轮补充（2026-10-20）
+* 交叉校验容差策略：差异 >0.1% 的日子被标记；标记日 ≤ max(3, 重叠天数/500) 且无单日 >1% → `ok_with_flags`（可晋升）；
+  否则 `divergent`（阻断）；重叠 <20 天 → `unvalidated`（阻断）。策略与标记日期记录在 fetch 的审计条目中。
+* ST：由 tushare `namechange` 得出 ST 区间，主板 ST 涨跌幅 5%（2025-07-07 起 10%）。
+* 新股：取 `list_date`；注册制板块前 5 个交易日无涨跌停，其他板块仅上市首日。老新股 44% 规则未建模。
+* 北交所：含 92xxxx 新代码。停牌：成交量 0 或交易日历缺口。
+* CSV 导入与 sample 数据永不通过 `data_cross_validated`。
