@@ -24,4 +24,8 @@ pub enum CoreError {
     RunnerMismatch(String),
     #[error("audit log integrity failure: {0}")]
     AuditIntegrity(String),
+    #[error("market data integrity failure: {0}")]
+    DataIntegrity(String),
+    #[error("vault already spent for this idea: {0}")]
+    VaultSpent(String),
 }

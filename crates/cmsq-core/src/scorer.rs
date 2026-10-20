@@ -46,27 +46,101 @@ impl CostModel {
 }
 
 /// Stamp duty on sells by trade date (YYYY-MM-DD).
-pub fn stamp_duty(date: &str) -> f64 {
-    if date < "2008-04-24" {
-        0.003 // 2007-05-30..2008-04-23 (sells and buys; only sell side modelled)
+/// A-share stamp duty `(buy, sell)` rate in force on `date`.
+/// History: 0.5% both sides from 1997-05-12; 0.4% from 1998-06-12; 0.2% from
+/// 2001-11-16; 0.1% from 2005-01-24; 0.3% from 2007-05-30; 0.1% from 2008-04-24;
+/// sell side only (0.1%) from 2008-09-19; 0.05% sell side from 2023-08-28.
+pub fn stamp_duty_sides(date: &str) -> (f64, f64) {
+    let both = |r: f64| (r, r);
+    if date < "1998-06-12" {
+        both(0.005)
+    } else if date < "2001-11-16" {
+        both(0.004)
+    } else if date < "2005-01-24" {
+        both(0.002)
+    } else if date < "2007-05-30" {
+        both(0.001)
+    } else if date < "2008-04-24" {
+        both(0.003)
+    } else if date < "2008-09-19" {
+        both(0.001)
     } else if date < "2023-08-28" {
-        0.001
+        (0.0, 0.001)
     } else {
-        0.0005
+        (0.0, 0.0005)
     }
 }
 
-/// Daily price-limit fraction for a symbol on a date.
-pub fn limit_pct(symbol: &str, date: &str) -> f64 {
-    let s = symbol.to_uppercase();
-    let code = s.trim_start_matches(|c: char| c.is_ascii_alphabetic());
-    if s.starts_with("BJ") || code.starts_with('8') || code.starts_with("43") {
-        0.30
-    } else if (code.starts_with("688") && date >= "2019-07-22") || ((code.starts_with("300") || code.starts_with("301")) && date >= "2020-08-24") {
-        0.20
-    } else {
-        0.10
+/// Sell-side stamp duty on `date`.
+pub fn stamp_duty(date: &str) -> f64 {
+    stamp_duty_sides(date).1
+}
+
+/// Per-symbol trading-rule facts (from the audited data fetch).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Rules {
+    /// inclusive date ranges during which the name carried ST / *ST
+    #[serde(default)]
+    pub st: Vec<(String, String)>,
+    /// listing date YYYY-MM-DD
+    #[serde(default)]
+    pub list_date: Option<String>,
+}
+
+impl Rules {
+    pub fn is_st(&self, date: &str) -> bool {
+        self.st.iter().any(|(a, b)| date >= a.as_str() && date <= b.as_str())
     }
+}
+
+fn board(symbol: &str) -> (&'static str, String) {
+    let s = symbol.to_uppercase();
+    let code = s.trim_start_matches(|c: char| c.is_ascii_alphabetic()).to_string();
+    let b = if s.starts_with("BJ") || code.starts_with("92") || code.starts_with('8') || code.starts_with("43") {
+        "bj"
+    } else if code.starts_with("688") || code.starts_with("689") {
+        "star"
+    } else if code.starts_with("300") || code.starts_with("301") {
+        "chinext"
+    } else {
+        "main"
+    };
+    (b, code)
+}
+
+/// Daily price-limit fraction for a symbol on a date (non-ST, not an IPO day).
+pub fn limit_pct(symbol: &str, date: &str) -> f64 {
+    match board(symbol).0 {
+        "bj" => 0.30,
+        "star" if date >= "2019-07-22" => 0.20,
+        "chinext" if date >= "2020-08-24" => 0.20,
+        _ => 0.10,
+    }
+}
+
+/// Limit with ST and IPO rules; `None` = no price limit that day.
+/// `listing_day` is the 0-based trading-day index since listing when known.
+pub fn limit_for(symbol: &str, date: &str, rules: &Rules, listing_day: Option<usize>) -> Option<f64> {
+    let (b, _) = board(symbol);
+    if let (Some(k), Some(ld)) = (listing_day, rules.list_date.as_deref()) {
+        let registration = match b {
+            "star" => ld >= "2019-07-22",
+            "chinext" => ld >= "2020-08-24",
+            "main" => ld >= "2023-04-10",
+            _ => false,
+        };
+        // registration-regime IPOs: no limit for the first 5 trading days;
+        // BJ and older IPOs: first day treated as unlimited (old 44%/-36% band not modelled)
+        if (registration && k < 5) || k == 0 {
+            return None;
+        }
+    }
+    let base = limit_pct(symbol, date);
+    if rules.is_st(date) && b == "main" {
+        // main-board ST band 5%, widened to 10% from 2025-07-07
+        return Some(if date >= "2025-07-07" { 0.10 } else { 0.05 });
+    }
+    Some(base)
 }
 
 fn round2(x: f64) -> f64 {
@@ -90,7 +164,19 @@ pub const INITIAL_CAPITAL: f64 = 1_000_000.0;
 
 /// Simulate long-only target weights `pos` (decided at each bar's close).
 pub fn simulate(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel) -> SimResult {
+    simulate_with(symbol, bars, pos, costs, &Rules::default())
+}
+
+/// `simulate` with ST / IPO rules. Prices in `bars` are RAW; lots, fees and limits
+/// use raw prices, the adj_factor only carries wealth across corporate actions.
+pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel, rules: &Rules) -> SimResult {
     assert_eq!(bars.len(), pos.len());
+    let first_listed = rules.list_date.as_deref().and_then(|ld| {
+        let i = bars.iter().position(|b| b.date.as_str() >= ld)?;
+        // only meaningful if the series actually starts at the listing
+        (i == 0 && chrono::NaiveDate::parse_from_str(&bars[0].date, "%Y-%m-%d").ok()?
+            .signed_duration_since(chrono::NaiveDate::parse_from_str(ld, "%Y-%m-%d").ok()?).num_days() <= 7).then_some(0usize)
+    });
     let n = bars.len();
     let mut r = SimResult { equity: vec![INITIAL_CAPITAL; n], exposure: vec![0.0; n], ..Default::default() };
     if n == 0 {
@@ -110,15 +196,17 @@ pub fn simulate(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel) -> S
         }
         let target = pos[t - 1].clamp(0.0, 1.0);
         let suspended = b.volume <= 0.0;
-        let lim = limit_pct(symbol, &b.date);
+        let lim = limit_for(symbol, &b.date, rules, first_listed.map(|f| t - f));
         // limit prices are computed off the previous raw close; when an ex-date sits
         // in between we approximate by the factor-adjusted previous close.
         let prev_close = match (b.adj_factor, pb.adj_factor) {
             (Some(a1), Some(a0)) if a1 > 0.0 => pb.close * a0 / a1,
             _ => pb.close,
         };
-        let up = round2(prev_close * (1.0 + lim));
-        let down = round2(prev_close * (1.0 - lim));
+        let (up, down) = match lim {
+            Some(l) => (round2(prev_close * (1.0 + l)), round2(prev_close * (1.0 - l))),
+            None => (f64::INFINITY, 0.0),
+        };
         let equity_open = cash + shares * b.open;
         let want_value = target * equity_open;
         let cur_value = shares * b.open;
@@ -130,13 +218,14 @@ pub fn simulate(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel) -> S
                     r.blocked_limit_up += 1;
                 } else {
                     let px = b.open * (1.0 + costs.slippage * m);
+                    let buy_duty = stamp_duty_sides(&b.date).0 * m;
                     let mut lots = (delta / (100.0 * px)).floor();
-                    while lots > 0.0 && lots * 100.0 * px + commission(lots * 100.0 * px) > cash {
+                    while lots > 0.0 && lots * 100.0 * px * (1.0 + buy_duty) + commission(lots * 100.0 * px) > cash {
                         lots -= 1.0;
                     }
                     if lots > 0.0 {
                         let v = lots * 100.0 * px;
-                        let c = commission(v);
+                        let c = commission(v) + v * buy_duty;
                         cash -= v + c;
                         shares += lots * 100.0;
                         r.costs_paid += c + lots * 100.0 * (px - b.open);
@@ -286,17 +375,48 @@ pub fn deflated_sharpe(m: &Metrics, trial_srs: &[f64]) -> Dsr {
 /// from `trial_srs` only (callers drop runs that cheated via look-ahead: their
 /// impossible Sharpe ratios are not draws from the honest search distribution).
 pub fn deflated_sharpe_n(m: &Metrics, trial_srs: &[f64], n_trials: usize) -> Dsr {
-    const GAMMA: f64 = std::f64::consts::EULER_GAMMA;
-    let n = n_trials.max(trial_srs.len()).max(1);
-    let t = m.bars.max(2) as f64;
-    // Variance of SR across trials; floor at the sampling variance under H0 (1/T)
     let var = if trial_srs.len() >= 2 {
         let mu = trial_srs.iter().sum::<f64>() / trial_srs.len() as f64;
         trial_srs.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / (trial_srs.len() as f64 - 1.0)
     } else {
         0.0
+    };
+    deflated_sharpe_v(m, var, n_trials.max(trial_srs.len()))
+}
+
+/// Daily Sharpe above which a trial is treated as implausible (≈ annual 3.2) and
+/// kept out of the variance pool.
+pub const IMPLAUSIBLE_SR_DAILY: f64 = 0.20;
+
+/// Robust cross-trial SR variance: drops implausible SRs, then uses
+/// (1.4826·MAD)² once there are ≥5 trials (outliers cannot inflate it), else the
+/// sample variance of the remaining pool. Returns (variance, kept, excluded).
+pub fn robust_sr_variance(srs: &[f64]) -> (f64, usize, usize) {
+    let mut v: Vec<f64> = srs.iter().copied().filter(|x| x.is_finite() && x.abs() <= IMPLAUSIBLE_SR_DAILY).collect();
+    let excluded = srs.len() - v.len();
+    if v.len() < 2 {
+        return (0.0, v.len(), excluded);
     }
-    .max(1.0 / t);
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = |x: &[f64]| if x.len() % 2 == 1 { x[x.len() / 2] } else { (x[x.len() / 2 - 1] + x[x.len() / 2]) / 2.0 };
+    if v.len() >= 5 {
+        let m = med(&v);
+        let mut dev: Vec<f64> = v.iter().map(|x| (x - m).abs()).collect();
+        dev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let sd = 1.4826 * med(&dev);
+        return (sd * sd, v.len(), excluded);
+    }
+    let mu = v.iter().sum::<f64>() / v.len() as f64;
+    (v.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0), v.len(), excluded)
+}
+
+/// DSR given the cross-trial SR variance and the effective number of trials.
+pub fn deflated_sharpe_v(m: &Metrics, sr_var: f64, n_trials: usize) -> Dsr {
+    const GAMMA: f64 = std::f64::consts::EULER_GAMMA;
+    let n = n_trials.max(1);
+    let t = m.bars.max(2) as f64;
+    // floor at the sampling variance under H0 (1/T)
+    let var = sr_var.max(1.0 / t);
     let sr0 = if n <= 1 {
         0.0
     } else {
@@ -345,6 +465,18 @@ mod tests {
         assert_eq!(limit_pct("SH688981", "2021-01-04"), 0.20);
         assert_eq!(limit_pct("SH600000", "2021-01-04"), 0.10);
         assert_eq!(limit_pct("BJ430047", "2023-01-04"), 0.30);
+        assert_eq!(limit_pct("BJ920002", "2024-11-04"), 0.30);
+        assert_eq!(limit_pct("SH900901", "2024-11-04"), 0.10);
+        let st = Rules { st: vec![("2020-01-01".into(), "2025-12-31".into())], list_date: None };
+        assert_eq!(limit_for("SZ000001", "2021-01-04", &st, None), Some(0.05));
+        assert_eq!(limit_for("SZ000001", "2025-07-07", &st, None), Some(0.10));
+        assert_eq!(limit_for("SZ300001", "2021-01-04", &st, None), Some(0.20));
+        let ipo = Rules { st: vec![], list_date: Some("2023-06-01".into()) };
+        assert_eq!(limit_for("SH603001", "2023-06-05", &ipo, Some(4)), None);
+        assert_eq!(limit_for("SH603001", "2023-06-08", &ipo, Some(5)), Some(0.10));
+        let old = Rules { st: vec![], list_date: Some("2015-06-01".into()) };
+        assert_eq!(limit_for("SH603002", "2015-06-01", &old, Some(0)), None);
+        assert_eq!(limit_for("SH603002", "2015-06-02", &old, Some(1)), Some(0.10));
     }
 
     #[test]
@@ -358,6 +490,11 @@ mod tests {
     #[test]
     fn lots_min_commission_and_dated_stamp_duty() {
         assert_eq!(stamp_duty("2023-08-25"), 0.001);
+        assert_eq!(stamp_duty_sides("2006-01-04"), (0.001, 0.001));
+        assert_eq!(stamp_duty_sides("2007-06-01"), (0.003, 0.003));
+        assert_eq!(stamp_duty_sides("2008-05-05"), (0.001, 0.001));
+        assert_eq!(stamp_duty_sides("2008-09-19"), (0.0, 0.001));
+        assert_eq!(stamp_duty_sides("2003-01-02"), (0.002, 0.002));
         assert_eq!(stamp_duty("2023-08-28"), 0.0005);
         // tiny account: 1 lot of ¥10 shares => ¥1000 trade, commission must be ¥5 not ¥0.25
         let bars = vec![bar("2023-08-24", 10.0, 10.0, 1e6), bar("2023-08-25", 10.0, 10.0, 1e6), bar("2023-08-28", 10.0, 10.0, 1e6), bar("2023-08-29", 10.0, 10.0, 1e6)];
@@ -412,5 +549,19 @@ mod tests {
         let b = deflated_sharpe_n(&m, &honest, 5);
         assert_eq!(b.trials, 5);
         assert!(b.sr0_daily < a.sr0_daily && b.dsr > a.dsr, "{a:?} {b:?}");
+    }
+    #[test]
+    fn robust_pool_ignores_planted_outliers() {
+        let honest = [0.01, 0.02, 0.015, 0.03, 0.005, 0.025, 0.02];
+        let mut planted = honest.to_vec();
+        planted.extend([0.15, 0.16, 0.17, 0.5]);
+        let (v0, _, _) = robust_sr_variance(&honest);
+        let (v1, kept, ex) = robust_sr_variance(&planted);
+        assert_eq!(ex, 1);
+        assert_eq!(kept, 10);
+        assert!(v1 < 4.0 * v0, "{v0} {v1}");
+        let m = Metrics { bars: 800, sharpe_daily: 0.08, kurtosis: 3.0, ..Default::default() };
+        // trial floor: N=1 is still deflated as if 20 trials were run
+        assert!(deflated_sharpe_v(&m, 0.0, 20).sr0_daily > deflated_sharpe_v(&m, 0.0, 1).sr0_daily);
     }
 }

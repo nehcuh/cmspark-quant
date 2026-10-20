@@ -105,10 +105,15 @@ async fn dev_backend_results_can_never_be_promoted() {
 #[ignore = "requires docker: scripts/test_docker.sh"]
 async fn docker_pipeline_gate_then_vault_promote() {
     let d = docker().await;
-    let (_t, o) = setup().await;
+    let (_t, mut o) = setup().await;
+    // explicit, test-only relaxation of the community-selection DSR floor (default 20)
+    // so the vault path can be exercised on the synthetic sample
+    o.gate.dsr_min_trials = 1;
     let id = add(&o, "posts", "ma_crossover").await.unwrap();
     let r = o.backtest(&id, "SAMPLE_REGIME", &d, None).await.unwrap();
     assert_eq!(r.status, StrategyStatus::GatePassed, "{:?}", r.reasons);
+    let start = o.store.audit_entries(Some(&id), 200).unwrap().into_iter().find(|e| e.action == "sandbox_start").unwrap();
+    assert!(start.details["probe"]["seed"].as_str().is_some() && start.details["probe"]["tail_cuts"].as_array().unwrap().len() >= 2, "{}", start.details["probe"]);
     // native host replay (BarPlayer) reproduces the sandboxed runner's positions
     let bars = cmsq_core::market::read_bars(&o.home.data_dir(), "SAMPLE_REGIME").unwrap();
     let t = o.store.trials().unwrap().into_iter().find(|t| t.strategy_id == id).unwrap();
@@ -120,7 +125,7 @@ async fn docker_pipeline_gate_then_vault_promote() {
     let res = job.result.as_ref().unwrap();
     assert_eq!(res["computed_by"], "cmsq-core scorer (host, trusted)");
     assert!(res["lookahead_probe"]["containers"].as_u64().unwrap() >= 7);
-    assert!(job.runner_identity.as_deref().unwrap().contains("cmsq.runner.version=2.0.0"));
+    assert!(job.runner_identity.as_deref().unwrap().contains("cmsq.runner.version=2.1.0"));
     // typed confirmation: id prefix alone is not enough
     let e = o.promote(&id, "test", &id[..8], &d).await.unwrap_err();
     assert!(matches!(e.downcast_ref::<CoreError>(), Some(CoreError::ConfirmationMismatch { .. })));
@@ -132,7 +137,61 @@ async fn docker_pipeline_gate_then_vault_promote() {
     }
     // vault is one-shot
     assert!(o.promote(&id, "test", &format!("PROMOTE {}", &id[..8]), &d).await.is_err());
+    // ... and per IDEA: a re-post of the same idea with different text gets no fresh vault
+    let mut repost: serde_json::Value = serde_json::from_slice(&read("posts", "ma_crossover")).unwrap();
+    repost["content"]["title"] = "双均线 v2（换了个标题再发一次）".into();
+    repost["content"]["body"] = repost["content"]["body"].as_str().unwrap().replace("思路", "新思路").into();
+    let IngestOutcome::New(id2) = o.ingest_bytes(&serde_json::to_vec(&repost).unwrap(), "repost").unwrap() else { panic!("repost deduped") };
+    o.extract(&id2, &HeuristicExtractor).await.unwrap();
+    let r2 = o.backtest(&id2, "SAMPLE_REGIME", &d, None).await.unwrap();
+    assert_eq!(r2.status, StrategyStatus::GatePassed, "{:?}", r2.reasons);
+    let e = o.promote(&id2, "test", &format!("PROMOTE {}", &id2[..8]), &d).await.unwrap_err();
+    assert!(matches!(e.downcast_ref::<CoreError>(), Some(CoreError::VaultSpent(_))), "{e:#}");
+    assert_eq!(o.store.get_strategy(&id2).unwrap().status, StrategyStatus::Rejected);
     assert!(o.store.verify_audit().unwrap().ok);
+}
+
+/// H3: data integrity is enforced from the audited snapshot, not from meta.json.
+#[tokio::test]
+async fn data_tampering_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_t, o) = setup().await;
+    let dd = o.home.data_dir();
+    assert!(o.load_dataset("SAMPLE_REGIME").await.is_ok());
+    let integrity = |e: anyhow::Error| matches!(e.downcast_ref::<CoreError>(), Some(CoreError::DataIntegrity(_) | CoreError::NoData(_)));
+    // 1. drop snapshot_sha256 from meta.json -> refused
+    let mp = dd.join("SAMPLE_REGIME.meta.json");
+    let orig = std::fs::read_to_string(&mp).unwrap();
+    let mut m: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    m["extra"].as_object_mut().unwrap().remove("snapshot_sha256");
+    std::fs::write(&mp, m.to_string()).unwrap();
+    assert!(integrity(o.load_dataset("SAMPLE_REGIME").await.unwrap_err()));
+    std::fs::write(&mp, &orig).unwrap();
+    // 2. make the snapshot writable and edit a close -> refused (mode, then hash)
+    let sha = m["extra"]["snapshot_sha256"].as_str().map(String::from).unwrap_or_else(|| serde_json::from_str::<serde_json::Value>(&orig).unwrap()["extra"]["snapshot_sha256"].as_str().unwrap().to_string());
+    let sp = dd.join("snapshots").join(format!("{sha}.csv"));
+    std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(integrity(o.load_dataset("SAMPLE_REGIME").await.unwrap_err()));
+    let text = std::fs::read_to_string(&sp).unwrap().replacen(",1", ",2", 1);
+    std::fs::write(&sp, text).unwrap();
+    std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(integrity(o.load_dataset("SAMPLE_REGIME").await.unwrap_err()));
+    // 3. a user CSV relabelled source=sample is refused; as csv it can't pass cross-validation
+    let csv = _t.path().join("x.csv");
+    let bars = cmsq_core::market::read_bars(&dd, "SAMPLE_TREND").unwrap();
+    std::fs::write(&csv, cmsq_core::market::to_csv(&bars, false)).unwrap();
+    o.fetch_data(&cmsq_core::market::CsvSource { path: csv, adjustment: "hfq".into() }, "SH600999", usize::MAX).await.unwrap();
+    let (_, _, att) = o.load_dataset("SH600999").await.unwrap();
+    assert_eq!(att["validation_ok"], false);
+    assert_eq!(att["adjusted"], false, "hfq label without raw prices + adj_factor is not 'adjusted'");
+    let mp = dd.join("SH600999.meta.json");
+    let mut m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&mp).unwrap()).unwrap();
+    m["source"] = "sample".into();
+    std::fs::write(&mp, m.to_string()).unwrap();
+    let (_, _, att) = o.load_dataset("SH600999").await.unwrap();
+    assert_eq!(att["source"], "csv", "verdicts come from the audited record, not meta.json");
+    // 4. sample source cannot serve a non-sample symbol
+    assert!(o.fetch_data(&cmsq_core::market::SampleSource, "SH600000", 100).await.is_err());
 }
 
 /// Every reviewer attack post must end Failed/Rejected (or never get past ingest).
@@ -141,7 +200,8 @@ async fn docker_pipeline_gate_then_vault_promote() {
 async fn docker_reviewer_attacks_never_pass() {
     let d = docker().await;
     let (_t, o) = setup().await;
-    let attacks = ["forge", "memo_peek", "data_peek", "hidden_peek", "length_tell", "symlink_out", "escape", "forkbomb", "bigout", "evil_path", "evil_deep"];
+    let attacks = ["forge", "memo_peek", "data_peek", "hidden_peek", "length_tell", "symlink_out", "escape", "forkbomb", "bigout", "evil_path", "evil_deep",
+        "r2_clock_dev", "r2_clock_dev_bh", "r2_clock_vault", "r2_clock_probe", "r2_cut_aware", "r2_rng_alias", "r2_sparse_peek"];
     for a in attacks {
         let Some(id) = add(&o, "attacks", a).await else { continue };
         let s = o.store.get_strategy(&id).unwrap();
@@ -155,7 +215,18 @@ async fn docker_reviewer_attacks_never_pass() {
         let ev = o.store.latest_evaluation(&s.id).unwrap().unwrap();
         assert!(ev.reasons.iter().any(|r| r.starts_with("no_lookahead")), "{a}: {:?}", ev.reasons);
     }
-    for (a, want) in [("bigout", "output_cap|oom"), ("symlink_out", "bad_output"), ("data_peek", "strategy_error")] {
+    // round 2: cut-aware / sparse / np.roll peeks are caught by the (randomised, tail-covering) probe
+    for t in ["均线趋势 + 大波动过滤", "ADV2_sparse_peek", "ADV2_rng_alias"] {
+        let s = o.store.list_strategies(None).unwrap().into_iter().find(|s| s.title == t).unwrap();
+        let ev = o.store.latest_evaluation(&s.id).unwrap().unwrap();
+        assert!(ev.reasons.iter().any(|r| r.starts_with("no_lookahead") || r.starts_with("static_risks")), "{t}: {:?}", ev.reasons);
+    }
+    // the sandbox shows neither the real clock nor real bar dates: the probe strategy never goes long
+    let s = o.store.list_strategies(None).unwrap().into_iter().find(|s| s.title == "ADV2_clock_probe").unwrap();
+    let job = o.store.list_jobs(Some(&s.id)).unwrap().into_iter().next().unwrap();
+    assert_eq!(job.status, "succeeded", "{:?}", job.error);
+    assert_eq!(job.result.unwrap()["development"]["exposure"].as_f64().unwrap(), 0.0, "clock or real dates leaked into the sandbox");
+    for (a, want) in [("bigout", "output_cap|oom"), ("symlink_out", "bad_output"), ("data_peek", "strategy_error"), ("forkbomb", "pids_exhausted")] {
         let s = o.store.list_strategies(None).unwrap().into_iter().find(|s| s.title == format!("ADV_{a}")).unwrap();
         let got = o.store.list_jobs(Some(&s.id)).unwrap()[0].status.clone();
         assert!(want.split('|').any(|w| w == got), "{a}: {got}");

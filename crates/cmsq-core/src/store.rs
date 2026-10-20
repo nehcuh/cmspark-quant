@@ -75,6 +75,12 @@ impl Store {
                 conn.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {col} {ddl}"))?;
             }
         }
+        for (col, ddl) in [("idea_key", "TEXT"), ("symbol", "TEXT"), ("code_sha", "TEXT")] {
+            let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('vault_touches') WHERE name=?1")?.exists([col])?;
+            if !has {
+                conn.execute_batch(&format!("ALTER TABLE vault_touches ADD COLUMN {col} {ddl}"))?;
+            }
+        }
         let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('trials') WHERE name='lookahead'")?.exists([])?;
         if !has {
             conn.execute_batch("ALTER TABLE trials ADD COLUMN lookahead INTEGER NOT NULL DEFAULT 0")?;
@@ -151,6 +157,10 @@ impl Store {
             }
             let calc = audit::entry_hash(&self.cfg.key, &prev_hash, seq, &ts, &actor, &action, target.as_deref(), &details, success != 0);
             if calc != hash {
+                if seq == 1 {
+                    let why = "this workspace's audit chain was not signed with the current key: it was created by an older cmsq (unkeyed sha256 chain) or with a different audit.key / CMSQ_SECRETS_DIR. Use a fresh CMSQ_HOME, or point CMSQ_SECRETS_DIR at the key that created it";
+                    return Ok(bad(format!("HMAC mismatch at the first entry — {why}")));
+                }
                 return Ok(bad("HMAC mismatch (entry modified or chain re-computed without the key)".into()));
             }
             prev = hash;
@@ -311,8 +321,32 @@ impl Store {
         Ok(self.conn.query_row("SELECT job_id, passed FROM vault_touches WHERE strategy_id=?1", [sid], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0))).optional()?)
     }
     pub fn record_vault_touch(&self, sid: &str, job: &str, passed: bool) -> Result<()> {
-        self.conn.execute("INSERT INTO vault_touches(strategy_id,job_id,passed,created_at) VALUES(?1,?2,?3,?4)", params![sid, job, passed as i64, Utc::now().to_rfc3339()])?;
+        self.record_vault_touch_keyed(sid, job, passed, None, None, None)
+    }
+    pub fn record_vault_touch_keyed(&self, sid: &str, job: &str, passed: bool, idea_key: Option<&str>, symbol: Option<&str>, code_sha: Option<&str>) -> Result<()> {
+        self.conn.execute("INSERT INTO vault_touches(strategy_id,job_id,passed,created_at,idea_key,symbol,code_sha) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![sid, job, passed as i64, Utc::now().to_rfc3339(), idea_key, symbol, code_sha])?;
         Ok(())
+    }
+    /// (strategy_id, idea_key, symbol, code_sha) of every vault run so far.
+    #[allow(clippy::type_complexity)]
+    pub fn vault_touches(&self) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>> {
+        let mut st = self.conn.prepare("SELECT strategy_id, idea_key, symbol, code_sha FROM vault_touches ORDER BY created_at")?;
+        let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(v)
+    }
+
+    /// Latest successful `market_data_fetch` audit entry for `symbol`, with its
+    /// own HMAC re-verified (an edited row is refused).
+    #[allow(clippy::type_complexity)]
+    pub fn latest_fetch_attestation(&self, symbol: &str) -> Result<Option<AuditEntry>> {
+        let row: Option<(i64, String, String, String, Option<String>, String, i64, String, String)> = self.conn.query_row(
+            "SELECT seq,ts,actor,action,target,details,success,prev_hash,hash FROM audit WHERE action='market_data_fetch' AND target=?1 AND success=1 ORDER BY seq DESC LIMIT 1",
+            [symbol], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))).optional()?;
+        let Some((seq, ts, actor, action, target, d, ok, prev, hash)) = row else { return Ok(None) };
+        let expect = audit::entry_hash(&self.cfg.key, &prev, seq, &ts, &actor, &action, target.as_deref(), &d, ok != 0);
+        anyhow::ensure!(expect == hash, crate::error::CoreError::AuditIntegrity(format!("data attestation entry seq {seq} fails its HMAC")));
+        Ok(Some(AuditEntry { seq, ts, actor, action, target, details: serde_json::from_str(&d)?, success: ok != 0, prev_hash: prev, hash }))
     }
 
     // ---------- evaluations / signals ----------
