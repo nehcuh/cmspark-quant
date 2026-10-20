@@ -1,24 +1,20 @@
-//! Real sandbox tests. Docker tests skip (with a message) when the daemon or the
-//! runner image is unavailable; bwrap tests skip when bwrap is missing.
+//! Real sandbox tests. They are `#[ignore]`d so a plain `cargo test` on a machine
+//! without Docker/bwrap is honest about not running them, and they PANIC (never
+//! skip) when run without the prerequisite. Run them with `scripts/test_docker.sh`
+//! (or `cargo test -p cmsq-core -- --ignored`).
 use cmsq_core::sandbox::{docker::DockerSandboxExecutor, process::ProcessSandboxExecutor, Mount, Outcome, SandboxExecutor, SandboxLimits, SandboxRequest};
 
-async fn docker() -> Option<DockerSandboxExecutor> {
+async fn docker() -> DockerSandboxExecutor {
     match DockerSandboxExecutor::connect().await {
-        Ok(d) => Some(d),
-        Err(e) => {
-            if std::env::var("CMSQ_REQUIRE_DOCKER").is_ok() {
-                panic!("CMSQ_REQUIRE_DOCKER set but docker unavailable: {e}");
-            }
-            eprintln!("SKIP docker tests: {e}");
-            None
-        }
+        Ok(d) => d,
+        Err(e) => panic!("docker test run without a reachable docker daemon: {e} (see README: Docker setup)"),
     }
 }
 
 fn req(code: &str, ro: &std::path::Path, out: &std::path::Path, timeout: u64) -> SandboxRequest {
     std::fs::write(ro.join("probe.py"), code).unwrap();
     SandboxRequest {
-        id: uuid::Uuid::new_v4().to_string(), image: "cmsq-runner:1.0.0".into(),
+        id: uuid::Uuid::new_v4().to_string(), image: "cmsq-runner:2.0.0".into(),
         command: vec!["python3".into(), "-I".into(), "/data/probe.py".into()], env: vec![],
         mounts: vec![Mount { host: ro.to_path_buf(), container: "/data".into(), read_only: true },
                      Mount { host: out.to_path_buf(), container: "/out".into(), read_only: false }],
@@ -54,8 +50,9 @@ fn check_probe(out: &std::path::Path) {
 }
 
 #[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
 async fn docker_enforces_isolation() {
-    let Some(d) = docker().await else { return };
+    let d = docker().await;
     let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let r = d.execute(&req(PROBE, ro.path(), out.path(), 60)).await.unwrap();
     assert_eq!(r.exit_code, 0, "{}", r.stderr);
@@ -63,8 +60,9 @@ async fn docker_enforces_isolation() {
 }
 
 #[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
 async fn docker_timeout_kills() {
-    let Some(d) = docker().await else { return };
+    let d = docker().await;
     let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let r = d.execute(&req("import time\ntime.sleep(60)", ro.path(), out.path(), 3)).await.unwrap();
     assert_eq!(r.outcome, Outcome::TimedOut);
@@ -72,8 +70,9 @@ async fn docker_timeout_kills() {
 }
 
 #[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
 async fn docker_memory_limit() {
-    let Some(d) = docker().await else { return };
+    let d = docker().await;
     let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut q = req("x = bytearray(900 * 1024 * 1024)\nprint(len(x))", ro.path(), out.path(), 60);
     q.limits.memory_mb = 128;
@@ -82,13 +81,28 @@ async fn docker_memory_limit() {
 }
 
 #[tokio::test]
+#[ignore = "requires bubblewrap: scripts/test_docker.sh"]
 async fn process_backend_isolation() {
-    if !ProcessSandboxExecutor::available() {
-        eprintln!("SKIP bwrap");
-        return;
-    }
+    assert!(ProcessSandboxExecutor::available(), "bwrap not installed");
     let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let r = ProcessSandboxExecutor.execute(&req(PROBE, ro.path(), out.path(), 30)).await.unwrap();
     assert_eq!(r.exit_code, 0, "{}", r.stderr);
     check_probe(out.path());
+}
+
+#[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
+async fn docker_identity_comes_from_image_inspect() {
+    let d = docker().await;
+    let id = d.runner_identity("cmsq-runner:2.0.0").await.expect("runner image missing: run scripts/build_runner.sh");
+    assert!(id.starts_with("sha256:") && id.ends_with("|cmsq.runner.version=2.0.0"), "{id}");
+}
+
+#[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
+async fn docker_output_flood_is_capped() {
+    let d = docker().await;
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let r = d.execute(&req("import sys\nsys.stdout.write('A'*(50*1024*1024))", ro.path(), out.path(), 60)).await.unwrap();
+    assert_eq!(r.stdout.len(), cmsq_core::sandbox::OUTPUT_CAP);
 }

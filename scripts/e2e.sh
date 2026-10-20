@@ -1,76 +1,138 @@
 #!/usr/bin/env bash
-# End-to-end: drop → ingest → extract → sandbox backtest → gate → promote/reject → audit verify.
-# Uses a fresh throw-away workspace. Real Docker sandbox when available (else DEV bwrap backend).
+# End-to-end: drop → ingest → extract → per-variant sandbox runs → trusted host
+# scoring → gate → typed promote → one-time vault → audit verify + tamper attacks.
+#
+# Exits NON-ZERO when any strategy ends in an unexpected state, when an attack is
+# not caught, when tampering is not detected, or when Docker is unavailable
+# (pass --allow-dev to run on the DEV bwrap backend; then nothing may pass).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ALLOW_DEV=0; [ "${1:-}" = "--allow-dev" ] && ALLOW_DEV=1
 export CMSQ_HOME="${CMSQ_HOME:-$(mktemp -d /tmp/cmsq-e2e.XXXX)}"
+export CMSQ_SECRETS_DIR="${CMSQ_SECRETS_DIR:-$CMSQ_HOME.secrets}"   # outside CMSQ_HOME
 BIN=target/debug/cmsq
+FAILS=0
 hr() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+bad() { echo "E2E FAILURE: $*"; FAILS=$((FAILS+1)); }
 
 hr "build"
-cargo build -q -p cmsq-cli -j4
-BACKEND=process
+cargo build -q -p cmsq-cli
 if docker info >/dev/null 2>&1; then
   BACKEND=docker
-  docker image inspect cmsq-runner:1.0.0 >/dev/null 2>&1 || scripts/build_runner.sh
+  docker image inspect cmsq-runner:2.0.0 >/dev/null 2>&1 || scripts/build_runner.sh
+elif [ $ALLOW_DEV = 1 ]; then
+  BACKEND=process; echo "!!! DEV backend (--allow-dev): nothing may pass the gate"
 else
-  echo "WARNING: docker not usable by $(id -un); using DEV process backend (results cannot pass the gate)"
+  echo "docker not usable by $(id -un) — see README 'Docker setup' (or run with --allow-dev)"; exit 2
 fi
-echo "workspace: $CMSQ_HOME   backend: $BACKEND"
+echo "workspace: $CMSQ_HOME   secrets: $CMSQ_SECRETS_DIR   backend: $BACKEND"
 
-hr "init + market data (host-side; sandbox stays offline)"
+hr "init + market data (host-side; containers never see the dataset)"
 $BIN init
 if $BIN data fetch SH600519 --count 1200 2>/tmp/cmsq-tdx.err; then
-  REAL=SH600519
+  echo "real data cached (UNADJUSTED: gate check data_adjusted will refuse it)"
 else
-  echo "rstdx/TDX fetch failed: $(tail -1 /tmp/cmsq-tdx.err) — using bundled SAMPLE data (offline fallback)"
-  REAL=""
+  echo "rstdx/TDX fetch failed: $(tail -1 /tmp/cmsq-tdx.err) — bundled SAMPLE data only"
 fi
 $BIN data list
 
-hr "1. CMspark drop → ingest"
-cp fixtures/posts/*.json "$CMSQ_HOME/drop/"
+hr "1. CMspark drop → ingest (posts + reviewer attack posts)"
+cp fixtures/posts/*.json fixtures/attacks/*.json "$CMSQ_HOME/drop/"
 echo '{"spec":"cmspark.scrape.v1","source":{"site":"x"}}' > "$CMSQ_HOME/drop/broken.json"
+ln -s /etc/passwd "$CMSQ_HOME/drop/symlink_attack.json"
 $BIN ingest
+for f in broken evil_deep symlink_attack; do [ -e "$CMSQ_HOME/drop/rejected/$f.json" ] || [ -L "$CMSQ_HOME/drop/rejected/$f.json" ] || bad "$f.json was not rejected at ingest"; done
 echo "-- re-dropping one file (dedupe):"; cp fixtures/posts/ma_crossover.json "$CMSQ_HOME/drop/again.json"; $BIN ingest
 
 hr "2. extract (offline heuristic extractor)"
 $BIN extract
 
-hr "3+4. sandbox backtests (trend-style ideas on SAMPLE_TREND)"
-ids() { $BIN list --json | python3 -c "import json,sys; t=sys.argv[1]; print(' '.join(s['id'][:8] for s in json.load(sys.stdin) if s['status']=='Extracted' and t in s['title']))" "$1"; }
-for t in 双均线 动量 明日 网格; do for id in $(ids "$t"); do $BIN backtest "$id" --symbol SAMPLE_TREND --backend $BACKEND; done; done
-hr "3+4. mean-reversion ideas on SAMPLE_RANGE"
-for t in 布林 短期反转; do for id in $(ids "$t"); do $BIN backtest "$id" --symbol SAMPLE_RANGE --backend $BACKEND; done; done
-if [ -n "$REAL" ]; then
-  hr "real A-share data via rstdx: re-run MA crossover on $REAL"
-  id=$($BIN list --json | python3 -c "import json,sys; print([s['id'][:8] for s in json.load(sys.stdin) if '双均线' in s['title']][0])")
-  $BIN backtest "$id" --symbol "$REAL" --backend $BACKEND
-fi
+idof() { $BIN list --json | python3 -c "import json,sys; v=[s['id'][:8] for s in json.load(sys.stdin) if sys.argv[1] in s['title']]; print(v[0] if v else '')" "$1"; }
+statusof() { $BIN show "$1" --json | python3 -c "import json,sys; print(json.load(sys.stdin)['strategy']['status'])"; }
+# title-substring | symbol | allowed final statuses after backtest
+EXPECT=(
+  "双均线|SAMPLE_REGIME|GatePassed"
+  "20日动量|SAMPLE_REGIME|Rejected"
+  "布林带|SAMPLE_RANGE|Rejected"
+  "短期反转|SAMPLE_RANGE|Rejected"
+  "明日涨跌|SAMPLE_TREND|Rejected"
+  "网格|SAMPLE_TREND|Failed|Rejected"
+  "ADV_forge|SAMPLE_TREND|Rejected"
+  "ADV_memo_peek|SAMPLE_TREND|Rejected"
+  "ADV_data_peek|SAMPLE_TREND|Failed"
+  "ADV_hidden_peek|SAMPLE_TREND|Rejected"
+  "ADV_length_tell|SAMPLE_TREND|Rejected"
+  "ADV_symlink_out|SAMPLE_TREND|Failed"
+  "ADV_escape|SAMPLE_TREND|Rejected"
+  "ADV_forkbomb|SAMPLE_TREND|Failed|Rejected"
+  "ADV_bigout|SAMPLE_TREND|Failed"
+)
+[ $BACKEND = process ] && EXPECT[0]="双均线|SAMPLE_REGIME|Rejected"
+hr "3+4. backtests: one fresh container per probe variant, scored on the host"
+for e in "${EXPECT[@]}"; do
+  IFS='|' read -r t sym allowed <<<"$e"
+  id=$(idof "$t"); [ -n "$id" ] || { bad "no strategy titled $t"; continue; }
+  $BIN backtest "$id" --symbol "$sym" --backend $BACKEND 2>/dev/null || true
+done
+# evil_path (title exactly "T", hostile path-like fields) must be rejected at ingest or fail extraction
+id=$($BIN list --json | python3 -c "import json,sys; v=[s['id'][:8] for s in json.load(sys.stdin) if s['title']=='T']; print(v[0] if v else '')")
+[ -z "$id" ] || [ "$(statusof "$id")" = Failed ] || bad "evil_path did not end Failed"
 
-hr "5. manual promote (confirmation desk)"
-PASS=$($BIN list --status Evaluated --json | python3 -c "import json,sys; v=json.load(sys.stdin); print(v[0]['id'][:8] if v else '')")
+hr "5. typed confirmation + one-time vault holdout"
+PASS=$($BIN list --status GatePassed --json | python3 -c "import json,sys; v=json.load(sys.stdin); print(v[0]['id'][:8] if v else '')")
 if [ -n "$PASS" ]; then
-  echo "-- wrong confirmation is refused:"; $BIN promote "$PASS" --confirm nope || true
-  $BIN promote "$PASS" --confirm "$PASS"
-else
-  echo "no strategy passed the gate"
+  echo "-- id prefix alone is refused:"; $BIN promote "$PASS" --confirm "$PASS" && bad "promote accepted a non-typed confirmation" || true
+  $BIN promote "$PASS" --confirm "PROMOTE $PASS" || echo "(vault decided: not promoted)"
+  FINAL=$(statusof "$PASS"); echo "final: $FINAL"
+  case "$FINAL" in Promoted|Rejected) ;; *) bad "after vault, status $FINAL";; esac
+  echo "-- the vault is one-shot:"; $BIN promote "$PASS" --confirm "PROMOTE $PASS" && bad "vault reused" || true
+  EXPECT[0]="双均线|SAMPLE_REGIME|Promoted|Rejected"
+elif [ $BACKEND = docker ]; then
+  bad "expected one GatePassed strategy on docker"
 fi
 
-hr "library"
-$BIN list
-hr "jobs"
-$BIN jobs
-hr "signals"
-$BIN signals
-hr "audit"
-$BIN audit verify
-cp "$CMSQ_HOME/cmsq.db" /tmp/cmsq-tamper.db
-python3 - <<'PY'
-import sqlite3; c=sqlite3.connect("/tmp/cmsq-tamper.db")
-c.executescript("DROP TRIGGER audit_no_update;"); c.execute("UPDATE audit SET actor='attacker' WHERE seq=3"); c.commit()
+hr "expected outcomes"
+printf '%-18s %-14s %-12s %s\n' TITLE SYMBOL STATUS EXPECTED
+for e in "${EXPECT[@]}"; do
+  IFS='|' read -r t sym allowed <<<"$e"
+  id=$(idof "$t"); st=$(statusof "$id")
+  ok=FAIL; for a in ${allowed//|/ }; do [ "$st" = "$a" ] && ok=ok; done
+  printf '%-18s %-14s %-12s %-22s %s\n' "$t" "$sym" "$st" "$allowed" "$ok"
+  [ $ok = ok ] || bad "$t ended $st, expected $allowed"
+done
+
+hr "library / jobs / trials / signals"
+$BIN list; $BIN jobs | head -20; $BIN trials | head -3; $BIN signals
+
+hr "audit: verify, then reviewer tamper attacks on the live DB (restored after each)"
+$BIN audit verify || bad "clean audit chain did not verify"
+DB="$CMSQ_HOME/cmsq.db"
+attack() { # $1 = name, $2 = SQL/python body
+  python3 - "$DB" "$2" <<'PY'
+import sqlite3, sys, hashlib
+db, kind = sys.argv[1], sys.argv[2]
+c = sqlite3.connect(db); bk = sqlite3.connect(db + ".bak"); c.backup(bk); bk.close()
+c.executescript("DROP TRIGGER IF EXISTS audit_no_update; DROP TRIGGER IF EXISTS audit_no_delete;")
+if kind == "edit":
+    c.execute("UPDATE audit SET actor='attacker' WHERE seq=3")
+elif kind == "truncate":
+    c.execute("DELETE FROM audit WHERE seq > (SELECT MAX(seq)-3 FROM audit)")
+elif kind == "rechain":   # re-compute every link with the PUBLIC (unkeyed) algorithm
+    prev = "0" * 64
+    for seq, ts, actor, action, target, details, success in c.execute("SELECT seq,ts,actor,action,target,details,success FROM audit ORDER BY seq").fetchall():
+        if seq == 3: actor = "attacker"
+        h = hashlib.sha256()
+        for p in [prev, str(seq), ts, actor, action, target or "", details, "1" if success else "0"]:
+            b = p.encode(); h.update(len(b).to_bytes(8, "little")); h.update(b)
+        hh = h.hexdigest(); c.execute("UPDATE audit SET actor=?, prev_hash=?, hash=? WHERE seq=?", (actor, prev, hh, seq)); prev = hh
+c.commit()
 PY
-echo "-- tampered copy:"; CMSQ_HOME=/tmp/cmsq-tamper-home $BIN init >/dev/null; cp /tmp/cmsq-tamper.db /tmp/cmsq-tamper-home/cmsq.db
-CMSQ_HOME=/tmp/cmsq-tamper-home $BIN audit verify && { echo "TAMPER NOT DETECTED"; exit 1; } || echo "(tamper detected as expected)"
-rm -rf /tmp/cmsq-tamper-home /tmp/cmsq-tamper.db
-hr "done — workspace kept at $CMSQ_HOME"
+  if $BIN audit verify; then bad "audit attack '$1' NOT detected"; else echo "   ($1 detected as expected)"; fi
+  python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]+'.bak'); d=sqlite3.connect(sys.argv[1]); s.backup(d)" "$DB"; rm -f "$DB.bak"
+}
+attack edit edit; attack truncate truncate; attack rechain rechain
+$BIN audit verify || bad "restored audit chain did not verify"
+
+hr "result"
+if [ $FAILS -ne 0 ]; then echo "E2E FAILED: $FAILS problem(s)"; exit 1; fi
+echo "E2E OK — workspace kept at $CMSQ_HOME"
