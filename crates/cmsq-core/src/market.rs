@@ -106,7 +106,10 @@ pub fn read_bars(dir: &Path, symbol: &str) -> Result<Vec<Bar>> {
 /// Is the series usable for return computation without corporate-action gaps?
 pub fn is_adjusted(meta: &DataMeta, bars: &[Bar]) -> bool {
     let a = meta.adjustment.to_lowercase();
-    meta.source == "sample" || a.starts_with("n/a (synthetic") || bars.iter().all(|b| b.adj_factor.is_some()) || a.starts_with("qfq") || a.starts_with("hfq")
+    // a price label alone is not enough: lots / fees / limits need RAW prices, so
+    // only raw prices + an adj_factor column (or the bundled synthetic samples) count
+    let _ = a;
+    (meta.source == "sample" && meta.symbol.starts_with("SAMPLE_")) || (!bars.is_empty() && bars.iter().all(|b| b.adj_factor.is_some()))
 }
 
 /// User-supplied CSV (e.g. exported adjusted data). `adjustment` must describe it

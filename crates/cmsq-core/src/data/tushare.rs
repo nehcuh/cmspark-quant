@@ -235,6 +235,22 @@ impl MarketDataSource for Tushare {
         // forward-fill missing adj factors (none expected); a bar without a factor makes the series unadjusted
         let missing_adj = bars.iter().filter(|b| b.adj_factor.is_none()).count();
         let name = binfo.first().and_then(|r| r.get(idx(&bf, "name").ok()?)?.as_str().map(String::from)).unwrap_or_default();
+        let list_date = binfo.first().and_then(|r| r.get(idx(&bf, "list_date").ok()?)?.as_str().filter(|d| d.len() == 8).map(ymd));
+        // ST history from name changes (ST / *ST periods drive the 5% band)
+        let st_periods: Vec<(String, String)> = match self.query("namechange", json!({"ts_code": ts}), "name,start_date,end_date").await {
+            Ok((nf, rows)) => {
+                let (ni, si, ei) = (idx(&nf, "name")?, idx(&nf, "start_date")?, idx(&nf, "end_date")?);
+                let mut v: Vec<(String, String)> = rows.iter().filter(|r| r[ni].as_str().is_some_and(|n| n.to_uppercase().contains("ST")))
+                    .filter_map(|r| Some((ymd(r[si].as_str()?), r[ei].as_str().filter(|d| d.len() == 8).map(ymd).unwrap_or_else(|| "9999-12-31".into()))))
+                    .collect();
+                v.sort();
+                v
+            }
+            Err(e) => {
+                tracing_warn(&format!("tushare namechange unavailable ({e:#}); ST periods taken from the current name only"));
+                if name.to_uppercase().contains("ST") { vec![("0000-01-01".into(), "9999-12-31".into())] } else { vec![] }
+            }
+        };
         let is_st = name.to_uppercase().contains("ST");
         anyhow::ensure!(!bars.is_empty(), "no bars");
         Ok((bars.clone(), DataMeta {
@@ -242,7 +258,7 @@ impl MarketDataSource for Tushare {
             fetched_at: chrono::Utc::now().to_rfc3339(), start: bars[0].date.clone(), end: bars.last().unwrap().date.clone(), bars: bars.len(),
             adjustment: if missing_adj == 0 { "adj_factor (tushare adj_factor; container sees hfq = raw×factor)".into() } else { format!("none ({missing_adj} bars missing adj_factor)") },
             server: Some(ENDPOINT.into()),
-            extra: json!({"ts_code": ts, "name": name, "is_st": is_st, "st_limit_note": if is_st {"ST ±5% limit NOT modelled by scorer"} else {""},
+            extra: json!({"ts_code": ts, "name": name, "is_st": is_st, "st_periods": st_periods, "list_date": list_date,
                 "suspended_days_filled": suspended.len(), "suspended_sample": suspended.iter().take(10).collect::<Vec<_>>(),
                 "off_calendar_bars_dropped": off_calendar, "volume_unit": "shares (tushare vol 手 ×100)", "rate_per_min": self.rate("daily")}),
         }))

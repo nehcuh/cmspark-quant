@@ -11,6 +11,10 @@ use std::sync::Arc;
 /// Closes differing by more than this (relative) on the same day are flagged.
 pub const DIVERGENCE_THRESHOLD: f64 = 0.001;
 pub const MIN_OVERLAP: usize = 20;
+/// Any single day beyond this relative difference blocks the dataset.
+pub const HARD_DIVERGENCE: f64 = 0.01;
+/// Up to this many flagged (0.1%..1%) days are tolerated, or 0.2% of the overlap if larger.
+pub const MAX_FLAGGED_DAYS: usize = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceHealth {
@@ -57,21 +61,34 @@ pub fn compare(a: &[Bar], b: &[Bar], against: &str) -> Validation {
             }
         }
     }
-    let status = if overlap < MIN_OVERLAP { "unvalidated" } else if div.is_empty() { "ok" } else { "divergent" };
+    // policy: isolated small differences are recorded and tolerated; many, or any large one, block
+    let budget = MAX_FLAGGED_DAYS.max(overlap / 500);
+    let status = if overlap < MIN_OVERLAP {
+        "unvalidated"
+    } else if div.is_empty() {
+        "ok"
+    } else if max_rel <= HARD_DIVERGENCE && div.len() <= budget {
+        "ok_with_flags"
+    } else {
+        "divergent"
+    };
+    let note = format!("{} of {overlap} overlapping closes differ by >{:.1}% (policy: block if >{budget} such days or any day >{:.0}%; max {:.3}%)",
+        div.len(), DIVERGENCE_THRESHOLD * 100.0, HARD_DIVERGENCE * 100.0, max_rel * 100.0);
     Validation { status: status.into(), against: Some(against.into()), overlap_days: overlap, divergent_days: div.len(), max_rel_diff: max_rel,
-        threshold: DIVERGENCE_THRESHOLD, note: format!("{} of {overlap} overlapping closes differ by >{:.1}%", div.len(), DIVERGENCE_THRESHOLD * 100.0),
-        divergent_sample: div.into_iter().take(20).collect() }
+        threshold: DIVERGENCE_THRESHOLD, note, divergent_sample: div.into_iter().take(20).collect() }
 }
 
 /// Gate view of a cached dataset: (ok, detail). Synthetic samples pass; real
 /// data must be cross-validated with no divergent day.
 pub fn validation_status(meta: &DataMeta) -> (bool, String) {
     match meta.source.as_str() {
-        "sample" => return (true, "synthetic sample (no cross-validation needed)".into()),
-        "csv" => return (true, "user-supplied CSV: not cross-validated (user attests)".into()),
+        "sample" if meta.symbol.starts_with("SAMPLE_") => return (true, "bundled synthetic sample (hash-checked against the binary)".into()),
+        "sample" => return (false, "source=sample on a non-SAMPLE symbol: refused".into()),
+        "csv" => return (false, "user-supplied CSV: not cross-validated against an independent source; real-data checks cannot pass".into()),
         _ => {}
     }
     match meta.extra.get("validation").and_then(|v| serde_json::from_value::<Validation>(v.clone()).ok()) {
+        Some(v) if v.status == "ok_with_flags" => (true, format!("{} vs {}: {} — tolerated and recorded", meta.source, v.against.clone().unwrap_or_default(), v.note)),
         Some(v) if v.status == "ok" => (true, format!("{} vs {}: {} overlapping closes agree within {:.1}% (max diff {:.4}%)",
             meta.source, v.against.unwrap_or_default(), v.overlap_days, v.threshold * 100.0, v.max_rel_diff * 100.0)),
         Some(v) if v.status == "divergent" => (false, format!("{} vs {}: {} — dataset blocked; investigate before trusting", meta.source, v.against.unwrap_or_default(), v.note)),
@@ -191,7 +208,7 @@ mod tests {
     use async_trait::async_trait;
     fn bars(n: usize, bump: Option<usize>) -> Vec<Bar> {
         (0..n).map(|i| Bar { date: format!("2024-01-{:02}", i + 1), open: 10.0, high: 10.0, low: 10.0,
-            close: if Some(i) == bump { 10.5 } else { 10.0 + i as f64 * 0.01 }, volume: 1000.0, adj_factor: Some(1.0) }).collect()
+            close: if Some(i) == bump { 10.0 + i as f64 * 0.01 + 0.5 } else { 10.0 + i as f64 * 0.01 }, volume: 1000.0, adj_factor: Some(1.0) }).collect()
     }
     struct Fake(&'static str, Option<Vec<Bar>>);
     #[async_trait]
@@ -232,6 +249,15 @@ mod tests {
         assert_eq!(m.extra["validation"]["status"], "divergent");
         assert_eq!(m.extra["validation"]["divergent_days"], 1);
         assert!(!validation_status(&m).0);
+        // one isolated 0.3% day is tolerated + recorded; four such days block
+        let a = bars(40, None);
+        let mut b = a.clone();
+        b[5].close *= 1.003;
+        assert_eq!(compare(&a, &b, "x").status, "ok_with_flags");
+        for i in [7, 9, 11] {
+            b[i].close *= 1.003;
+        }
+        assert_eq!(compare(&a, &b, "x").status, "divergent");
         let d2 = tempfile::tempdir().unwrap();
         let r = router(&d2, vec![Arc::new(Fake("a", Some(bars(30, None)))), Arc::new(Fake("b", None))]);
         let (_, m) = r.fetch("SH600000", 30).await.unwrap();

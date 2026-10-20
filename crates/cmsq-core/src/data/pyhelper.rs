@@ -44,8 +44,11 @@ impl PyProvider {
                         tokio::time::sleep(gap - t.elapsed()).await;
                     }
                 }
-                let out = tokio::time::timeout(self.timeout, tokio::process::Command::new(&self.python)
-                    .arg(&script).args([self.kind, symbol, start, end]).kill_on_drop(true).output()).await;
+                // third-party packages with network access get a scrubbed env: no
+                // TUSHARE_TOKEN, no LLM keys, nothing but what python + egress need
+                let mut cmd = tokio::process::Command::new(&self.python);
+                cmd.env_clear().envs(scrubbed_env(std::env::vars()));
+                let out = tokio::time::timeout(self.timeout, cmd.arg(&script).args([self.kind, symbol, start, end]).kill_on_drop(true).output()).await;
                 *g = Some(Instant::now());
                 match out {
                     Ok(Ok(o)) if o.status.success() => return serde_json::from_slice(&o.stdout).context("helper output not json"),
@@ -86,5 +89,27 @@ impl MarketDataSource for PyProvider {
         Ok((bars.clone(), DataMeta { symbol: symbol.to_uppercase(), source: self.kind.into(), label: format!("REAL A-SHARE DAILY ({})", self.kind),
             fetched_at: chrono::Utc::now().to_rfc3339(), start: bars[0].date.clone(), end: bars.last().unwrap().date.clone(), bars: bars.len(),
             adjustment: "none (unadjusted; backup / validation source)".into(), server: None, extra: v["meta"].clone() }))
+    }
+}
+
+/// Environment passed to third-party data helpers: only what python and HTTP
+/// egress need. Never tokens / API keys / CMSQ_* settings.
+pub fn scrubbed_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    vars.filter(|(k, _)| {
+        let ku = k.to_uppercase();
+        let secretish = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CMSQ_", "TUSHARE"].iter().any(|w| ku.contains(w));
+        !secretish && (matches!(ku.as_str(), "PATH" | "HOME" | "LANG" | "LC_ALL" | "TZ" | "SSL_CERT_FILE" | "SSL_CERT_DIR" | "REQUESTS_CA_BUNDLE") || ku.contains("PROXY"))
+    }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn helper_env_is_scrubbed() {
+        let vars = [("TUSHARE_TOKEN", "c1"), ("OPENAI_API_KEY", "c2"), ("CMSQ_LLM_KEY", "c3"), ("HTTPS_PROXY", "http://p"), ("PROXY_TOKEN", "c4"),
+            ("PATH", "/usr/bin"), ("AWS_SECRET_ACCESS_KEY", "c5"), ("RANDOM", "x")].map(|(k, v)| (k.to_string(), v.to_string()));
+        let env = super::scrubbed_env(vars.into_iter());
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["HTTPS_PROXY", "PATH"]);
     }
 }
