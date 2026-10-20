@@ -35,3 +35,7 @@ async-trait = "0.1"
 
 [lints.rust]
 unexpected_cfgs = "allow"
+
+[dev-dependencies]
+proptest = "1"
+tokio-test = "0.4"
