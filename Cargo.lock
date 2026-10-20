@@ -6004,7 +6004,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "clap",
  "dirs 5.0.1",
  "encoding_rs",
  "flate2",
