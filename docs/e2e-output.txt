@@ -1,0 +1,91 @@
+
+== build ==
+workspace: /tmp/cmsq-e2e.5pOY   backend: docker
+
+== init + market data (host-side; sandbox stays offline) ==
+workspace ready at /tmp/cmsq-e2e.5pOY
+rstdx/TDX fetch failed: Error: protocol error: Buffer too short for datetime — using bundled SAMPLE data (offline fallback)
+SAMPLE_RANGE   1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
+SAMPLE_TREND   1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
+
+== 1. CMspark drop → ingest ==
+INVALID   broken.json: invalid drop JSON: missing field `scraped_at` at line 1 column 50
+NEW       cd87e6d6  future_peek.json
+NEW       339f6b40  ma_crossover.json
+NEW       fc5b6907  mean_reversion_z.json
+NEW       ffe67763  momentum_20d.json
+NEW       3c042376  phone_home.json
+NEW       4017833b  short_term_reversal.json
+-- re-dropping one file (dedupe):
+DUPLICATE 339f6b40  again.json
+
+== 2. extract (offline heuristic extractor) ==
+Extracted cd87e6d6  收益率惊人的“明日涨跌”策略（年化 300%！）  params={}  risks=[lookahead,no_costs,too_good,survivorship]
+Extracted 339f6b40  双均线金叉死叉，简单但有效？  params={"fast":10,"slow":30}  risks=[no_costs,survivorship]
+Extracted fc5b6907  布林带均值回归（超跌买入）  params={"window":20,"z":1.5}  risks=[no_costs,survivorship]
+Extracted ffe67763  20日动量 + 波动率过滤  params={"lookback":20,"vol_cap":0.03}  risks=[no_costs,survivorship]
+Extracted 3c042376  带云端参数同步的网格策略  params={"step":0.02}  risks=[network,no_costs,survivorship]
+Extracted 4017833b  短期反转：大跌次日抄底，持有一天  params={"threshold":-0.01}  risks=[survivorship]
+
+== 3+4. sandbox backtests (trend-style ideas on SAMPLE_TREND) ==
+backend: docker (hardened=true)  symbol: SAMPLE_TREND
+Rejected  339f6b40  job=90f86ec0 [succeeded]  OOS ret -15.41% sharpe -0.51 maxDD -32.40% turnover 11.7x  — 双均线金叉死叉，简单但有效？
+          ✗ oos_net_return_positive: OOS return after costs -15.41%
+          ✗ oos_sharpe_hurdle: OOS Sharpe -0.51 vs hurdle 0.30 (base 0.30 + 0.15·ln(1 attempts))
+          ✗ stability_oos_halves: OOS halves net returns [Some(12.72), Some(-24.96)]
+          ✗ cost_stress_2x: OOS return with 2x costs -16.82%
+backend: docker (hardened=true)  symbol: SAMPLE_TREND
+Rejected  ffe67763  job=2c77e13e [succeeded]  OOS ret +2.88% sharpe 0.20 maxDD -21.57% turnover 23.3x  — 20日动量 + 波动率过滤
+          ✗ oos_sharpe_hurdle: OOS Sharpe 0.20 vs hurdle 0.30 (base 0.30 + 0.15·ln(1 attempts))
+          ✗ stability_oos_halves: OOS halves net returns [Some(13.54), Some(-9.39)]
+          ✗ cost_stress_2x: OOS return with 2x costs -0.56%
+backend: docker (hardened=true)  symbol: SAMPLE_TREND
+Failed    cd87e6d6  job=9498935d [lookahead_detected]  OOS ret - sharpe - maxDD - turnover -  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+          ✗ look-ahead bias detected by point-in-time probe
+backend: docker (hardened=true)  symbol: SAMPLE_TREND
+Failed    3c042376  job=5f7a0732 [error]  OOS ret - sharpe - maxDD - turnover -  — 带云端参数同步的网格策略
+          ✗ runner exit 2: URLError(OSError(101, 'Network is unreachable'))
+
+== 3+4. mean-reversion ideas on SAMPLE_RANGE ==
+backend: docker (hardened=true)  symbol: SAMPLE_RANGE
+Rejected  fc5b6907  job=25369fa4 [succeeded]  OOS ret -4.74% sharpe -0.09 maxDD -17.12% turnover 13.0x  — 布林带均值回归（超跌买入）
+          ✗ oos_net_return_positive: OOS return after costs -4.74%
+          ✗ oos_sharpe_hurdle: OOS Sharpe -0.09 vs hurdle 0.30 (base 0.30 + 0.15·ln(1 attempts))
+          ✗ stability_oos_halves: OOS halves net returns [Some(-4.56), Some(-0.2)]
+          ✗ cost_stress_2x: OOS return with 2x costs -6.51%
+backend: docker (hardened=true)  symbol: SAMPLE_RANGE
+Evaluated 4017833b  job=365c83bb [succeeded]  OOS ret +31.68% sharpe 1.19 maxDD -11.69% turnover 105.7x  — 短期反转：大跌次日抄底，持有一天
+          ✓ gate passed — awaiting manual confirmation: cmsq promote 4017833b --confirm 4017833b
+
+== 5. manual promote (confirmation desk) ==
+-- wrong confirmation is refused:
+Error: confirmation mismatch: type the first 8 chars of the id (4017833b)
+PROMOTED 4017833b  短期反转：大跌次日抄底，持有一天  (signals are observe-only; no broker connected)
+
+== library ==
+ID        STATUS      TRY  SOURCE         TITLE
+cd87e6d6  Failed        1  quant-forum    收益率惊人的“明日涨跌”策略（年化 300%！）  [sample]
+339f6b40  Rejected      1  quant-forum    双均线金叉死叉，简单但有效？  [sample]
+fc5b6907  Rejected      1  quant-forum    布林带均值回归（超跌买入）  [sample]
+ffe67763  Rejected      1  quant-blog     20日动量 + 波动率过滤  [sample]
+3c042376  Failed        1  quant-blog     带云端参数同步的网格策略  [sample]
+4017833b  Promoted      1  quant-blog     短期反转：大跌次日抄底，持有一天  [sample]
+
+== jobs ==
+365c83bb  docker               succeeded          SAMPLE_RANGE    653ms  strategy 4017833b
+25369fa4  docker               succeeded          SAMPLE_RANGE    624ms  strategy fc5b6907
+5f7a0732  docker               error              SAMPLE_TREND    668ms  strategy 3c042376
+9498935d  docker               lookahead_detected SAMPLE_TREND    640ms  strategy cd87e6d6
+2c77e13e  docker               succeeded          SAMPLE_TREND    624ms  strategy ffe67763
+90f86ec0  docker               succeeded          SAMPLE_TREND    782ms  strategy 339f6b40
+
+== signals ==
+2019-12-31  SAMPLE_RANGE  target=0.00  短期反转：大跌次日抄底，持有一天  [OBSERVE ONLY]
+
+== audit ==
+audit chain OK: 51 entries, head 3c75c48e44e2e77a
+-- tampered copy:
+AUDIT CHAIN BROKEN at seq Some(3): content hash mismatch (entry modified)
+(tamper detected as expected)
+
+== done — workspace kept at /tmp/cmsq-e2e.5pOY ==
