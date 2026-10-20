@@ -89,8 +89,19 @@ pub fn static_risks(code: Option<&str>, text: &str) -> Vec<Risk> {
             if !c.contains("def generate_signals") {
                 add("contract", Severity::High, "代码未定义 generate_signals(df, **params)，不符合 Runner 契约");
             }
-            if Regex::new(r"shift\(\s*-\s*\d").unwrap().is_match(c) {
-                add("lookahead", Severity::High, "检测到 shift(-n)：疑似使用未来数据（前视偏差）");
+            // advisory only: the dynamic probe is the real control
+            let peeks = [
+                (r"shift\(\s*(periods\s*=\s*)?-\s*\w", "shift(-n)"),
+                (r"\[\s*\w+\s*\+\s*(\d+|\w+)\s*\]", "x[i+k] indexing"),
+                (r"\.iloc\[\s*\w+\s*\+\s*\w+", "iloc[i+k]"),
+                (r"\.iloc\[\s*-?\w*\s*\+\s*\d+\s*:", "iloc[i+k:] slice"),
+                (r"np\.roll\([^)]*,\s*(shift\s*=\s*)?-\s*\w", "np.roll(x, -n)"),
+                (r"\.(lead|bfill|backfill)\(", "lead/bfill"),
+                (r"(?i)(date\.today|datetime\.now|time\.time|busday_count|today\(\))", "wall-clock use"),
+            ];
+            let hits: Vec<&str> = peeks.iter().filter(|(re, _)| Regex::new(re).unwrap().is_match(c)).map(|p| p.1).collect();
+            if !hits.is_empty() {
+                add("lookahead", Severity::High, &format!("疑似使用未来数据/真实时钟（前视偏差）: {}", hits.join(", ")));
             }
             if Regex::new(r"(?m)^\s*(import|from)\s+(urllib|requests|socket|http|aiohttp|httpx)\b").unwrap().is_match(c) {
                 add("network", Severity::High, "代码尝试联网；沙箱默认断网，该策略将失败");
@@ -258,5 +269,12 @@ mod idea_tests {
         let c = "def generate_signals(df, n=20):\n    return df.close > df.close.shift(n)";
         assert_eq!(super::idea_key(a), super::idea_key(b));
         assert_ne!(super::idea_key(a), super::idea_key(c));
+    }
+    #[test]
+    fn static_peek_patterns() {
+        for c in ["x = o[i+2]", "df.close.shift(periods=-1)", "np.roll(c, -1)", "df.iloc[i + 1]", "import datetime\nd=datetime.date.today()", "np.busday_count(a,b)", "df.close.shift(-n)"] {
+            assert!(super::static_risks(Some(c), "").iter().any(|r| r.code == "lookahead"), "{c}");
+        }
+        assert!(!super::static_risks(Some("f = df.close.rolling(5).mean() > df.close.shift(1)"), "").iter().any(|r| r.code == "lookahead"));
     }
 }

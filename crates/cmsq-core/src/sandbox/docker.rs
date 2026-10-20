@@ -47,6 +47,9 @@ impl DockerSandboxExecutor {
             binds: Some(req.mounts.iter().map(|m| format!("{}:{}:{}", m.host.display(), m.container, if m.read_only { "ro" } else { "rw" })).collect()),
             tmpfs: Some(HashMap::from([("/tmp".to_string(), "rw,noexec,nosuid,size=64m".to_string())])),
             ipc_mode: Some("private".into()),
+            // hide host clocks / boot time (btime) / uptime from the strategy
+            masked_paths: Some(["/proc/stat", "/proc/uptime", "/proc/loadavg", "/proc/timer_list", "/proc/sched_debug", "/proc/kcore", "/proc/keys",
+                "/proc/latency_stats", "/proc/acpi", "/proc/scsi", "/sys/firmware", "/proc/interrupts", "/proc/driver/rtc"].map(String::from).to_vec()),
             ..Default::default()
         }
     }
