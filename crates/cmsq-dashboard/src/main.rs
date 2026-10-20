@@ -23,18 +23,20 @@ enum Tab {
     Overview,
     Library,
     Compare,
+    Data,
     Jobs,
     Signals,
     Audit,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [Tab::Overview, Tab::Library, Tab::Compare, Tab::Jobs, Tab::Signals, Tab::Audit];
+    const ALL: [Tab; 7] = [Tab::Overview, Tab::Library, Tab::Compare, Tab::Data, Tab::Jobs, Tab::Signals, Tab::Audit];
     fn label(&self) -> &'static str {
         match self {
             Tab::Overview => "总览 Overview",
             Tab::Library => "策略库 Strategy Library",
             Tab::Compare => "对比 Compare",
+            Tab::Data => "行情数据 Market Data",
             Tab::Jobs => "沙箱任务 Sandbox Jobs",
             Tab::Signals => "信号 Signals (observe-only)",
             Tab::Audit => "审计 Audit",
@@ -52,6 +54,9 @@ struct Snapshot {
     total_attempts: i64,
     trials: i64,
     datasets: Vec<market::DataMeta>,
+    /// HMAC-verified fetch attestation per dataset (Err = refused)
+    attest: Vec<Result<serde_json::Value, String>>,
+    health: std::collections::BTreeMap<String, cmsq_core::data::router::SourceHealth>,
 }
 
 /// Shared between the UI thread and the background job thread.
@@ -290,10 +295,17 @@ impl Dashboard {
                 }
             }
             datasets.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            let attest = datasets.iter().map(|m| match st.latest_fetch_attestation(&m.symbol) {
+                Ok(Some(a)) if a.details["snapshot_sha256"] == m.extra["snapshot_sha256"] => Ok(a.details),
+                Ok(Some(_)) => Err("meta.json does not match the audited snapshot".into()),
+                Ok(None) => Err("no audited fetch".into()),
+                Err(e) => Err(format!("{e:#}")),
+            }).collect();
+            let health = std::fs::read_to_string(self.home.data_dir().join("_sources_health.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
             Ok(Snapshot {
                 strategies: st.list_strategies(None)?, jobs: st.list_jobs(None)?, signals: st.list_signals()?,
                 audit: st.audit_entries(None, 200)?, audit_ok: Some((v.ok, v.entries, v.problem.unwrap_or_default())),
-                total_attempts: st.total_attempts()?, trials: st.trial_count()?, datasets,
+                total_attempts: st.total_attempts()?, trials: st.trial_count()?, datasets, attest, health,
             })
         })();
         match r {
@@ -676,6 +688,55 @@ impl Dashboard {
         t
     }
 
+    fn data_view(&self) -> Stateful<Div> {
+        let red: Hsla = rgb(0xf85149).into();
+        let green: Hsla = rgb(0x3fb950).into();
+        let amber: Hsla = rgb(0xd29922).into();
+        let mut d = div().id("data").p_4().flex().flex_col().gap_2().overflow_y_scroll().size_full()
+            .child(section("数据源健康 Source health (router priority order; persisted in data/_sources_health.json)"));
+        if self.snap.health.is_empty() {
+            d = d.child(div().text_xs().text_color(c_muted()).child("no router fetches yet — `cmsq data fetch SH600519`"));
+        }
+        for (name, h) in &self.snap.health {
+            let cooling = h.cooldown_until.as_deref().and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok()).is_some_and(|t| t > chrono::Utc::now());
+            let (txt, col) = if cooling { ("COOLDOWN", red) } else if h.consecutive_fail > 0 { ("DEGRADED", amber) } else if h.ok > 0 { ("HEALTHY", green) } else { ("UNUSED", c_muted()) };
+            d = d.child(div().p_2().rounded_md().bg(c_panel()).border_1().border_color(c_border()).flex().gap_3().items_center().text_xs()
+                .child(div().w(px(80.)).text_color(c_text()).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                .child(chip(txt, col))
+                .child(div().text_color(c_muted()).child(format!("ok {} · fail {} · last ok {} · {}", h.ok, h.fail, h.last_ok.as_deref().map(local).unwrap_or("-".into()),
+                    h.last_ms.map(|m| format!("{m} ms")).unwrap_or_default())))
+                .child(div().flex_1().text_color(red).child(h.last_error.clone().unwrap_or_default().chars().take(120).collect::<String>())));
+        }
+        d = d.child(section("数据集 Datasets (verdicts from the HMAC-attested fetch record, not meta.json)"));
+        for (m, a) in self.snap.datasets.iter().zip(&self.snap.attest) {
+            let mut row = div().p_3().rounded_md().bg(c_panel()).border_1().border_color(c_border()).flex().flex_col().gap_1().text_xs()
+                .child(div().flex().gap_3().items_center()
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(c_text()).child(m.symbol.clone()))
+                    .child(div().text_color(c_accent()).child(m.source.clone()))
+                    .child(div().text_color(c_muted()).child(format!("{} bars · {} .. {} · fetched {}", m.bars, m.start, m.end, local(&m.fetched_at))))
+                    .child(div().text_color(c_muted()).child(m.label.clone())));
+            match a {
+                Ok(at) => {
+                    let vok = at["validation_ok"].as_bool().unwrap_or(false);
+                    let st = at["validation"]["status"].as_str().unwrap_or(if m.source == "sample" { "synthetic" } else { "none" });
+                    row = row.child(div().flex().gap_2().items_center()
+                        .child(chip("attested ✓", green))
+                        .child(chip(if at["adjusted"].as_bool().unwrap_or(false) { "adjusted" } else { "UNADJUSTED" }, if at["adjusted"].as_bool().unwrap_or(false) { green } else { red }))
+                        .child(chip(format!("cross-check: {st}"), if vok { if st == "ok_with_flags" { amber } else { green } } else { red }))
+                        .child(div().text_color(c_muted()).font_family("monospace").child(format!("snapshot {}", at["snapshot_sha256"].as_str().map(|x| &x[..16]).unwrap_or("-")))))
+                        .child(div().text_color(if vok { c_muted() } else { red }).child(at["validation_detail"].as_str().unwrap_or("").to_string()));
+                    if let Some(sample) = at["validation"]["divergent_sample"].as_array().filter(|v| !v.is_empty()) {
+                        let days: Vec<String> = sample.iter().take(6).map(|x| format!("{} {:.2} vs {:.2}", x["date"].as_str().unwrap_or(""), x["primary"].as_f64().unwrap_or(0.0), x["other"].as_f64().unwrap_or(0.0))).collect();
+                        row = row.child(div().text_color(amber).child(format!("flagged days: {}", days.join(" · "))));
+                    }
+                }
+                Err(e) => row = row.child(div().flex().gap_2().child(chip("INTEGRITY REFUSED", red)).child(div().text_color(red).child(e.clone()))),
+            }
+            d = d.child(row);
+        }
+        d
+    }
+
     fn signals(&self) -> Div {
         let mut d = div().p_4().flex().flex_col().gap_2()
             .child(div().p_3().rounded_md().border_1().border_color(rgb(0xd29922)).text_sm().text_color(rgb(0xf2cc60))
@@ -714,6 +775,7 @@ impl Render for Dashboard {
             Tab::Overview => div().id("ov").size_full().overflow_y_scroll().child(self.overview()).into_any_element(),
             Tab::Library => self.library(cx).into_any_element(),
             Tab::Compare => self.compare_view().into_any_element(),
+            Tab::Data => self.data_view().into_any_element(),
             Tab::Jobs => self.jobs().into_any_element(),
             Tab::Signals => self.signals().into_any_element(),
             Tab::Audit => self.audit().into_any_element(),
