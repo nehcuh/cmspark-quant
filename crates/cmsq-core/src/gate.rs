@@ -42,6 +42,8 @@ pub struct GateInput<'a> {
     pub dsr: &'a Dsr,
     pub probe: &'a ProbeReport,
     pub data_adjusted: bool,
+    /// cross-source validation of the dataset (router::validation_status)
+    pub data_validated: (bool, String),
     pub high_risks: &'a [String],
 }
 
@@ -76,6 +78,7 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
     check("static_risks", i.high_risks.is_empty(), if i.high_risks.is_empty() { "no high-severity static findings".into() } else { i.high_risks.join(", ") });
     check("data_adjusted", i.data_adjusted || !cfg.require_adjusted_data,
         if i.data_adjusted { "prices adjusted (or synthetic)".into() } else { "UNADJUSTED prices: ex-dividend gaps distort returns; import adjusted data (adj_factor)".into() });
+    check("data_cross_validated", i.data_validated.0, i.data_validated.1.clone());
     check("min_bars", i.dev.bars >= cfg.min_bars, format!("{} evaluation bars (min {})", i.dev.bars, cfg.min_bars));
     check("net_return_positive", i.dev.total_return > 0.0, format!("net return {:.2}%", i.dev.total_return * 100.0));
     check("sharpe", i.dev.sharpe >= cfg.min_sharpe, format!("Sharpe {:.2} (min {:.2})", i.dev.sharpe, cfg.min_sharpe));
@@ -111,7 +114,7 @@ mod tests {
     }
     fn input(f: &Fx) -> GateInput<'_> {
         GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.0.0"), dev: &f.dev, dev_cost_2x: &f.c2,
-            folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, high_risks: &f.risks }
+            folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, data_validated: (true, "sample".into()), high_risks: &f.risks }
     }
     #[test]
     fn passes_good() {

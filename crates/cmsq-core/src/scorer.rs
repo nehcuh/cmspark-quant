@@ -279,8 +279,15 @@ pub struct Dsr {
 /// Bailey & López de Prado (2014) Deflated Sharpe Ratio.
 /// `trial_srs`: per-bar Sharpe of every trial in the library (including this one).
 pub fn deflated_sharpe(m: &Metrics, trial_srs: &[f64]) -> Dsr {
+    deflated_sharpe_n(m, trial_srs, trial_srs.len())
+}
+
+/// DSR with `n_trials` independent tries but the cross-trial SR variance taken
+/// from `trial_srs` only (callers drop runs that cheated via look-ahead: their
+/// impossible Sharpe ratios are not draws from the honest search distribution).
+pub fn deflated_sharpe_n(m: &Metrics, trial_srs: &[f64], n_trials: usize) -> Dsr {
     const GAMMA: f64 = std::f64::consts::EULER_GAMMA;
-    let n = trial_srs.len().max(1);
+    let n = n_trials.max(trial_srs.len()).max(1);
     let t = m.bars.max(2) as f64;
     // Variance of SR across trials; floor at the sampling variance under H0 (1/T)
     let var = if trial_srs.len() >= 2 {
@@ -395,5 +402,15 @@ mod tests {
         let lots = deflated_sharpe(&m, &many);
         assert!(one.dsr > 0.95, "{one:?}");
         assert!(lots.dsr < one.dsr && lots.sr0_daily > 0.0, "{lots:?}");
+    }
+    #[test]
+    fn dsr_cheater_excluded_from_variance_but_counted() {
+        let m = Metrics { bars: 1500, sharpe_daily: 0.08, kurtosis: 3.0, ..Default::default() };
+        let honest = [0.01, 0.03, 0.02, 0.04];
+        let with_cheat = [0.01, 0.03, 0.02, 0.04, 0.41];
+        let a = deflated_sharpe(&m, &with_cheat);
+        let b = deflated_sharpe_n(&m, &honest, 5);
+        assert_eq!(b.trials, 5);
+        assert!(b.sr0_daily < a.sr0_daily && b.dsr > a.dsr, "{a:?} {b:?}");
     }
 }

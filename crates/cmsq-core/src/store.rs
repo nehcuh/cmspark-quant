@@ -55,6 +55,8 @@ pub struct TrialRow {
     pub symbol: String,
     pub sharpe_daily: f64,
     pub positions: Vec<f64>,
+    /// run was caught by the look-ahead probe: counts toward N, excluded from the SR variance
+    pub lookahead: bool,
 }
 
 fn ts(s: String) -> DateTime<Utc> {
@@ -72,6 +74,10 @@ impl Store {
             if !has {
                 conn.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {col} {ddl}"))?;
             }
+        }
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('trials') WHERE name='lookahead'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE trials ADD COLUMN lookahead INTEGER NOT NULL DEFAULT 0")?;
         }
         Ok(Self { conn, cfg })
     }
@@ -285,15 +291,15 @@ impl Store {
 
     // ---------- trials (library-wide multiple-testing ledger) ----------
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_trial(&self, sid: &str, job: &str, idea_key: &str, params_hash: &str, symbol: &str, dataset_sha: &str, bars: usize, sr: f64, positions: &[f64]) -> Result<()> {
-        self.conn.execute("INSERT INTO trials(strategy_id,job_id,idea_key,params_hash,symbol,dataset_sha,bars,sharpe_daily,positions_json,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![sid, job, idea_key, params_hash, symbol, dataset_sha, bars as i64, sr, serde_json::to_string(positions)?, Utc::now().to_rfc3339()])?;
+    pub fn insert_trial(&self, sid: &str, job: &str, idea_key: &str, params_hash: &str, symbol: &str, dataset_sha: &str, bars: usize, sr: f64, positions: &[f64], lookahead: bool) -> Result<()> {
+        self.conn.execute("INSERT INTO trials(strategy_id,job_id,idea_key,params_hash,symbol,dataset_sha,bars,sharpe_daily,positions_json,created_at,lookahead) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![sid, job, idea_key, params_hash, symbol, dataset_sha, bars as i64, sr, serde_json::to_string(positions)?, Utc::now().to_rfc3339(), lookahead as i64])?;
         Ok(())
     }
     pub fn trials(&self) -> Result<Vec<TrialRow>> {
-        let mut st = self.conn.prepare("SELECT strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json FROM trials ORDER BY id")?;
+        let mut st = self.conn.prepare("SELECT strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead FROM trials ORDER BY id")?;
         let v = st.query_map([], |r| Ok(TrialRow { strategy_id: r.get(0)?, idea_key: r.get(1)?, params_hash: r.get(2)?, symbol: r.get(3)?, sharpe_daily: r.get(4)?,
-            positions: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default() }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            positions: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(), lookahead: r.get::<_, i64>(6)? != 0 }))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(v)
     }
     pub fn trial_count(&self) -> Result<i64> {

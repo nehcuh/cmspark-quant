@@ -1,5 +1,7 @@
 //! cmsq-core: CMspark Quant P0 core (ingest → extract → sandbox backtest → evaluate → promote).
 pub mod audit;
+pub mod data;
+pub mod replay;
 pub mod extract;
 pub mod gate;
 pub mod home;

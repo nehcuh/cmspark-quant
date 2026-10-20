@@ -225,6 +225,7 @@ impl Orchestrator {
         match src.daily_bars(symbol, count).await {
             Ok((bars, meta)) => {
                 market::write_cache(&self.home.data_dir(), &bars, &meta)?;
+                let meta = market::read_meta(&self.home.data_dir(), symbol)?;
                 self.store.audit("data", "market_data_fetch", Some(symbol), json!({"source": src.name(), "meta": meta}), true)?;
                 Ok(meta)
             }
@@ -233,6 +234,28 @@ impl Orchestrator {
                 Err(e)
             }
         }
+    }
+
+    /// Fetch through the multi-source router (priority + fallback + cross-validation).
+    pub async fn fetch_routed(&self, router: &crate::data::router::Router, symbol: &str, count: usize) -> Result<market::DataMeta> {
+        match router.fetch(symbol, count).await {
+            Ok((bars, meta)) => {
+                market::write_cache(&self.home.data_dir(), &bars, &meta)?;
+                let meta = market::read_meta(&self.home.data_dir(), symbol)?;
+                self.store.audit("data", "market_data_fetch", Some(symbol), json!({"source": meta.source, "router": true, "snapshot_sha256": meta.extra["snapshot_sha256"],
+                    "validation": meta.extra["validation"], "attempts": meta.extra["router"], "bars": meta.bars, "start": meta.start, "end": meta.end, "adjustment": meta.adjustment}), true)?;
+                Ok(meta)
+            }
+            Err(e) => {
+                self.store.audit("data", "market_data_fetch", Some(symbol), json!({"router": true, "error": format!("{e:#}")}), false)?;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn data_router(&self, list: Option<&str>, validate: bool) -> (crate::data::router::Router, Vec<String>) {
+        let (sources, notes) = crate::data::build_sources(list, &self.home.secrets);
+        (crate::data::router::Router { sources, health_file: self.home.data_dir().join("_sources_health.json"), validate }, notes)
     }
 
     pub async fn ensure_samples(&self) -> Result<()> {
@@ -368,6 +391,9 @@ impl Orchestrator {
         let bars = market::read_bars(&self.home.data_dir(), symbol)?;
         anyhow::ensure!(bars.len() >= 300, "need at least 300 bars, {symbol} has {}", bars.len());
         let dataset_sha = hex::encode(sha2::Sha256::digest(market::to_csv(&bars, true).as_bytes()));
+        if let Some(snap) = meta.extra.get("snapshot_sha256").and_then(|v| v.as_str()) {
+            anyhow::ensure!(snap == dataset_sha, "data cache for {symbol} was modified after fetch (snapshot {snap}, now {dataset_sha}); re-fetch it");
+        }
         let dev_end = ((bars.len() as f64) * self.dev_frac) as usize;
         let dev = &bars[..dev_end];
         self.transition(&s, StrategyStatus::Backtesting, "orchestrator", None, json!({"symbol": symbol, "backend": exec.name()}))?;
@@ -428,21 +454,23 @@ impl Orchestrator {
         let near_dups: Vec<String> = prior.iter().filter(|t| t.strategy_id != s.id && t.symbol == symbol && t.positions.len() == full.len())
             .filter(|t| t.idea_key == ikey || corr(&t.positions, &full).is_some_and(|c| c > 0.9))
             .map(|t| t.strategy_id.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-        self.store.insert_trial(&s.id, &job_id, &ikey, &phash, symbol, &dataset_sha, dm.bars, dm.sharpe_daily, &full)?;
-        let srs: Vec<f64> = self.store.trials()?.iter().map(|t| t.sharpe_daily).collect();
-        let dsr = scorer::deflated_sharpe(&dm, &srs);
+        self.store.insert_trial(&s.id, &job_id, &ikey, &phash, symbol, &dataset_sha, dm.bars, dm.sharpe_daily, &full, probe_rep.detected)?;
+        let all = self.store.trials()?;
+        let srs: Vec<f64> = all.iter().filter(|t| !t.lookahead).map(|t| t.sharpe_daily).collect();
+        let dsr = scorer::deflated_sharpe_n(&dm, &srs, all.len());
 
         let high: Vec<String> = e.risks.iter().filter(|r| r.severity == Severity::High && crate::extract::BLOCKING_RISKS.contains(&r.code.as_str())).map(|r| r.code.clone()).collect();
         let adjusted = market::is_adjusted(&meta, &bars);
+        let validated = crate::data::router::validation_status(&meta);
         let result = json!({
             "schema_version": 2, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": scorer::EXECUTION_LABEL,
             "costs": self.costs, "initial_capital": scorer::INITIAL_CAPITAL, "runner_identity": identity, "backend": exec.name(), "hardened": exec.hardened(),
-            "data_provenance": meta, "dataset_sha256": dataset_sha, "data_adjusted": adjusted,
+            "data_provenance": meta, "dataset_sha256": dataset_sha, "data_adjusted": adjusted, "data_cross_validation": {"ok": validated.0, "detail": validated.1},
             "split": {"development": {"start": dev[0].date, "end": dev[dev_end - 1].date, "bars": dev_end, "warmup_bars": warm},
                       "vault": {"start": bars[dev_end].date, "end": bars.last().unwrap().date, "bars": bars.len() - dev_end, "note": "never shown to the strategy before promote"}},
             "development": dm, "development_cost_2x": dm2, "walk_forward_folds": folds, "buy_and_hold": bhm,
             "trades": sim.trades, "blocked": {"limit_up": sim.blocked_limit_up, "limit_down": sim.blocked_limit_down, "suspended": sim.blocked_suspended},
-            "costs_paid": sim.costs_paid, "lookahead_probe": probe_rep, "trial": {"idea_key": ikey, "params_hash": phash, "library_trials": srs.len(), "near_duplicates_of": near_dups},
+            "costs_paid": sim.costs_paid, "lookahead_probe": probe_rep, "trial": {"idea_key": ikey, "params_hash": phash, "library_trials": all.len(), "excluded_from_variance_lookahead": all.len() - srs.len(), "near_duplicates_of": near_dups},
             "dsr": dsr, "latest_position": {"date": dev[dev_end - 1].date, "target_position": full[dev_end - 1]}, "equity_csv": jd.join("equity.csv").display().to_string(),
         });
         std::fs::write(jd.join("result.json"), serde_json::to_string_pretty(&result)?)?;
@@ -451,7 +479,7 @@ impl Orchestrator {
         self.transition(&s, StrategyStatus::Evaluated, "orchestrator", None, json!({"job": job_id}))?;
 
         let g = gate::evaluate(&gate::GateInput { job_status: "succeeded", hardened: exec.hardened(), runner_identity: identity.as_deref(), dev: &dm,
-            dev_cost_2x: &dm2, folds: &folds, dsr: &dsr, probe: &probe_rep, data_adjusted: adjusted, high_risks: &high }, &self.gate);
+            dev_cost_2x: &dm2, folds: &folds, dsr: &dsr, probe: &probe_rep, data_adjusted: adjusted, data_validated: validated.clone(), high_risks: &high }, &self.gate);
         let ev = Evaluation { id: uuid::Uuid::new_v4().to_string(), strategy_id: s.id.clone(), job_id: job_id.clone(), passed: g.passed,
             reasons: g.reasons.clone(), checks: g.checks.clone(), created_at: Utc::now() };
         self.store.insert_evaluation(&ev)?;

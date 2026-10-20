@@ -225,14 +225,35 @@ impl MarketDataSource for RstdxSource {
     }
 }
 
+/// Write the cache csv + meta, plus an immutable content-addressed snapshot
+/// `data/snapshots/<sha256>.csv` (mode 0444). The sha is stored in meta.extra.
 pub fn write_cache(dir: &Path, bars: &[Bar], meta: &DataMeta) -> Result<std::path::PathBuf> {
-    std::fs::create_dir_all(dir)?;
+    use sha2::Digest;
+    std::fs::create_dir_all(dir.join("snapshots"))?;
     anyhow::ensure!(meta.symbol.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !meta.symbol.is_empty(), "bad symbol");
     let csv = to_csv(bars, true);
+    let sha = hex::encode(sha2::Sha256::digest(csv.as_bytes()));
+    let snap = dir.join("snapshots").join(format!("{sha}.csv"));
+    if !snap.exists() {
+        std::fs::write(&snap, &csv)?;
+        set_readonly(&snap)?;
+    }
+    let mut meta = meta.clone();
+    if !meta.extra.is_object() {
+        meta.extra = serde_json::json!({"original": meta.extra});
+    }
+    meta.extra["snapshot_sha256"] = sha.into();
     let p = dir.join(format!("{}.csv", meta.symbol));
+    let _ = std::fs::remove_file(&p);
     std::fs::write(&p, csv)?;
-    std::fs::write(dir.join(format!("{}.meta.json", meta.symbol)), serde_json::to_string_pretty(meta)?)?;
+    set_readonly(&p)?;
+    std::fs::write(dir.join(format!("{}.meta.json", meta.symbol)), serde_json::to_string_pretty(&meta)?)?;
     Ok(p)
+}
+
+fn set_readonly(p: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o444))?)
 }
 
 pub fn read_meta(dir: &Path, symbol: &str) -> Result<DataMeta> {
@@ -250,7 +271,11 @@ mod tests {
         assert!(meta.label.contains("SYNTHETIC"));
         let d = tempfile::tempdir().unwrap();
         let p = write_cache(d.path(), &bars, &meta).unwrap();
-        assert_eq!(parse_csv(&std::fs::read_to_string(p).unwrap()).unwrap().len(), bars.len());
+        assert_eq!(parse_csv(&std::fs::read_to_string(&p).unwrap()).unwrap().len(), bars.len());
+        let m = read_meta(d.path(), "SAMPLE_TREND").unwrap();
+        let sha = m.extra["snapshot_sha256"].as_str().unwrap().to_string();
+        assert!(d.path().join("snapshots").join(format!("{sha}.csv")).exists());
+        write_cache(d.path(), &bars, &meta).unwrap(); // rewrite over read-only cache works
     }
     #[test]
     fn symbols() {
