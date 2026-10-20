@@ -9,17 +9,19 @@ pub enum StrategyStatus {
     Extracted,
     Backtesting,
     Evaluated,
+    GatePassed,
     Promoted,
     Rejected,
     Failed,
 }
 
 impl StrategyStatus {
-    pub const ALL: [StrategyStatus; 7] = [
+    pub const ALL: [StrategyStatus; 8] = [
         Self::Ingested,
         Self::Extracted,
         Self::Backtesting,
         Self::Evaluated,
+        Self::GatePassed,
         Self::Promoted,
         Self::Rejected,
         Self::Failed,
@@ -30,6 +32,7 @@ impl StrategyStatus {
             Self::Extracted => "Extracted",
             Self::Backtesting => "Backtesting",
             Self::Evaluated => "Evaluated",
+            Self::GatePassed => "GatePassed",
             Self::Promoted => "Promoted",
             Self::Rejected => "Rejected",
             Self::Failed => "Failed",
@@ -107,6 +110,16 @@ pub struct JobRecord {
     pub job_dir: String,
     pub error: Option<String>,
     pub result: Option<serde_json::Value>,
+    /// PID of the cmsq process that owns the job (crash recovery)
+    #[serde(default)]
+    pub owner_pid: Option<i64>,
+    /// Identity of the runner as reported by the BACKEND (docker image id + label),
+    /// never by the container.
+    #[serde(default)]
+    pub runner_identity: Option<String>,
+    /// "dev" (development-window evaluation) or "vault" (final holdout at promote)
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

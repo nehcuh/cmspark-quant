@@ -13,6 +13,11 @@ pub struct Bar {
     pub low: f64,
     pub close: f64,
     pub volume: f64,
+    /// Cumulative backward-adjustment factor (hfq-style: adjusted = raw * factor).
+    /// When present the trusted scorer uses it for returns; raw prices stay the
+    /// basis for limit-up/down checks and lot sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adj_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +49,7 @@ pub struct SampleSource;
 const SAMPLES: &[(&str, &str, &str)] = &[
     ("SAMPLE_TREND", include_str!("../../../fixtures/market/SAMPLE_TREND.csv"), include_str!("../../../fixtures/market/SAMPLE_TREND.meta.json")),
     ("SAMPLE_RANGE", include_str!("../../../fixtures/market/SAMPLE_RANGE.csv"), include_str!("../../../fixtures/market/SAMPLE_RANGE.meta.json")),
+    ("SAMPLE_REGIME", include_str!("../../../fixtures/market/SAMPLE_REGIME.csv"), include_str!("../../../fixtures/market/SAMPLE_REGIME.meta.json")),
 ];
 
 impl SampleSource {
@@ -52,14 +58,82 @@ impl SampleSource {
     }
 }
 
+/// Parse `date,open,high,low,close,volume[,adj_factor]`. Validates dates are
+/// strictly increasing YYYY-MM-DD and prices are finite and positive.
 pub fn parse_csv(csv: &str) -> Result<Vec<Bar>> {
-    let mut out = vec![];
-    for (i, line) in csv.lines().enumerate().skip(1) {
-        let f: Vec<&str> = line.split(',').collect();
-        anyhow::ensure!(f.len() >= 6, "bad csv line {i}");
-        out.push(Bar { date: f[0].into(), open: f[1].parse()?, high: f[2].parse()?, low: f[3].parse()?, close: f[4].parse()?, volume: f[5].parse()? });
+    let mut lines = csv.lines();
+    let header: Vec<String> = lines.next().unwrap_or("").split(',').map(|h| h.trim().to_lowercase()).collect();
+    anyhow::ensure!(header.len() >= 6 && header[..6] == ["date", "open", "high", "low", "close", "volume"], "csv header must start with date,open,high,low,close,volume");
+    let has_adj = header.get(6).is_some_and(|h| h == "adj_factor");
+    let mut out: Vec<Bar> = vec![];
+    for (i, line) in lines.enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        anyhow::ensure!(f.len() >= 6, "bad csv line {}", i + 2);
+        anyhow::ensure!(chrono::NaiveDate::parse_from_str(f[0], "%Y-%m-%d").is_ok(), "bad date on line {}: {}", i + 2, f[0]);
+        let b = Bar { date: f[0].into(), open: f[1].parse()?, high: f[2].parse()?, low: f[3].parse()?, close: f[4].parse()?, volume: f[5].parse()?,
+            adj_factor: if has_adj { Some(f.get(6).context("missing adj_factor")?.parse()?) } else { None } };
+        anyhow::ensure!([b.open, b.high, b.low, b.close].iter().all(|x| x.is_finite() && *x > 0.0) && b.volume.is_finite() && b.volume >= 0.0,
+            "non-finite / non-positive price on line {}", i + 2);
+        anyhow::ensure!(b.adj_factor.is_none_or(|a| a.is_finite() && a > 0.0), "bad adj_factor on line {}", i + 2);
+        if let Some(p) = out.last() {
+            anyhow::ensure!(b.date > p.date, "dates must be strictly increasing (line {})", i + 2);
+        }
+        out.push(b);
     }
     Ok(out)
+}
+
+pub fn to_csv(bars: &[Bar], with_adj: bool) -> String {
+    let with_adj = with_adj && bars.iter().all(|b| b.adj_factor.is_some());
+    let mut csv = String::from(if with_adj { "date,open,high,low,close,volume,adj_factor\n" } else { "date,open,high,low,close,volume\n" });
+    for b in bars {
+        csv.push_str(&format!("{},{},{},{},{},{}", b.date, b.open, b.high, b.low, b.close, b.volume));
+        if with_adj {
+            csv.push_str(&format!(",{}", b.adj_factor.unwrap_or(1.0)));
+        }
+        csv.push('\n');
+    }
+    csv
+}
+
+pub fn read_bars(dir: &Path, symbol: &str) -> Result<Vec<Bar>> {
+    parse_csv(&std::fs::read_to_string(dir.join(format!("{symbol}.csv"))).with_context(|| format!("no cached data for {symbol}"))?)
+}
+
+/// Is the series usable for return computation without corporate-action gaps?
+pub fn is_adjusted(meta: &DataMeta, bars: &[Bar]) -> bool {
+    let a = meta.adjustment.to_lowercase();
+    meta.source == "sample" || a.starts_with("n/a (synthetic") || bars.iter().all(|b| b.adj_factor.is_some()) || a.starts_with("qfq") || a.starts_with("hfq")
+}
+
+/// User-supplied CSV (e.g. exported adjusted data). `adjustment` must describe it
+/// truthfully: "adj_factor" (column present), "qfq", "hfq" or "none".
+pub struct CsvSource {
+    pub path: std::path::PathBuf,
+    pub adjustment: String,
+}
+
+#[async_trait]
+impl MarketDataSource for CsvSource {
+    fn name(&self) -> &'static str {
+        "csv"
+    }
+    async fn daily_bars(&self, symbol: &str, count: usize) -> Result<(Vec<Bar>, DataMeta)> {
+        let md = std::fs::symlink_metadata(&self.path)?;
+        anyhow::ensure!(md.file_type().is_file() && md.len() < 64 * 1024 * 1024, "csv must be a regular file < 64 MiB");
+        let mut bars = parse_csv(&std::fs::read_to_string(&self.path)?)?;
+        anyhow::ensure!(!bars.is_empty(), "empty csv");
+        if bars.len() > count {
+            bars.drain(..bars.len() - count);
+        }
+        let adj = if bars.iter().all(|b| b.adj_factor.is_some()) { "adj_factor (column)".to_string() } else { self.adjustment.clone() };
+        Ok((bars.clone(), DataMeta { symbol: symbol.to_uppercase(), source: "csv".into(), label: format!("USER CSV {}", self.path.display()),
+            fetched_at: chrono::Utc::now().to_rfc3339(), start: bars[0].date.clone(), end: bars.last().unwrap().date.clone(), bars: bars.len(),
+            adjustment: adj, server: None, extra: serde_json::json!({}) }))
+    }
 }
 
 #[async_trait]
@@ -129,7 +203,7 @@ impl MarketDataSource for RstdxSource {
             }
             let got = page.len();
             let mut bars: Vec<Bar> = page.into_iter().map(|k| Bar {
-                date: format!("{:04}-{:02}-{:02}", k.year, k.month, k.day), open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+                date: format!("{:04}-{:02}-{:02}", k.year, k.month, k.day), open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume, adj_factor: None,
             }).collect();
             bars.append(&mut all);
             all = bars;
@@ -146,17 +220,15 @@ impl MarketDataSource for RstdxSource {
             symbol: symbol.to_uppercase(), source: "rstdx (TDX protocol)".into(), label: "REAL A-SHARE DAILY K-LINE".into(),
             fetched_at: chrono::Utc::now().to_rfc3339(), start: all[0].date.clone(), end: all.last().unwrap().date.clone(),
             bars: all.len(), adjustment: "none (unadjusted TDX prices; splits/dividends NOT adjusted)".into(),
-            server: Some(server), extra: serde_json::json!({"rstdx_rev": "77629df (574cd53 + local import fix)", "market": market, "code": code}),
+            server: Some(server), extra: serde_json::json!({"rstdx_rev": "vendored third_party/rstdx (574cd53 + 77629df + 009b78c)", "market": market, "code": code}),
         }))
     }
 }
 
 pub fn write_cache(dir: &Path, bars: &[Bar], meta: &DataMeta) -> Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let mut csv = String::from("date,open,high,low,close,volume\n");
-    for b in bars {
-        csv.push_str(&format!("{},{},{},{},{},{}\n", b.date, b.open, b.high, b.low, b.close, b.volume));
-    }
+    anyhow::ensure!(meta.symbol.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !meta.symbol.is_empty(), "bad symbol");
+    let csv = to_csv(bars, true);
     let p = dir.join(format!("{}.csv", meta.symbol));
     std::fs::write(&p, csv)?;
     std::fs::write(dir.join(format!("{}.meta.json", meta.symbol)), serde_json::to_string_pretty(meta)?)?;

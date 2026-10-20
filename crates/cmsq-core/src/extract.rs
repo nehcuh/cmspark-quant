@@ -63,6 +63,22 @@ pub fn parameters(code: &str) -> serde_json::Map<String, serde_json::Value> {
     m
 }
 
+/// Normalised "idea" fingerprint used by the trial ledger: comments, docstrings
+/// and whitespace removed, every numeric literal replaced by `N`, identifiers kept.
+/// Re-posts of the same idea with tweaked numbers map to the same key, so they
+/// count as additional trials of ONE idea in the multiple-testing ledger.
+pub fn idea_key(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let no_doc = Regex::new(r#"(?s)""".*?"""|'''.*?'''"#).unwrap().replace_all(code, "");
+    let no_comments = Regex::new(r"(?m)#.*$").unwrap().replace_all(&no_doc, "");
+    let nums = Regex::new(r"\b\d+(\.\d+)?([eE][-+]?\d+)?\b").unwrap().replace_all(&no_comments, "N");
+    let ws: String = nums.split_whitespace().collect::<Vec<_>>().join(" ");
+    hex::encode(&Sha256::digest(ws.as_bytes())[..12])
+}
+
+/// Static risk codes that block promotion outright.
+pub const BLOCKING_RISKS: [&str; 2] = ["lookahead", "network"];
+
 /// Static risk flags. These are advisory; the sandbox + runner are the real enforcement.
 pub fn static_risks(code: Option<&str>, text: &str) -> Vec<Risk> {
     let mut r = vec![];
@@ -230,5 +246,17 @@ mod tests {
         let e = HeuristicExtractor.extract(&p).await.unwrap();
         assert!(e.code.is_none());
         assert!(e.risks.iter().any(|r| r.code == "no_code"));
+    }
+}
+
+#[cfg(test)]
+mod idea_tests {
+    #[test]
+    fn idea_key_ignores_numbers_comments_whitespace() {
+        let a = "def generate_signals(df, fast=5, slow=20):\n    # comment\n    return df.close.rolling(fast).mean() > df.close.rolling(slow).mean()\n";
+        let b = "def generate_signals(df, fast=10, slow=60):\n    return  df.close.rolling(fast).mean() > df.close.rolling(slow).mean()";
+        let c = "def generate_signals(df, n=20):\n    return df.close > df.close.shift(n)";
+        assert_eq!(super::idea_key(a), super::idea_key(b));
+        assert_ne!(super::idea_key(a), super::idea_key(c));
     }
 }

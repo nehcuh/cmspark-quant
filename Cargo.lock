@@ -1005,6 +1005,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "hmac",
  "regex",
  "reqwest",
  "rstdx",

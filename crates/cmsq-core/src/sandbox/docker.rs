@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 /// Docker backend via bollard. Hardening applied to every container:
 /// NetworkMode=none + network_disabled, read-only rootfs, CapDrop=ALL,
-/// no-new-privileges, non-root user 10001, pids/memory(no swap)/cpu limits,
+/// no-new-privileges, non-root user (the uid owning the job's /out dir, never 0;
+/// falls back to 10001), pids/memory(no swap)/cpu limits,
 /// tmpfs /tmp (noexec), only `/out` writable, never the docker socket, hard timeout
 /// (kill + force remove).
 /// Run as the (unprivileged, non-root) owner of the writable `/out` mount so no
@@ -58,6 +59,11 @@ impl SandboxExecutor for DockerSandboxExecutor {
     }
     fn hardened(&self) -> bool {
         true
+    }
+    async fn runner_identity(&self, image: &str) -> Option<String> {
+        let i = self.docker.inspect_image(image).await.ok()?;
+        let ver = i.config.and_then(|c| c.labels).and_then(|l| l.get("cmsq.runner.version").cloned()).unwrap_or_else(|| "none".into());
+        Some(format!("{}|cmsq.runner.version={ver}", i.id.unwrap_or_default()))
     }
     async fn execute(&self, req: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
         validate(req)?;
@@ -115,12 +121,12 @@ impl SandboxExecutor for DockerSandboxExecutor {
         };
         let duration_ms = t0.elapsed().as_millis() as u64;
         let (mut stdout, mut stderr) = (String::new(), String::new());
-        const CAP: usize = 1024 * 1024;
+        const CAP: usize = OUTPUT_CAP;
         let mut logs = self.docker.logs(&id, Some(LogsOptions::<String> { stdout: true, stderr: true, ..Default::default() }));
         while let Some(Ok(l)) = logs.next().await {
             match l {
-                LogOutput::StdOut { message } if stdout.len() < CAP => stdout.push_str(&String::from_utf8_lossy(&message)),
-                LogOutput::StdErr { message } if stderr.len() < CAP => stderr.push_str(&String::from_utf8_lossy(&message)),
+                LogOutput::StdOut { message } if stdout.len() < CAP => stdout.push_str(&String::from_utf8_lossy(&message[..message.len().min(CAP - stdout.len())])),
+                LogOutput::StdErr { message } if stderr.len() < CAP => stderr.push_str(&String::from_utf8_lossy(&message[..message.len().min(CAP - stderr.len())])),
                 _ => {}
             }
         }

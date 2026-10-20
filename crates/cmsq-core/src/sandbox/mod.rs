@@ -77,7 +77,13 @@ pub trait SandboxExecutor: Send + Sync {
     /// Is this a hardened backend acceptable for untrusted code?
     fn hardened(&self) -> bool;
     async fn execute(&self, req: &SandboxRequest) -> Result<SandboxResult, SandboxError>;
+    /// Identity of the runner as seen by the BACKEND (never by the container):
+    /// docker: "<image id>|cmsq.runner.version=<label>"; dev: "dev-process|sha256:<script>".
+    async fn runner_identity(&self, image: &str) -> Option<String>;
 }
+
+/// Per-stream log capture cap; a stream that reaches it is reported as `output_cap`.
+pub const OUTPUT_CAP: usize = 1024 * 1024;
 
 /// Policy checks shared by all backends (defence in depth: callers cannot ask for
 /// network, the docker socket, writable data, or relative/odd mount paths).

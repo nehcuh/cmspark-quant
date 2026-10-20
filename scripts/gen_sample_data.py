@@ -33,3 +33,31 @@ for sym, s in specs.items():
                "start": dates[0], "end": dates[-1], "bars": n, "adjustment": "n/a"},
               open(os.path.join(out, f"{sym}.meta.json"), "w"), indent=2, ensure_ascii=False)
     print(sym, n, close[-1].round(2))
+
+# SAMPLE_REGIME: persistent Markov bull/bear regimes with a realistic open:
+# open = prev close x overnight gap, close = open x intraday move, so next-open
+# fills are not free. Trend-following has a STRUCTURAL edge here by construction
+# (regime persistence), which is what lets the demo show a full
+# GatePassed -> vault -> Promoted path. Seed fixed up front (not searched).
+def regime_series(seed=2026, p_stay=0.995, bull=(0.0020, 0.010), bear=(-0.0025, 0.016)):
+    rng = np.random.default_rng(seed)
+    n = len(dates); state = 0; c = 10.0; rows = []
+    for i in range(n):
+        if rng.random() > p_stay: state = 1 - state
+        mu, sd = bull if state == 0 else bear
+        r = np.clip(mu + rng.normal(0, sd), -0.095, 0.095)
+        gap = np.clip(r * 0.35 + rng.normal(0, 0.003), -0.095, 0.095)
+        o = c * np.exp(gap) if i else c
+        cl = c * np.exp(r)
+        h = max(o, cl) * (1 + abs(rng.normal(0, 0.005))); l = min(o, cl) * (1 - abs(rng.normal(0, 0.005)))
+        rows.append((dates[i], round(o, 3), round(h, 3), round(l, 3), round(cl, 3), int(rng.integers(2e6, 9e6))))
+        c = cl
+    df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
+    df.to_csv(os.path.join(out, "SAMPLE_REGIME.csv"), index=False)
+    json.dump({"symbol": "SAMPLE_REGIME", "source": "synthetic", "label": "SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES",
+               "generator": "scripts/gen_sample_data.py (regime_series)", "seed": seed, "calendar": "huquant SSE trade_date_sse",
+               "start": dates[0], "end": dates[-1], "bars": n, "adjustment": "n/a"},
+              open(os.path.join(out, "SAMPLE_REGIME.meta.json"), "w"), indent=2, ensure_ascii=False)
+    print("SAMPLE_REGIME", n, round(c, 2))
+
+regime_series()

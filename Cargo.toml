@@ -2,6 +2,7 @@
 resolver = "2"
 members = ["crates/cmsq-core", "crates/cmsq-cli", "crates/cmsq-dashboard"]
 default-members = ["crates/cmsq-core", "crates/cmsq-cli"]
+exclude = ["third_party/rstdx"]
 
 [workspace.package]
 version = "0.2.0"

@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "proce
 async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 regex = "1"
 bollard = "0.17"

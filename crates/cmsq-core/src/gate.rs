@@ -1,24 +1,48 @@
-//! Promotion gate (structural overfitting defence). Thresholds are fixed by config,
-//! never by the strategy author.
+//! Promotion gate. Every input is produced by TRUSTED code: job status and runner
+//! identity come from the orchestrator / sandbox backend, metrics from the Rust
+//! scorer, the look-ahead verdict from the host-side probe comparison. Nothing
+//! written by the strategy container is read here.
+use crate::probe::ProbeReport;
+use crate::scorer::{Dsr, Metrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub const RUNNER_VERSION: &str = "2.0.0";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
-    pub min_oos_bars: i64,
-    pub base_min_oos_sharpe: f64,
-    /// Sharpe hurdle grows by `penalty * ln(attempts)` (multiple-testing haircut).
-    pub multiple_testing_penalty: f64,
+    pub min_bars: usize,
+    pub min_sharpe: f64,
+    /// Deflated Sharpe Ratio threshold (probability the true SR > 0 after
+    /// deflating for the library-wide number of trials).
+    pub min_dsr: f64,
+    pub min_positive_folds: usize,
     pub max_drawdown_floor: f64,
     pub min_exposure: f64,
-    /// Only results from a hardened (Docker) backend may pass the gate.
     pub require_hardened_backend: bool,
+    pub require_adjusted_data: bool,
 }
 
 impl Default for GateConfig {
     fn default() -> Self {
-        Self { min_oos_bars: 120, base_min_oos_sharpe: 0.3, multiple_testing_penalty: 0.15, max_drawdown_floor: -0.35, min_exposure: 0.05, require_hardened_backend: true }
+        Self { min_bars: 250, min_sharpe: 0.5, min_dsr: 0.95, min_positive_folds: 3, max_drawdown_floor: -0.35, min_exposure: 0.05,
+            require_hardened_backend: true, require_adjusted_data: true }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GateInput<'a> {
+    pub job_status: &'a str,
+    pub hardened: bool,
+    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.0.0"
+    pub runner_identity: Option<&'a str>,
+    pub dev: &'a Metrics,
+    pub dev_cost_2x: &'a Metrics,
+    pub folds: &'a [Metrics],
+    pub dsr: &'a Dsr,
+    pub probe: &'a ProbeReport,
+    pub data_adjusted: bool,
+    pub high_risks: &'a [String],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,86 +52,112 @@ pub struct GateOutcome {
     pub checks: Value,
 }
 
-fn f(v: &Value, k: &str) -> Option<f64> {
-    v.get(k).and_then(|x| x.as_f64())
+pub fn runner_version_ok(identity: Option<&str>) -> bool {
+    identity.is_some_and(|i| i.split('|').any(|p| p == format!("cmsq.runner.version={RUNNER_VERSION}")))
 }
 
-pub fn evaluate(result: &Value, attempts: i64, cfg: &GateConfig) -> GateOutcome {
-    let oos = &result["out_of_sample"];
-    let hurdle = cfg.base_min_oos_sharpe + cfg.multiple_testing_penalty * (attempts.max(1) as f64).ln();
+pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
     let mut checks = vec![];
     let mut reasons = vec![];
     let mut check = |name: &str, ok: bool, detail: String| {
-        checks.push(json!({"check": name, "ok": ok, "detail": detail}));
         if !ok {
             reasons.push(format!("{name}: {detail}"));
         }
+        checks.push(json!({"name": name, "ok": ok, "detail": detail}));
     };
-    let bars = oos["bars"].as_i64().unwrap_or(0);
-    check("oos_sample_size", bars >= cfg.min_oos_bars, format!("{bars} OOS bars (min {})", cfg.min_oos_bars));
-    let ret = f(oos, "total_return");
-    check("oos_net_return_positive", ret.is_some_and(|r| r > 0.0), format!("OOS return after costs {:.2}%", ret.unwrap_or(f64::NAN) * 100.0));
-    let sh = f(oos, "sharpe");
-    check("oos_sharpe_hurdle", sh.is_some_and(|s| s >= hurdle),
-        format!("OOS Sharpe {:.2} vs hurdle {:.2} (base {:.2} + {:.2}·ln({attempts} attempts))", sh.unwrap_or(f64::NAN), hurdle, cfg.base_min_oos_sharpe, cfg.multiple_testing_penalty));
-    let halves: Vec<Option<f64>> = result["oos_halves"].as_array().map(|a| a.iter().map(|h| f(h, "total_return")).collect()).unwrap_or_default();
-    let stable = halves.len() == 2 && halves.iter().all(|h| h.is_some_and(|r| r > 0.0));
-    check("stability_oos_halves", stable, format!("OOS halves net returns {:?}", halves.iter().map(|h| h.map(|r| (r * 10000.0).round() / 100.0)).collect::<Vec<_>>()));
-    let dd = f(oos, "max_drawdown");
-    check("max_drawdown", dd.is_some_and(|d| d >= cfg.max_drawdown_floor), format!("OOS max DD {:.2}% (floor {:.0}%)", dd.unwrap_or(f64::NAN) * 100.0, cfg.max_drawdown_floor * 100.0));
-    let ex = f(oos, "exposure");
-    check("min_exposure", ex.is_some_and(|e| e >= cfg.min_exposure), format!("OOS exposure {:.1}%", ex.unwrap_or(0.0) * 100.0));
-    let s2 = f(&result["out_of_sample_cost_2x"], "total_return");
-    check("cost_stress_2x", s2.is_some_and(|r| r > 0.0), format!("OOS return with 2x costs {:.2}%", s2.unwrap_or(f64::NAN) * 100.0));
-    let hardened = result["_backend_hardened"].as_bool().unwrap_or(false);
-    check("hardened_sandbox", hardened || !cfg.require_hardened_backend, if hardened { "ran in hardened Docker sandbox".into() } else { "ran on DEV process backend — re-run on Docker to promote".into() });
-    let leak = result["lookahead_probe"]["detected"].as_bool().unwrap_or(true);
-    check("no_lookahead", !leak, if leak { "look-ahead probe failed or missing".into() } else { "point-in-time probe clean".into() });
-    GateOutcome { passed: reasons.is_empty(), reasons, checks: json!({"hurdle_sharpe": hurdle, "attempts": attempts, "checks": checks, "config": cfg}) }
+    check("job_succeeded", i.job_status == "succeeded", format!("job status {}", i.job_status));
+    check("hardened_sandbox", i.hardened || !cfg.require_hardened_backend,
+        if i.hardened { "ran in hardened Docker sandbox".into() } else { "ran on DEV process backend — re-run on Docker to promote".into() });
+    check("runner_pinned", runner_version_ok(i.runner_identity) || !cfg.require_hardened_backend,
+        format!("runner identity {:?} (expect cmsq.runner.version={RUNNER_VERSION}, from image inspect)", i.runner_identity.unwrap_or("none")));
+    check("no_lookahead", !i.probe.detected && i.probe.containers >= i.probe.variants && i.probe.variants > 1,
+        if i.probe.detected { format!("positions changed when the future changed ({} variant(s))", i.probe.mismatches.len()) }
+        else { format!("{} variants in {} fresh containers, all consistent", i.probe.variants, i.probe.containers) });
+    check("static_risks", i.high_risks.is_empty(), if i.high_risks.is_empty() { "no high-severity static findings".into() } else { i.high_risks.join(", ") });
+    check("data_adjusted", i.data_adjusted || !cfg.require_adjusted_data,
+        if i.data_adjusted { "prices adjusted (or synthetic)".into() } else { "UNADJUSTED prices: ex-dividend gaps distort returns; import adjusted data (adj_factor)".into() });
+    check("min_bars", i.dev.bars >= cfg.min_bars, format!("{} evaluation bars (min {})", i.dev.bars, cfg.min_bars));
+    check("net_return_positive", i.dev.total_return > 0.0, format!("net return {:.2}%", i.dev.total_return * 100.0));
+    check("sharpe", i.dev.sharpe >= cfg.min_sharpe, format!("Sharpe {:.2} (min {:.2})", i.dev.sharpe, cfg.min_sharpe));
+    check("deflated_sharpe", i.dsr.dsr >= cfg.min_dsr,
+        format!("DSR {:.3} (min {:.2}) over N={} library trials, SR0/day {:.4}", i.dsr.dsr, cfg.min_dsr, i.dsr.trials, i.dsr.sr0_daily));
+    let pos = i.folds.iter().filter(|f| f.total_return > 0.0).count();
+    check("walk_forward", pos >= cfg.min_positive_folds.min(i.folds.len()) && !i.folds.is_empty(),
+        format!("{pos}/{} walk-forward folds positive (min {})", i.folds.len(), cfg.min_positive_folds));
+    check("cost_stress_2x", i.dev_cost_2x.total_return > 0.0, format!("net return with 2x costs {:.2}%", i.dev_cost_2x.total_return * 100.0));
+    check("max_drawdown", i.dev.max_drawdown >= cfg.max_drawdown_floor, format!("max DD {:.1}% (floor {:.0}%)", i.dev.max_drawdown * 100.0, cfg.max_drawdown_floor * 100.0));
+    check("exposure", i.dev.exposure >= cfg.min_exposure, format!("avg exposure {:.1}%", i.dev.exposure * 100.0));
+    GateOutcome { passed: reasons.is_empty(), reasons, checks: json!({"checks": checks, "config": cfg, "dsr": i.dsr}) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn res(ret: f64, sharpe: f64, h1: f64, h2: f64) -> Value {
-        json!({"out_of_sample": {"bars": 300, "total_return": ret, "sharpe": sharpe, "max_drawdown": -0.1, "exposure": 0.5},
-               "out_of_sample_cost_2x": {"total_return": ret / 2.0},
-               "oos_halves": [{"total_return": h1}, {"total_return": h2}], "lookahead_probe": {"detected": false}, "_backend_hardened": true})
+    fn m(ret: f64, sharpe: f64) -> Metrics {
+        Metrics { bars: 700, total_return: ret, sharpe, sharpe_daily: sharpe / 252f64.sqrt(), kurtosis: 3.0, max_drawdown: -0.1, exposure: 0.5, ..Default::default() }
+    }
+    struct Fx {
+        dev: Metrics,
+        c2: Metrics,
+        folds: Vec<Metrics>,
+        dsr: Dsr,
+        probe: ProbeReport,
+        risks: Vec<String>,
+    }
+    fn fx() -> Fx {
+        let dev = m(0.3, 1.2);
+        let dsr = crate::scorer::deflated_sharpe(&dev, &[dev.sharpe_daily]);
+        Fx { c2: m(0.2, 1.0), folds: vec![m(0.05, 1.0); 4], dsr, probe: ProbeReport { detected: false, variants: 10, containers: 10, ..Default::default() }, risks: vec![], dev }
+    }
+    fn input(f: &Fx) -> GateInput<'_> {
+        GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.0.0"), dev: &f.dev, dev_cost_2x: &f.c2,
+            folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, high_risks: &f.risks }
     }
     #[test]
     fn passes_good() {
-        assert!(evaluate(&res(0.2, 1.2, 0.1, 0.08), 1, &GateConfig::default()).passed);
+        let f = fx();
+        let o = evaluate(&input(&f), &GateConfig::default());
+        assert!(o.passed, "{:?}", o.reasons);
     }
     #[test]
-    fn rejects_negative_after_costs_and_unstable() {
-        let o = evaluate(&res(-0.01, 0.9, 0.1, -0.1), 1, &GateConfig::default());
-        assert!(!o.passed);
-        assert!(o.reasons.iter().any(|r| r.starts_with("oos_net_return_positive")));
-        assert!(o.reasons.iter().any(|r| r.starts_with("stability")));
+    fn fails_closed_on_runner_status_probe_and_data() {
+        let f = fx();
+        let cfg = GateConfig::default();
+        let mut i = input(&f);
+        i.runner_identity = Some("sha256:abc|cmsq.runner.version=1.0.0");
+        assert!(!evaluate(&i, &cfg).passed);
+        let mut i = input(&f);
+        i.runner_identity = None;
+        assert!(!evaluate(&i, &cfg).passed);
+        let mut i = input(&f);
+        i.job_status = "error";
+        assert!(!evaluate(&i, &cfg).passed);
+        let mut i = input(&f);
+        i.hardened = false;
+        assert!(!evaluate(&i, &cfg).passed);
+        let mut i = input(&f);
+        i.data_adjusted = false;
+        assert!(!evaluate(&i, &cfg).passed);
+        let mut f2 = fx();
+        f2.probe.containers = 1; // variants not each in their own container
+        assert!(!evaluate(&input(&f2), &cfg).passed);
+        let mut f3 = fx();
+        f3.risks = vec!["network".into()];
+        assert!(!evaluate(&input(&f3), &cfg).passed);
     }
     #[test]
-    fn hurdle_rises_with_attempts() {
-        let r = res(0.1, 0.5, 0.05, 0.04);
-        assert!(evaluate(&r, 1, &GateConfig::default()).passed);
-        assert!(!evaluate(&r, 20, &GateConfig::default()).passed, "0.3+0.15*ln20=0.75 > 0.5");
-    }
-    #[test]
-    fn dev_backend_cannot_pass() {
-        let mut r = res(0.2, 1.2, 0.1, 0.08);
-        r["_backend_hardened"] = json!(false);
-        let o = evaluate(&r, 1, &GateConfig::default());
-        assert!(!o.passed && o.reasons.iter().any(|x| x.starts_with("hardened_sandbox")));
-    }
-    #[test]
-    fn cost_stress_fails() {
-        let mut r = res(0.2, 1.2, 0.1, 0.08);
-        r["out_of_sample_cost_2x"]["total_return"] = json!(-0.01);
-        assert!(!evaluate(&r, 1, &GateConfig::default()).passed);
-    }
-    #[test]
-    fn missing_probe_fails_closed() {
-        let mut r = res(0.2, 1.2, 0.1, 0.08);
-        r.as_object_mut().unwrap().remove("lookahead_probe");
-        assert!(!evaluate(&r, 1, &GateConfig::default()).passed);
+    fn walk_forward_and_cost_stress_and_dsr() {
+        let cfg = GateConfig::default();
+        let mut f = fx();
+        f.folds = vec![m(0.1, 1.0), m(-0.1, -1.0), m(-0.01, -0.1), m(0.2, 2.0)];
+        assert!(evaluate(&input(&f), &cfg).reasons.iter().any(|r| r.starts_with("walk_forward")));
+        let mut f = fx();
+        f.c2.total_return = -0.01;
+        assert!(!evaluate(&input(&f), &cfg).passed);
+        let mut f = fx();
+        let many: Vec<f64> = (0..200).map(|k| (k as f64 - 100.0) / 300.0).collect();
+        f.dsr = crate::scorer::deflated_sharpe(&f.dev, &many);
+        let o = evaluate(&input(&f), &cfg);
+        assert!(o.reasons.iter().any(|r| r.starts_with("deflated_sharpe")), "{:?}", f.dsr);
     }
 }

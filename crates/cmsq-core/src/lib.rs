@@ -8,6 +8,9 @@ pub mod market;
 pub mod models;
 pub mod orchestrator;
 pub mod sandbox;
+pub mod scorer;
+pub mod probe;
+pub mod error;
 pub mod state;
 pub mod store;
 

@@ -48,6 +48,10 @@ impl SandboxExecutor for ProcessSandboxExecutor {
     fn hardened(&self) -> bool {
         false
     }
+    async fn runner_identity(&self, _image: &str) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        Some(format!("dev-process|sha256:{}", hex::encode(Sha256::digest(crate::home::RUNNER_PY.as_bytes()))))
+    }
     async fn execute(&self, req: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
         validate(req)?;
         if !Self::available() {
@@ -59,11 +63,15 @@ impl SandboxExecutor for ProcessSandboxExecutor {
             .stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
         let mut so = child.stdout.take().unwrap();
         let mut se = child.stderr.take().unwrap();
-        let rd = async move {
-            let (mut a, mut b) = (Vec::new(), Vec::new());
-            let _ = tokio::join!(so.read_to_end(&mut a), se.read_to_end(&mut b));
-            (a, b)
-        };
+        // bounded capture: keep OUTPUT_CAP bytes, drain (and drop) the rest so a
+        // flooding child cannot exhaust host memory or block on a full pipe
+        async fn capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> Vec<u8> {
+            let mut keep = Vec::new();
+            let _ = (&mut r).take(OUTPUT_CAP as u64).read_to_end(&mut keep).await;
+            let _ = tokio::io::copy(&mut r, &mut tokio::io::sink()).await;
+            keep
+        }
+        let rd = async move { tokio::join!(capped(&mut so), capped(&mut se)) };
         let rd = tokio::spawn(rd);
         let (outcome, code) = match tokio::time::timeout(Duration::from_secs(req.limits.timeout_secs), child.wait()).await {
             Ok(st) => (Outcome::Exited, st?.code().unwrap_or(-1) as i64),
@@ -72,9 +80,7 @@ impl SandboxExecutor for ProcessSandboxExecutor {
                 (Outcome::TimedOut, 137)
             }
         };
-        let (mut a, mut b) = rd.await.unwrap_or_default();
-        a.truncate(1024 * 1024);
-        b.truncate(1024 * 1024);
+        let (a, b) = rd.await.unwrap_or_default();
         Ok(SandboxResult {
             id: req.id.clone(), outcome, exit_code: code, stdout: String::from_utf8_lossy(&a).into(), stderr: String::from_utf8_lossy(&b).into(),
             duration_ms: t0.elapsed().as_millis() as u64,

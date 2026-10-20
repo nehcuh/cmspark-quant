@@ -7,7 +7,12 @@
 //! raw/<strategy-id>/post.json  archived original scrape (immutable)
 //! strategies/<id>/strategy.py, extracted.json
 //! strategies/<id>/jobs/<job-id>/{job/,out/,stdout.log,stderr.log}
-//! data/<SYMBOL>.csv + .meta.json  market data (mounted READ-ONLY into the sandbox)
+//! data/<SYMBOL>.csv + .meta.json  market data (HOST ONLY: never mounted; each container
+//!                            gets one host-prepared variant in its job dir)
+//!
+//! Secrets (outside $CMSQ_HOME, default ~/.config/cmsq or $CMSQ_SECRETS_DIR):
+//! audit.key                  HMAC key for the audit chain (0600)
+//! anchors/<home-id>.anchor   append-only audit head anchors
 //! vendor/huquant/            pinned huquant trade calendar (READ-ONLY mount)
 //! runner/                    runner script for the process (dev) backend (READ-ONLY mount)
 //! ```
@@ -15,7 +20,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub const RUNNER_PY: &str = include_str!("../../../runner/run_backtest.py");
+pub const RUNNER_PY: &str = include_str!("../../../runner/signal_runner.py");
 pub const HUQUANT_TRADE_DATES: &str = include_str!("../../../vendor/huquant/trade_dates.py");
 /// sha256 of vendored huquant/trade_dates.py @ 928aff42a932888025599dd9503ec9ad7c9458f3
 pub const HUQUANT_SHA256: &str = "0b1d1bf53a0e5f9d277cd0d67b513415336263fd181d5bbce0e895c8eebbacf5";
@@ -23,11 +28,58 @@ pub const HUQUANT_SHA256: &str = "0b1d1bf53a0e5f9d277cd0d67b513415336263fd181d5b
 #[derive(Debug, Clone)]
 pub struct Home {
     pub root: PathBuf,
+    /// Directory holding the audit key and anchors. Must be outside `root`.
+    pub secrets: PathBuf,
+}
+
+pub fn default_secrets_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("CMSQ_SECRETS_DIR") {
+        return d.into();
+    }
+    let base = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".config"));
+    base.join("cmsq")
 }
 
 impl Home {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self { root: root.into(), secrets: default_secrets_dir() }
+    }
+    pub fn with_secrets(root: impl Into<PathBuf>, secrets: impl Into<PathBuf>) -> Self {
+        Self { root: root.into(), secrets: secrets.into() }
+    }
+    pub fn key_file(&self) -> PathBuf {
+        std::env::var("CMSQ_AUDIT_KEY_FILE").map(PathBuf::from).unwrap_or_else(|_| self.secrets.join("audit.key"))
+    }
+    pub fn anchor_file(&self) -> PathBuf {
+        let id = hex::encode(&Sha256::digest(self.abs().display().to_string().as_bytes())[..8]);
+        self.secrets.join("anchors").join(format!("{id}.anchor"))
+    }
+    /// Load (or create, 0600) the audit HMAC key; refuse a key inside $CMSQ_HOME.
+    pub fn audit_config(&self) -> Result<crate::audit::AuditConfig> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let kf = self.key_file();
+        let root = self.abs();
+        let kabs = kf.parent().and_then(|p| std::fs::create_dir_all(p).ok().and(std::fs::canonicalize(p).ok())).unwrap_or_default();
+        anyhow::ensure!(!kabs.starts_with(&root), "audit key {} must live outside CMSQ_HOME {}", kf.display(), root.display());
+        let anchor = self.anchor_file();
+        if let Some(p) = anchor.parent() {
+            std::fs::create_dir_all(p)?;
+            anyhow::ensure!(!std::fs::canonicalize(p)?.starts_with(&root), "audit anchors must live outside CMSQ_HOME");
+        }
+        if !kf.exists() {
+            let mut key = Vec::with_capacity(32);
+            key.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+            key.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&kf)
+                .with_context(|| format!("create audit key {}", kf.display()))?;
+            std::io::Write::write_all(&mut f, hex::encode(&key).as_bytes())?;
+        }
+        let md = std::fs::metadata(&kf)?;
+        anyhow::ensure!(md.permissions().mode() & 0o077 == 0, "audit key {} must be mode 0600", kf.display());
+        let key = hex::decode(std::fs::read_to_string(&kf)?.trim()).context("audit key must be hex")?;
+        anyhow::ensure!(key.len() >= 16, "audit key too short");
+        Ok(crate::audit::AuditConfig { key, anchor: Some(anchor) })
     }
     pub fn from_env() -> Self {
         Self::new(std::env::var("CMSQ_HOME").unwrap_or_else(|_| "var".into()))
@@ -76,7 +128,8 @@ impl Home {
         let got = hex::encode(Sha256::digest(HUQUANT_TRADE_DATES.as_bytes()));
         anyhow::ensure!(got == HUQUANT_SHA256, "vendored huquant checksum mismatch: {got}");
         write_readonly(&self.vendor_dir().join("trade_dates.py"), HUQUANT_TRADE_DATES)?;
-        write_readonly(&self.runner_dir().join("run_backtest.py"), RUNNER_PY)?;
+        write_readonly(&self.runner_dir().join("signal_runner.py"), RUNNER_PY)?;
+        let _ = std::fs::remove_file(self.runner_dir().join("run_backtest.py"));
         Ok(())
     }
 }
