@@ -23,9 +23,10 @@ struct Cli {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Backend {
+    /// hardened; the only backend whose results can pass the gate
     Docker,
+    /// DEV ONLY bubblewrap backend; results can never be promoted
     Process,
-    Auto,
 }
 
 #[derive(Subcommand)]
@@ -43,14 +44,15 @@ enum Cmd {
         all: bool,
         #[arg(long, default_value = "SAMPLE_TREND")]
         symbol: String,
-        #[arg(long, value_enum, default_value = "auto")]
+        #[arg(long, value_enum, default_value = "docker")]
         backend: Backend,
         /// JSON object overriding extracted params, e.g. '{"fast":5}'
         #[arg(long)]
         params: Option<String>,
     },
-    /// Manually promote (requires gate pass + typed confirmation = first 8 chars of id)
-    Promote { id: String, #[arg(long)] confirm: String },
+    /// Manually promote a GatePassed strategy: type `PROMOTE <id8>` (prompted if --confirm
+    /// is omitted), then the one-time vault holdout runs in Docker; only a vault pass promotes.
+    Promote { id: String, #[arg(long)] confirm: Option<String> },
     /// Manually reject
     Reject { id: String, #[arg(long)] reason: String },
     /// List strategies
@@ -58,7 +60,12 @@ enum Cmd {
     /// Show one strategy with provenance, evaluation, jobs and audit trail
     Show { id: String },
     /// List sandbox jobs
-    Jobs,
+    Jobs {
+        #[command(subcommand)]
+        cmd: Option<JobsCmd>,
+    },
+    /// Library-wide trial ledger used by the Deflated Sharpe Ratio
+    Trials,
     /// Observe-only signals of promoted strategies
     Signals,
     /// Market data (host-side; sandbox stays offline)
@@ -78,8 +85,22 @@ enum DataCmd {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Import a CSV (date,open,high,low,close,volume[,adj_factor]) as SYMBOL
+    Import {
+        symbol: String,
+        file: PathBuf,
+        /// how the prices are adjusted: adj_factor (column present) | qfq | hfq | none
+        #[arg(long, default_value = "none")]
+        adjustment: String,
+    },
     /// List cached datasets
     List,
+}
+
+#[derive(Subcommand)]
+enum JobsCmd {
+    /// Crash recovery: mark jobs of dead processes abandoned, un-stick Backtesting strategies
+    Reap,
 }
 
 #[derive(Subcommand)]
@@ -90,15 +111,13 @@ enum AuditCmd {
 
 async fn executor(b: Backend) -> Result<Box<dyn SandboxExecutor>> {
     match b {
-        Backend::Docker => Ok(Box::new(DockerSandboxExecutor::connect().await?)),
-        Backend::Process => Ok(Box::new(ProcessSandboxExecutor)),
-        Backend::Auto => match DockerSandboxExecutor::connect().await {
-            Ok(d) => Ok(Box::new(d)),
-            Err(e) => {
-                eprintln!("WARNING: docker unavailable ({e}); falling back to DEV process backend (weaker isolation)");
-                Ok(Box::new(ProcessSandboxExecutor))
-            }
-        },
+        Backend::Docker => DockerSandboxExecutor::connect().await.map(|d| Box::new(d) as Box<dyn SandboxExecutor>)
+            .map_err(|e| anyhow::anyhow!("docker backend unavailable: {e} — see README \"Docker setup\" (or pass --backend process for a DEV-only run)")),
+        Backend::Process => {
+            eprintln!("\n!!! WARNING: DEV process backend (bubblewrap). Weaker isolation than Docker; results are");
+            eprintln!("!!! labelled and can NEVER pass the gate or be promoted. Use --backend docker for real runs.\n");
+            Ok(Box::new(ProcessSandboxExecutor))
+        }
     }
 }
 
@@ -110,7 +129,11 @@ fn pct(v: &serde_json::Value, k: &str) -> String {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let home = cli.home.clone().map(Home::new).unwrap_or_else(Home::from_env);
-    let o = Orchestrator::open(home)?;
+    let mut o = Orchestrator::open(home)?;
+    if !cli.json {
+        o.progress = Some(std::sync::Arc::new(|m: &str| eprintln!("  · {m}")));
+    }
+    let o = o;
     let out = |v: serde_json::Value, human: String| {
         if cli.json { println!("{}", serde_json::to_string_pretty(&v).unwrap()) } else { println!("{human}") }
     };
@@ -166,22 +189,46 @@ async fn main() -> Result<()> {
                 let r = o.backtest(&i, &symbol, exec.as_ref(), ov.clone()).await?;
                 let title = o.store.get_strategy(&r.strategy_id)?.title;
                 let m = r.oos.clone().unwrap_or_default();
-                lines.push(format!("{:<9} {}  job={} [{}]  OOS ret {} sharpe {} maxDD {} turnover {}  — {}", r.status.as_str(), &r.strategy_id[..8], &r.job_id[..8], r.job_status,
+                let job = o.store.list_jobs(Some(&r.strategy_id))?.into_iter().find(|j| j.id == r.job_id);
+                let dsr = job.as_ref().and_then(|j| j.result.as_ref()).map(|v| v["dsr"].clone()).unwrap_or_default();
+                lines.push(format!("{:<10} {}  job={} [{}]  dev ret {} sharpe {} maxDD {} DSR {} (N={})  — {}", r.status.as_str(), &r.strategy_id[..8], &r.job_id[..8], r.job_status,
                     pct(&m, "total_return"), m["sharpe"].as_f64().map(|x| format!("{x:.2}")).unwrap_or("-".into()), pct(&m, "max_drawdown"),
-                    m["turnover_annual"].as_f64().map(|x| format!("{x:.1}x")).unwrap_or("-".into()), title));
+                    dsr["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into()), dsr["trials"], title));
                 for why in &r.reasons {
-                    lines.push(format!("          ✗ {why}"));
+                    lines.push(format!("           ✗ {why}"));
                 }
-                if r.status == StrategyStatus::Evaluated {
-                    lines.push(format!("          ✓ gate passed — awaiting manual confirmation: cmsq promote {} --confirm {}", &r.strategy_id[..8], &r.strategy_id[..8]));
+                if r.status == StrategyStatus::GatePassed {
+                    lines.push(format!("           ✓ gate passed on development data — to run the one-time vault holdout and promote: cmsq promote {}  (you will be asked to type the confirmation)", &r.strategy_id[..8]));
                 }
                 js.push(serde_json::to_value(&r)?);
             }
             out(serde_json::Value::Array(js), lines.join("\n"));
         }
         Cmd::Promote { id, confirm } => {
-            let s = o.promote(&id, "user:cli", &confirm)?;
-            out(serde_json::to_value(&s)?, format!("PROMOTED {}  {}  (signals are observe-only; no broker connected)", &s.id[..8], s.title));
+            let s0 = o.get(&id)?;
+            let confirm = match confirm {
+                Some(c) => c,
+                None => {
+                    use std::io::{BufRead, IsTerminal, Write};
+                    anyhow::ensure!(std::io::stdin().is_terminal(), "no --confirm given and stdin is not a terminal");
+                    eprint!("Promote \"{}\"? This runs the ONE-TIME vault holdout.\nType  {}  to confirm: ", s0.title, Orchestrator::confirmation_phrase(&s0));
+                    std::io::stderr().flush()?;
+                    let mut l = String::new();
+                    std::io::stdin().lock().read_line(&mut l)?;
+                    l.trim().to_string()
+                }
+            };
+            let exec = executor(Backend::Docker).await?;
+            let s = o.promote(&id, "user:cli", &confirm, exec.as_ref()).await?;
+            let msg = if s.status == StrategyStatus::Promoted {
+                format!("PROMOTED {}  {}  (vault holdout passed; signals are observe-only, no broker connected)", &s.id[..8], s.title)
+            } else {
+                format!("{} {}  {}  — {}", s.status.as_str().to_uppercase(), &s.id[..8], s.title, s.last_reason.clone().unwrap_or_default())
+            };
+            out(serde_json::to_value(&s)?, msg);
+            if s.status != StrategyStatus::Promoted {
+                std::process::exit(3);
+            }
         }
         Cmd::Reject { id, reason } => {
             let s = o.reject(&id, "user:cli", &reason)?;
@@ -197,7 +244,7 @@ async fn main() -> Result<()> {
             out(serde_json::to_value(&v)?, lines.join("\n"));
         }
         Cmd::Show { id } => {
-            let s = o.store.get_strategy(&id)?;
+            let s = o.get(&id)?;
             let ev = o.store.latest_evaluation(&s.id)?;
             let jobs = o.store.list_jobs(Some(&s.id))?;
             let audit = o.store.audit_entries(Some(&s.id), 50)?;
@@ -210,13 +257,26 @@ async fn main() -> Result<()> {
             for a in audit.iter().rev() { h += &format!("  #{:<4} {} {:<12} {}\n", a.seq, &a.ts[..19], a.actor, a.action); }
             out(v, h);
         }
-        Cmd::Jobs => {
+        Cmd::Jobs { cmd: Some(JobsCmd::Reap) } => {
+            let v = o.reap_stale_jobs()?;
+            out(serde_json::json!(v), format!("reaped {} stuck job(s)/strategy(ies)", v.len()));
+        }
+        Cmd::Jobs { cmd: None } => {
             let v = o.store.list_jobs(None)?;
             let mut lines = vec![];
             for j in &v {
-                lines.push(format!("{}  {:<20} {:<18} {:<12} {:>6}ms  strategy {}", &j.id[..8], j.backend, j.status, j.symbol, j.duration_ms.unwrap_or(0), &j.strategy_id[..8]));
+                lines.push(format!("{}  {:<5} {:<20} {:<15} {:<12} {:>6}ms  strategy {}  runner {}", &j.id[..8], j.kind, j.backend, j.status, j.symbol, j.duration_ms.unwrap_or(0), &j.strategy_id[..8],
+                    j.runner_identity.as_deref().map(|r| r.chars().take(19).collect::<String>() + "…" + r.rsplit('|').next().unwrap_or("")).unwrap_or_default()));
             }
             out(serde_json::to_value(&v)?, lines.join("\n"));
+        }
+        Cmd::Trials => {
+            let v = o.store.trials()?;
+            let mut lines = vec![format!("library-wide trials: {}  (distinct ideas: {})", v.len(), v.iter().map(|t| &t.idea_key).collect::<std::collections::BTreeSet<_>>().len())];
+            for t in &v {
+                lines.push(format!("{}  idea {}  params {}  {:<12} SR/day {:+.4}", &t.strategy_id[..8], &t.idea_key[..10], t.params_hash, t.symbol, t.sharpe_daily));
+            }
+            out(serde_json::json!(v.iter().map(|t| serde_json::json!({"strategy": t.strategy_id, "idea_key": t.idea_key, "params_hash": t.params_hash, "symbol": t.symbol, "sharpe_daily": t.sharpe_daily})).collect::<Vec<_>>()), lines.join("\n"));
         }
         Cmd::Signals => {
             let v = o.store.list_signals()?;
@@ -239,6 +299,10 @@ async fn main() -> Result<()> {
             };
             out(serde_json::to_value(&meta)?, format!("cached {} bars {} .. {} for {} from {} [{}]", meta.bars, meta.start, meta.end, meta.symbol, meta.source, meta.label));
         }
+        Cmd::Data { cmd: DataCmd::Import { symbol, file, adjustment } } => {
+            let meta = o.fetch_data(&cmsq_core::market::CsvSource { path: file, adjustment }, &symbol.to_uppercase(), usize::MAX).await?;
+            out(serde_json::to_value(&meta)?, format!("imported {} bars {} .. {} as {} (adjustment: {})", meta.bars, meta.start, meta.end, meta.symbol, meta.adjustment));
+        }
         Cmd::Data { cmd: DataCmd::List } => {
             let mut lines = vec![];
             for e in std::fs::read_dir(o.home.data_dir())? {
@@ -253,7 +317,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Audit { cmd: AuditCmd::Verify } => {
             let r = o.store.verify_audit()?;
-            let h = if r.ok { format!("audit chain OK: {} entries, head {}", r.entries, &r.head_hash[..16]) } else { format!("AUDIT CHAIN BROKEN at seq {:?}: {}", r.first_bad_seq, r.problem.clone().unwrap_or_default()) };
+            let h = if r.ok { format!("audit chain OK: {} entries, HMAC-keyed, head {} anchored at seq {:?} in {}", r.entries, &r.head_hash[..16], r.anchored_seq, r.anchor.clone().unwrap_or_default()) } else { format!("AUDIT CHAIN BROKEN at seq {:?}: {}", r.first_bad_seq, r.problem.clone().unwrap_or_default()) };
             let ok = r.ok;
             out(serde_json::to_value(&r)?, h);
             if !ok { std::process::exit(1); }
