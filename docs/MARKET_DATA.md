@@ -34,3 +34,22 @@ Evaluated `/workspace/huquant` @ `928aff4`:
   `calendar_check` (bars on non-trading days, bars beyond calendar end). Known upstream bugs not exercised by us:
   `util_get_next_trade_date`/`util_trade_date_gap` call undefined `Hu_*` names, `gat` typo, duplicate function name.
   The calendar ends in 2019, so recent rstdx data shows as "beyond calendar".
+
+## Multi-source router (2026-10-20)
+
+`cmsq data fetch <SH600519|SZ000001|BJ…>` goes through `cmsq_core::data::router::Router`:
+
+| Priority | Source | How | Rate limiting | Notes |
+|---|---|---|---|---|
+| 1 | **tushare** | HTTPS `https://api.tushare.pro` (`daily`, `adj_factor`, `trade_cal`, `stock_basic`) | per-endpoint token bucket, default **400/min** (5000-pt tier = 500/min, 20% headroom; `CMSQ_TUSHARE_RPM`); on "每分钟最多访问该接口N次" the bucket drops to 0.8·N and backs off with jitter; "每天最多…" marks the quota exhausted | only source with `adj_factor` → the only one that passes `data_adjusted`. Suspended open days (from `trade_cal`) are filled as volume-0 bars at the previous close. Volume converted 手→shares. ST names flagged in meta (±5% not modelled). Plain `http://` timed out from this box; HTTPS works. |
+| 2 | **akshare** | host python helper `scripts/data_helper.py` (embedded in the binary), Sina `stock_zh_a_daily` first, Eastmoney `stock_zh_a_hist` fallback | serial, ≥1.2 s spacing ±25% jitter, 60 s timeout, retries with exponential backoff | unadjusted; backup + validator. Eastmoney push2his disconnects from this box; Sina works. |
+| 3 | **baostock** | same helper, `query_history_k_data_plus adjustflag=3` | serial, ≥0.5 s spacing | unadjusted; login fails from this box ("网络接收错误"). |
+| 4 | **tdx** (rstdx) | vendored rstdx, feature `tdx` | — | unadjusted; TDX servers unreachable from this box. |
+
+* **Token**: env `TUSHARE_TOKEN`, else `TUSHARE_TOKEN=` in `<secrets dir>/secrets.env`, `$CMSQ_TUSHARE_ENV_FILE`, or `~/.config/cmsq/secrets.env`. It is never logged, put in meta/audit/errors (error text is redacted, `Debug` prints `<redacted>`), and is not in the repo.
+* **Fallback + health**: sources are tried in order; each success/failure is recorded in `data/_sources_health.json` (ok/fail counts, last error, latency). Consecutive failures put a source in cooldown (30 s·2^n, max 30 min). `cmsq data sources` shows the state. Order: `--sources` or `CMSQ_DATA_SOURCES`.
+* **Cross-source validation**: after the primary succeeds, the next reachable source is fetched and **raw closes are compared day by day** (volume-0 filler days skipped). A day with a >0.1% difference is flagged. The result goes into `meta.extra.validation` (`ok` | `divergent` | `unvalidated`, plus a sample of the divergent days). Gate check `data_cross_validated` **fails** for `divergent` and for `unvalidated` real data (synthetic samples pass; a user CSV passes, labelled "user attests").
+* **Provenance + snapshots**: `meta.json` records source, endpoint, fetch time, router attempts, validators and adjustment. The cache CSV is mode 0444, and an immutable content-addressed copy is written to `data/snapshots/<sha256>.csv`. The sha goes into meta and into the audit chain (`market_data_fetch`). A backtest refuses to run if the cache no longer matches its snapshot sha.
+* **Trade calendar**: `cmsq data calendar` saves the SSE `trade_cal` to `data/_calendar_SSE.txt` (audited).
+* **Native replay** (replaces huquant BarPlayer/Strategy): `cmsq_core::replay` provides `Calendar`, `Strategy` trait, `BarPlayer` (the strategy only ever gets `bars[..=i]`), and `MaCrossover`/`Momentum`/`BuyAndHold`. `cmsq replay <SYM> --strategy …` is a reference run, **not gated**. The Docker test asserts that BarPlayer reproduces the sandboxed runner's ma_crossover positions bar for bar.
+* **Real-data e2e**: `scripts/e2e_real.sh` (output in `docs/e2e-real-output.txt`).

@@ -68,6 +68,14 @@ enum Cmd {
     Trials,
     /// Observe-only signals of promoted strategies
     Signals,
+    /// Native host-side bar-by-bar replay of a reference strategy (not gated; for reference/cross-checks)
+    Replay {
+        symbol: String,
+        #[arg(long, default_value = "ma_crossover")]
+        strategy: String,
+        #[arg(long, default_value = "{}")]
+        params: String,
+    },
     /// Market data (host-side; sandbox stays offline)
     Data { #[command(subcommand)] cmd: DataCmd },
     /// Audit log
@@ -76,15 +84,26 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum DataCmd {
-    /// Fetch daily bars: SAMPLE_* from bundled fixtures, SH/SZ codes via rstdx (TDX)
+    /// Fetch daily bars: SAMPLE_* from bundled fixtures; SH/SZ/BJ codes through the
+    /// multi-source router (default priority tushare,akshare,baostock,tdx), cross-validated
     Fetch {
         symbol: String,
         #[arg(long, default_value_t = 1500)]
         count: usize,
-        /// TDX server host:port (default: rstdx auto-discovery)
+        /// comma list in priority order (env CMSQ_DATA_SOURCES)
         #[arg(long)]
-        server: Option<String>,
+        sources: Option<String>,
+        /// skip the cross-source check (the dataset then fails data_cross_validated)
+        #[arg(long)]
+        no_validate: bool,
     },
+    /// Fetch the SSE trade calendar from tushare into data/_calendar_SSE.txt
+    Calendar {
+        #[arg(long, default_value = "2005-01-01")]
+        start: String,
+    },
+    /// Per-source health / cooldown / rate-limit state
+    Sources,
     /// Import a CSV (date,open,high,low,close,volume[,adj_factor]) as SYMBOL
     Import {
         symbol: String,
@@ -283,21 +302,61 @@ async fn main() -> Result<()> {
             let lines: Vec<String> = v.iter().map(|(s, t, _)| format!("{}  {}  target={:.2}  {}  [OBSERVE ONLY]", s.date, s.symbol, s.target_position, t)).collect();
             out(serde_json::to_value(v.iter().map(|x| &x.0).collect::<Vec<_>>())?, if lines.is_empty() { "no signals (only promoted strategies emit observe-only signals)".into() } else { lines.join("\n") });
         }
-        Cmd::Data { cmd: DataCmd::Fetch { symbol, count, server } } => {
-            let meta = if symbol.to_uppercase().starts_with("SAMPLE") {
-                o.fetch_data(&SampleSource, &symbol.to_uppercase(), count).await?
+        Cmd::Data { cmd: DataCmd::Fetch { symbol, count, sources, no_validate } } => {
+            let sym = symbol.to_uppercase();
+            let meta = if sym.starts_with("SAMPLE") {
+                o.fetch_data(&SampleSource, &sym, count).await?
             } else {
-                #[cfg(feature = "tdx")]
-                {
-                    o.fetch_data(&cmsq_core::market::RstdxSource { server }, &symbol.to_uppercase(), count).await?
+                let (router, notes) = o.data_router(sources.as_deref(), !no_validate);
+                for n in notes {
+                    eprintln!("  · {n}");
                 }
-                #[cfg(not(feature = "tdx"))]
-                {
-                    let _ = server;
-                    anyhow::bail!("built without `tdx` feature")
-                }
+                anyhow::ensure!(!router.sources.is_empty(), "no data source available");
+                o.fetch_routed(&router, &sym, count).await?
             };
-            out(serde_json::to_value(&meta)?, format!("cached {} bars {} .. {} for {} from {} [{}]", meta.bars, meta.start, meta.end, meta.symbol, meta.source, meta.label));
+            let v = &meta.extra["validation"];
+            let val = if v.is_null() { String::new() } else { format!("\n  cross-validation: {} vs {} — {}", v["status"].as_str().unwrap_or("?"), v["against"].as_str().unwrap_or("-"), v["note"].as_str().unwrap_or("")) };
+            out(serde_json::to_value(&meta)?, format!("cached {} bars {} .. {} for {} from {} [{}]\n  adjustment: {}\n  snapshot sha256 {}{val}", meta.bars, meta.start, meta.end, meta.symbol, meta.source, meta.label,
+                meta.adjustment, meta.extra["snapshot_sha256"].as_str().unwrap_or("-")));
+        }
+        Cmd::Data { cmd: DataCmd::Calendar { start } } => {
+            let t = cmsq_core::data::tushare::Tushare::from_secrets(&o.home.secrets)?;
+            let today = chrono_today();
+            let days = t.trade_cal(&start, &today).await?;
+            let cal = cmsq_core::replay::Calendar::from_days(days);
+            std::fs::create_dir_all(o.home.data_dir())?;
+            let p = o.home.data_dir().join("_calendar_SSE.txt");
+            cal.save(&p)?;
+            o.store.audit("data", "trade_calendar_fetch", None, serde_json::json!({"source": "tushare trade_cal", "first": cal.first, "last": cal.last, "open_days": cal.open.len()}), true)?;
+            out(serde_json::json!({"path": p, "open_days": cal.open.len()}), format!("SSE calendar {}..{}: {} open days → {}", cal.first, cal.last, cal.open.len(), p.display()));
+        }
+        Cmd::Data { cmd: DataCmd::Sources } => {
+            let (router, notes) = o.data_router(None, true);
+            let h = router.load_health();
+            let mut lines: Vec<String> = router.sources.iter().map(|s| {
+                let x = h.get(s.name()).cloned().unwrap_or_default();
+                format!("{:<9} ok {:>3}  fail {:>3}  consecutive_fail {}  cooldown {}  last_error {}", s.name(), x.ok, x.fail, x.consecutive_fail,
+                    x.cooldown_until.unwrap_or("-".into()), x.last_error.unwrap_or("-".into()))
+            }).collect();
+            lines.extend(notes);
+            out(serde_json::to_value(&h)?, lines.join("\n"));
+        }
+        Cmd::Replay { symbol, strategy, params } => {
+            use cmsq_core::{market, replay, scorer};
+            let sym = symbol.to_uppercase();
+            let bars = market::read_bars(&o.home.data_dir(), &sym)?;
+            let view = cmsq_core::probe::container_view(&bars);
+            let mut s = replay::by_name(&strategy, &serde_json::from_str(&params)?)?;
+            let pos = replay::BarPlayer::new(&view).run(s.as_mut());
+            let sim = scorer::simulate(&sym, &bars, &pos, &scorer::CostModel::default());
+            let m = scorer::metrics(&bars, &sim, 0, bars.len());
+            let cal_note = match replay::Calendar::load(&o.home.data_dir().join("_calendar_SSE.txt")) {
+                Ok(c) => { let (miss, extra) = c.check(&bars); format!("calendar check: {} open days missing, {} bars on closed days", miss.len(), extra.len()) }
+                Err(_) => "calendar check skipped (run `cmsq data calendar`)".into(),
+            };
+            out(serde_json::json!({"strategy": s.name(), "metrics": m, "trades": sim.trades, "note": "native host replay over the FULL series; not gated, not a promotion path"}),
+                format!("{} on {sym} ({} .. {}, {} bars) — NATIVE REPLAY, full series, NOT gated\n  net return {:+.2}%  sharpe {:.2}  maxDD {:.1}%  exposure {:.0}%  trades {}\n  {cal_note}",
+                    s.name(), m.start, m.end, m.bars, m.total_return * 100.0, m.sharpe, m.max_drawdown * 100.0, m.exposure * 100.0, sim.trades));
         }
         Cmd::Data { cmd: DataCmd::Import { symbol, file, adjustment } } => {
             let meta = o.fetch_data(&cmsq_core::market::CsvSource { path: file, adjustment }, &symbol.to_uppercase(), usize::MAX).await?;
@@ -329,4 +388,20 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn chrono_today() -> String {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 8 * 3600;
+    let days = t.div_euclid(86_400);
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
 }

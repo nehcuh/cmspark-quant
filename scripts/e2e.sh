@@ -30,9 +30,9 @@ echo "workspace: $CMSQ_HOME   secrets: $CMSQ_SECRETS_DIR   backend: $BACKEND"
 hr "init + market data (host-side; containers never see the dataset)"
 $BIN init
 if $BIN data fetch SH600519 --count 1200 2>/tmp/cmsq-tdx.err; then
-  echo "real data cached (UNADJUSTED: gate check data_adjusted will refuse it)"
+  echo "real data cached via the multi-source router (see adjustment + cross-validation above)"
 else
-  echo "rstdx/TDX fetch failed: $(tail -1 /tmp/cmsq-tdx.err) — bundled SAMPLE data only"
+  echo "real-data fetch failed: $(tail -1 /tmp/cmsq-tdx.err) — bundled SAMPLE data only"
 fi
 $BIN data list
 

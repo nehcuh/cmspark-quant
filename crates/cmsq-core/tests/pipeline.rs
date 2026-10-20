@@ -109,6 +109,13 @@ async fn docker_pipeline_gate_then_vault_promote() {
     let id = add(&o, "posts", "ma_crossover").await.unwrap();
     let r = o.backtest(&id, "SAMPLE_REGIME", &d, None).await.unwrap();
     assert_eq!(r.status, StrategyStatus::GatePassed, "{:?}", r.reasons);
+    // native host replay (BarPlayer) reproduces the sandboxed runner's positions
+    let bars = cmsq_core::market::read_bars(&o.home.data_dir(), "SAMPLE_REGIME").unwrap();
+    let t = o.store.trials().unwrap().into_iter().find(|t| t.strategy_id == id).unwrap();
+    let view = cmsq_core::probe::container_view(&bars[..t.positions.len()]);
+    let native = cmsq_core::replay::BarPlayer::new(&view).run(&mut cmsq_core::replay::MaCrossover { fast: 10, slow: 30 });
+    let same = native.iter().zip(&t.positions).filter(|(a, b)| (*a - *b).abs() < 1e-9).count();
+    assert!(same as f64 >= 0.999 * native.len() as f64, "native replay agrees on {same}/{} bars", native.len());
     let job = &o.store.list_jobs(Some(&id)).unwrap()[0];
     let res = job.result.as_ref().unwrap();
     assert_eq!(res["computed_by"], "cmsq-core scorer (host, trusted)");

@@ -1,0 +1,207 @@
+
+== init + trade calendar + real data (host-side) ==
+SSE calendar 2005-01-01..2026-10-20: 5291 open days → /tmp/cmsq-real.ldrW/data/_calendar_SSE.txt
+cached 2500 bars 2016-07-01 .. 2026-10-20 for SH600519 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 4d706c6159f63cfa8fe4f6c2faccc69ce5464ee5bb4d5260a23be20fc023a2d4
+  cross-validation: divergent vs akshare — 1 of 2499 overlapping closes differ by >0.1%
+cached 2500 bars 2016-07-01 .. 2026-10-20 for SZ000001 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 72fc9cf12755c6f8fd8a0c68a13d56728df9fdd4306196e4965661e3dfe7b053
+  cross-validation: ok vs akshare — 0 of 2499 overlapping closes differ by >0.1%
+cached 2500 bars 2016-07-01 .. 2026-10-20 for SH601318 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 d67885238ab4c91d2b50714ffd9d34e2dcd84cd724013e001fad0009f24f4083
+  cross-validation: ok vs akshare — 0 of 2499 overlapping closes differ by >0.1%
+cached 2500 bars 2016-07-01 .. 2026-10-20 for SZ000858 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 cf09f55ab6ab7c24781e54db04bf78c71180a11a8e5f03a0416423dbe03d239c
+  cross-validation: ok vs akshare — 0 of 2499 overlapping closes differ by >0.1%
+cached 2500 bars 2016-07-01 .. 2026-10-20 for SH600036 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 be61d51eb770c6971e96069699d0e1588d6bfc8d7548fdde22e4886a40cd6b85
+  cross-validation: ok vs akshare — 0 of 2499 overlapping closes differ by >0.1%
+cached 2027 bars 2018-06-11 .. 2026-10-20 for SZ300750 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 f65fc3e939f5eb3848817cdba5e2170967a73f878d987857da0191ee75ef3494
+  cross-validation: ok vs akshare — 0 of 2026 overlapping closes differ by >0.1%
+tushare   ok   6  fail   0  consecutive_fail 0  cooldown -  last_error -
+akshare   ok   6  fail   0  consecutive_fail 0  cooldown -  last_error -
+baostock  ok   0  fail   0  consecutive_fail 0  cooldown -  last_error -
+rstdx     ok   0  fail   0  consecutive_fail 0  cooldown -  last_error -
+
+== ingest + extract sample posts ==
+
+== backtests on real data (every post × every symbol; each run counts as a library trial) ==
+-- native reference replay (not gated):
+buy_and_hold on SH600519 (2016-07-04 .. 2026-10-20, 2499 bars) — NATIVE REPLAY, full series, NOT gated
+  net return +461.29%  sharpe 0.76  maxDD -47.4%  exposure 99%  trades 1
+backend: docker (hardened=true)  symbol: SH600519
+Rejected   af4df343  job=140878d4 [succeeded]  dev ret +454945.61% sharpe 6.59 maxDD -5.14% DSR 1.000 (N=1)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (5 variant(s))
+           ✗ static_risks: lookahead
+backend: docker (hardened=true)  symbol: SH600519
+Rejected   f59df0ce  job=e9b2bfc5 [succeeded]  dev ret +77.48% sharpe 0.54 maxDD -33.71% DSR 0.798 (N=2)  — 双均线金叉死叉，简单但有效？
+           ✗ data_cross_validated: tushare vs akshare: 1 of 2499 overlapping closes differ by >0.1% — dataset blocked; investigate before trusting
+           ✗ deflated_sharpe: DSR 0.798 (min 0.95) over N=2 library trials, SR0/day 0.0130
+backend: docker (hardened=true)  symbol: SH600519
+Rejected   03c55b86  job=eb176ee5 [succeeded]  dev ret +40.14% sharpe 0.39 maxDD -33.67% DSR 0.553 (N=3)  — 布林带均值回归（超跌买入）
+           ✗ data_cross_validated: tushare vs akshare: 1 of 2499 overlapping closes differ by >0.1% — dataset blocked; investigate before trusting
+           ✗ sharpe: Sharpe 0.39 (min 0.50)
+backend: docker (hardened=true)  symbol: SH600519
+Rejected   d47ead48  job=636900bd [succeeded]  dev ret +58.11% sharpe 0.45 maxDD -29.98% DSR 0.532 (N=4)  — 20日动量 + 波动率过滤
+           ✗ data_cross_validated: tushare vs akshare: 1 of 2499 overlapping closes differ by >0.1% — dataset blocked; investigate before trusting
+           ✗ sharpe: Sharpe 0.45 (min 0.50)
+backend: docker (hardened=true)  symbol: SH600519
+Failed     9fc884d6  job=a5f55cda [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbol: SH600519
+Rejected   4012dd52  job=5bd18f18 [succeeded]  dev ret -10.89% sharpe -0.04 maxDD -34.51% DSR 0.096 (N=5)  — 短期反转：大跌次日抄底，持有一天
+           ✗ data_cross_validated: tushare vs akshare: 1 of 2499 overlapping closes differ by >0.1% — dataset blocked; investigate before trusting
+           ✗ net_return_positive: net return -10.89%
+-- native reference replay (not gated):
+buy_and_hold on SZ000001 (2016-07-04 .. 2026-10-20, 2499 bars) — NATIVE REPLAY, full series, NOT gated
+  net return +78.34%  sharpe 0.35  maxDD -62.3%  exposure 100%  trades 1
+backend: docker (hardened=true)  symbol: SZ000001
+Rejected   af4df343  job=6290e7ae [succeeded]  dev ret +390509.02% sharpe 6.05 maxDD -6.70% DSR 1.000 (N=6)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (5 variant(s))
+           ✗ static_risks: lookahead
+backend: docker (hardened=true)  symbol: SZ000001
+Rejected   f59df0ce  job=6d6b994b [succeeded]  dev ret -37.46% sharpe -0.21 maxDD -62.61% DSR 0.028 (N=7)  — 双均线金叉死叉，简单但有效？
+           ✗ net_return_positive: net return -37.46%
+           ✗ sharpe: Sharpe -0.21 (min 0.50)
+backend: docker (hardened=true)  symbol: SZ000001
+Rejected   03c55b86  job=fdb1d51d [succeeded]  dev ret -17.54% sharpe -0.07 maxDD -30.57% DSR 0.052 (N=8)  — 布林带均值回归（超跌买入）
+           ✗ net_return_positive: net return -17.54%
+           ✗ sharpe: Sharpe -0.07 (min 0.50)
+backend: docker (hardened=true)  symbol: SZ000001
+Rejected   d47ead48  job=66913abc [succeeded]  dev ret +24.17% sharpe 0.27 maxDD -40.77% DSR 0.195 (N=9)  — 20日动量 + 波动率过滤
+           ✗ sharpe: Sharpe 0.27 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.195 (min 0.95) over N=9 library trials, SR0/day 0.0380
+backend: docker (hardened=true)  symbol: SZ000001
+Failed     9fc884d6  job=e3d84416 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbol: SZ000001
+Rejected   4012dd52  job=10f6ad38 [succeeded]  dev ret -46.64% sharpe -0.47 maxDD -55.17% DSR 0.003 (N=10)  — 短期反转：大跌次日抄底，持有一天
+           ✗ net_return_positive: net return -46.64%
+           ✗ sharpe: Sharpe -0.47 (min 0.50)
+-- native reference replay (not gated):
+buy_and_hold on SH601318 (2016-07-04 .. 2026-10-20, 2499 bars) — NATIVE REPLAY, full series, NOT gated
+  net return +138.21%  sharpe 0.46  maxDD -57.7%  exposure 100%  trades 1
+backend: docker (hardened=true)  symbol: SH601318
+Rejected   af4df343  job=45eb1b04 [succeeded]  dev ret +88726.88% sharpe 5.87 maxDD -5.27% DSR 1.000 (N=11)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (3 variant(s))
+           ✗ static_risks: lookahead
+backend: docker (hardened=true)  symbol: SH601318
+Rejected   f59df0ce  job=1fbf23d7 [succeeded]  dev ret -37.60% sharpe -0.27 maxDD -45.28% DSR 0.010 (N=12)  — 双均线金叉死叉，简单但有效？
+           ✗ net_return_positive: net return -37.60%
+           ✗ sharpe: Sharpe -0.27 (min 0.50)
+backend: docker (hardened=true)  symbol: SH601318
+Rejected   03c55b86  job=3bd45712 [succeeded]  dev ret +8.52% sharpe 0.16 maxDD -42.01% DSR 0.096 (N=13)  — 布林带均值回归（超跌买入）
+           ✗ sharpe: Sharpe 0.16 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.096 (min 0.95) over N=13 library trials, SR0/day 0.0426
+backend: docker (hardened=true)  symbol: SH601318
+Rejected   d47ead48  job=e1e4c983 [succeeded]  dev ret -19.66% sharpe -0.08 maxDD -40.37% DSR 0.027 (N=14)  — 20日动量 + 波动率过滤
+           ✗ net_return_positive: net return -19.66%
+           ✗ sharpe: Sharpe -0.08 (min 0.50)
+backend: docker (hardened=true)  symbol: SH601318
+Failed     9fc884d6  job=ac8fd94d [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbol: SH601318
+Rejected   4012dd52  job=622d5945 [succeeded]  dev ret -34.72% sharpe -0.41 maxDD -43.21% DSR 0.003 (N=15)  — 短期反转：大跌次日抄底，持有一天
+           ✗ net_return_positive: net return -34.72%
+           ✗ sharpe: Sharpe -0.41 (min 0.50)
+-- native reference replay (not gated):
+buy_and_hold on SZ000858 (2016-07-04 .. 2026-10-20, 2499 bars) — NATIVE REPLAY, full series, NOT gated
+  net return +197.88%  sharpe 0.49  maxDD -76.0%  exposure 100%  trades 1
+backend: docker (hardened=true)  symbol: SZ000858
+Rejected   af4df343  job=2c9d61c8 [succeeded]  dev ret +6218940.73% sharpe 6.92 maxDD -9.11% DSR 1.000 (N=16)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (3 variant(s))
+           ✗ static_risks: lookahead
+backend: docker (hardened=true)  symbol: SZ000858
+Rejected   f59df0ce  job=335debc3 [succeeded]  dev ret +73.49% sharpe 0.46 maxDD -38.43% DSR 0.250 (N=17)  — 双均线金叉死叉，简单但有效？
+           ✗ sharpe: Sharpe 0.46 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.250 (min 0.95) over N=17 library trials, SR0/day 0.0457
+backend: docker (hardened=true)  symbol: SZ000858
+Rejected   03c55b86  job=83a27404 [succeeded]  dev ret -31.45% sharpe -0.14 maxDD -53.81% DSR 0.013 (N=18)  — 布林带均值回归（超跌买入）
+           ✗ net_return_positive: net return -31.45%
+           ✗ sharpe: Sharpe -0.14 (min 0.50)
+backend: docker (hardened=true)  symbol: SZ000858
+Rejected   d47ead48  job=bf4d3519 [succeeded]  dev ret +84.64% sharpe 0.52 maxDD -38.57% DSR 0.286 (N=19)  — 20日动量 + 波动率过滤
+           ✗ deflated_sharpe: DSR 0.286 (min 0.95) over N=19 library trials, SR0/day 0.0470
+           ✗ max_drawdown: max DD -38.6% (floor -35%)
+backend: docker (hardened=true)  symbol: SZ000858
+Failed     9fc884d6  job=44da7920 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbol: SZ000858
+Rejected   4012dd52  job=ab081c59 [succeeded]  dev ret -30.79% sharpe -0.19 maxDD -42.53% DSR 0.009 (N=20)  — 短期反转：大跌次日抄底，持有一天
+           ✗ net_return_positive: net return -30.79%
+           ✗ sharpe: Sharpe -0.19 (min 0.50)
+-- native reference replay (not gated):
+buy_and_hold on SH600036 (2016-07-04 .. 2026-10-20, 2499 bars) — NATIVE REPLAY, full series, NOT gated
+  net return +272.76%  sharpe 0.63  maxDD -50.9%  exposure 100%  trades 1
+backend: docker (hardened=true)  symbol: SH600036
+Rejected   af4df343  job=dcfc1334 [succeeded]  dev ret +163245.66% sharpe 6.06 maxDD -6.66% DSR 1.000 (N=21)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (3 variant(s))
+           ✗ static_risks: lookahead
+backend: docker (hardened=true)  symbol: SH600036
+Rejected   f59df0ce  job=c4856d23 [succeeded]  dev ret -24.41% sharpe -0.12 maxDD -45.83% DSR 0.013 (N=22)  — 双均线金叉死叉，简单但有效？
+           ✗ net_return_positive: net return -24.41%
+           ✗ sharpe: Sharpe -0.12 (min 0.50)
+backend: docker (hardened=true)  symbol: SH600036
+Rejected   03c55b86  job=7fdeb440 [succeeded]  dev ret +11.23% sharpe 0.18 maxDD -34.30% DSR 0.067 (N=23)  — 布林带均值回归（超跌买入）
+           ✗ sharpe: Sharpe 0.18 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.067 (min 0.95) over N=23 library trials, SR0/day 0.0490
+backend: docker (hardened=true)  symbol: SH600036
+Rejected   d47ead48  job=d863e9e2 [succeeded]  dev ret -15.62% sharpe -0.03 maxDD -40.21% DSR 0.019 (N=24)  — 20日动量 + 波动率过滤
+           ✗ net_return_positive: net return -15.62%
+           ✗ sharpe: Sharpe -0.03 (min 0.50)
+backend: docker (hardened=true)  symbol: SH600036
+Failed     9fc884d6  job=dd7b2892 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbol: SH600036
+Rejected   4012dd52  job=02e341f5 [succeeded]  dev ret -41.15% sharpe -0.47 maxDD -42.75% DSR 0.001 (N=25)  — 短期反转：大跌次日抄底，持有一天
+           ✗ net_return_positive: net return -41.15%
+           ✗ sharpe: Sharpe -0.47 (min 0.50)
+-- native reference replay (not gated):
+buy_and_hold on SZ300750 (2018-06-12 .. 2026-10-20, 2026 bars) — NATIVE REPLAY, full series, NOT gated
+  net return +600.11%  sharpe 0.76  maxDD -62.8%  exposure 99%  trades 1
+backend: docker (hardened=true)  symbol: SZ300750
+Rejected   af4df343  job=faec699f [succeeded]  dev ret +8327581.26% sharpe 6.61 maxDD -10.99% DSR 1.000 (N=26)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+           ✗ no_lookahead: positions changed when the future changed (4 variant(s))
+           ✗ static_risks: lookahead
+backend: docker (hardened=true)  symbol: SZ300750
+Rejected   f59df0ce  job=329f35cf [succeeded]  dev ret +697.45% sharpe 1.25 maxDD -34.91% DSR 0.801 (N=27)  — 双均线金叉死叉，简单但有效？
+           ✗ deflated_sharpe: DSR 0.801 (min 0.95) over N=27 library trials, SR0/day 0.0564
+backend: docker (hardened=true)  symbol: SZ300750
+Rejected   03c55b86  job=3681f6ac [succeeded]  dev ret +22.54% sharpe 0.28 maxDD -32.00% DSR 0.081 (N=28)  — 布林带均值回归（超跌买入）
+           ✗ sharpe: Sharpe 0.28 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.081 (min 0.95) over N=28 library trials, SR0/day 0.0568
+backend: docker (hardened=true)  symbol: SZ300750
+Rejected   d47ead48  job=37a2e75b [succeeded]  dev ret +154.81% sharpe 0.82 maxDD -44.28% DSR 0.418 (N=29)  — 20日动量 + 波动率过滤
+           ✗ deflated_sharpe: DSR 0.418 (min 0.95) over N=29 library trials, SR0/day 0.0572
+           ✗ max_drawdown: max DD -44.3% (floor -35%)
+backend: docker (hardened=true)  symbol: SZ300750
+Failed     9fc884d6  job=a9a34b60 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+           ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
+backend: docker (hardened=true)  symbol: SZ300750
+Rejected   4012dd52  job=2a3e4883 [succeeded]  dev ret +44.29% sharpe 0.39 maxDD -45.01% DSR 0.116 (N=30)  — 短期反转：大跌次日抄底，持有一天
+           ✗ sharpe: Sharpe 0.39 (min 0.50)
+           ✗ deflated_sharpe: DSR 0.116 (min 0.95) over N=30 library trials, SR0/day 0.0576
+
+== results ==
+ID        STATUS      TRY  SOURCE         TITLE
+af4df343  Rejected      6  quant-forum    收益率惊人的“明日涨跌”策略（年化 300%！）  [sample]
+f59df0ce  Rejected      6  quant-forum    双均线金叉死叉，简单但有效？  [sample]
+03c55b86  Rejected      6  quant-forum    布林带均值回归（超跌买入）  [sample]
+d47ead48  Rejected      6  quant-blog     20日动量 + 波动率过滤  [sample]
+9fc884d6  Failed        6  quant-blog     带云端参数同步的网格策略  [sample]
+4012dd52  Rejected      6  quant-blog     短期反转：大跌次日抄底，持有一天  [sample]
+af4df343  idea 3c9a414d79  params 44136fa355b3678a  SZ300750     SR/day +0.4166
+f59df0ce  idea 7062daccf1  params 42ac6b203a9c26a4  SZ300750     SR/day +0.0789
+03c55b86  idea cfabdd53f7  params f2a5a573adbbc3c3  SZ300750     SR/day +0.0179
+d47ead48  idea 8de90926e1  params 02f573e872490d1c  SZ300750     SR/day +0.0518
+4012dd52  idea cc0ccb1a63  params b1fe6d1b4ae98c13  SZ300750     SR/day +0.0246
+audit chain OK: 226 entries, HMAC-keyed, head bf450a4deb741ffd anchored at seq Some(226) in /tmp/cmsq-real.ldrW.secrets/anchors/bc641d1c9b96ac13.anchor
+
+E2E-REAL OK — workspace /tmp/cmsq-real.ldrW

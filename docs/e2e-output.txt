@@ -1,67 +1,72 @@
 
 == build ==
-workspace: /tmp/cmsq-e2e.4kIU   secrets: /tmp/cmsq-e2e.4kIU.secrets   backend: docker
+workspace: /tmp/cmsq-e2e.EukY   secrets: /tmp/cmsq-e2e.EukY.secrets   backend: docker
 
 == init + market data (host-side; containers never see the dataset) ==
-workspace ready at /tmp/cmsq-e2e.4kIU
-rstdx/TDX fetch failed: Error: TDX returned no bars for SH600519 — bundled SAMPLE data only
+workspace ready at /tmp/cmsq-e2e.EukY
+cached 1200 bars 2021-11-05 .. 2026-10-20 for SH600519 from tushare [REAL A-SHARE DAILY (tushare pro)]
+  adjustment: adj_factor (tushare adj_factor; container sees hfq = raw×factor)
+  snapshot sha256 a30b2fc173cb994b2f86396843717fb59266151464d0826a72b2de55c73ceba6
+  cross-validation: ok vs akshare — 0 of 1199 overlapping closes differ by >0.1%
+real data cached (UNADJUSTED: gate check data_adjusted will refuse it)
 SAMPLE_RANGE   1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
 SAMPLE_REGIME  1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
 SAMPLE_TREND   1221 bars  2015-01-05 .. 2019-12-31  sample  [SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES]
+SH600519       1200 bars  2021-11-05 .. 2026-10-20  tushare  [REAL A-SHARE DAILY (tushare pro)]
 
 == 1. CMspark drop → ingest (posts + reviewer attack posts) ==
-NEW       a8c5de1d  bigout.json
+NEW       dc3d7d2c  bigout.json
 INVALID   broken.json: invalid drop JSON: missing field `scraped_at` at line 1 column 50
-NEW       888b10a8  data_peek.json
-NEW       b5eeaf5b  escape.json
+NEW       4f6bab9e  data_peek.json
+NEW       befa69e7  escape.json
 INVALID   evil_deep.json: invalid drop JSON: missing field `source` at line 1 column 400033
 INVALID   evil_path.json: scraped_at must be RFC3339: premature end of input
-NEW       3884d4f5  forge.json
-NEW       66f376b2  forkbomb.json
-NEW       78f8b73d  future_peek.json
-NEW       29f98718  hidden_peek.json
-NEW       c84700dc  length_tell.json
-NEW       09306b8e  ma_crossover.json
-NEW       0947024f  mean_reversion_z.json
-NEW       5e70312e  memo_peek.json
-NEW       75d9495b  momentum_20d.json
-NEW       0d78cf9b  phone_home.json
-NEW       cc419cf9  short_term_reversal.json
+NEW       7b042eb2  forge.json
+NEW       a687de0e  forkbomb.json
+NEW       b3d7786a  future_peek.json
+NEW       f8951d05  hidden_peek.json
+NEW       aed77cc5  length_tell.json
+NEW       428dcf2a  ma_crossover.json
+NEW       f8c9594e  mean_reversion_z.json
+NEW       a99ab98e  memo_peek.json
+NEW       86cd0f47  momentum_20d.json
+NEW       49ca8567  phone_home.json
+NEW       ddaa6688  short_term_reversal.json
 INVALID   symlink_attack.json: not a regular file (symlinks are not followed)
-NEW       18b92258  symlink_out.json
+NEW       39daae02  symlink_out.json
 -- re-dropping one file (dedupe):
-DUPLICATE 09306b8e  again.json
+DUPLICATE 428dcf2a  again.json
 
 == 2. extract (offline heuristic extractor) ==
-Extracted a8c5de1d  ADV_bigout  params={}  risks=[system_access,no_costs,survivorship]
-Extracted 888b10a8  ADV_data_peek  params={}  risks=[lookahead,survivorship]
-Extracted b5eeaf5b  ADV_escape  params={}  risks=[system_access,no_costs,survivorship]
-Extracted 3884d4f5  ADV_forge  params={}  risks=[no_costs,survivorship]
-Extracted 66f376b2  ADV_forkbomb  params={}  risks=[system_access,no_costs,survivorship]
-Extracted 78f8b73d  收益率惊人的“明日涨跌”策略（年化 300%！）  params={}  risks=[lookahead,no_costs,too_good,survivorship]
-Extracted 29f98718  ADV_hidden_peek  params={}  risks=[survivorship]
-Extracted c84700dc  ADV_length_tell  params={}  risks=[lookahead,survivorship]
-Extracted 09306b8e  双均线金叉死叉，简单但有效？  params={"fast":10,"slow":30}  risks=[no_costs,survivorship]
-Extracted 0947024f  布林带均值回归（超跌买入）  params={"window":20,"z":1.5}  risks=[no_costs,survivorship]
-Extracted 5e70312e  ADV_memo_peek  params={}  risks=[lookahead,no_costs,survivorship]
-Extracted 75d9495b  20日动量 + 波动率过滤  params={"lookback":20,"vol_cap":0.03}  risks=[no_costs,survivorship]
-Extracted 0d78cf9b  带云端参数同步的网格策略  params={"step":0.02}  risks=[network,no_costs,survivorship]
-Extracted cc419cf9  短期反转：大跌次日抄底，持有一天  params={"threshold":-0.01}  risks=[survivorship]
-Extracted 18b92258  ADV_symlink_out  params={}  risks=[survivorship]
+Extracted dc3d7d2c  ADV_bigout  params={}  risks=[system_access,no_costs,survivorship]
+Extracted 4f6bab9e  ADV_data_peek  params={}  risks=[lookahead,survivorship]
+Extracted befa69e7  ADV_escape  params={}  risks=[system_access,no_costs,survivorship]
+Extracted 7b042eb2  ADV_forge  params={}  risks=[no_costs,survivorship]
+Extracted a687de0e  ADV_forkbomb  params={}  risks=[system_access,no_costs,survivorship]
+Extracted b3d7786a  收益率惊人的“明日涨跌”策略（年化 300%！）  params={}  risks=[lookahead,no_costs,too_good,survivorship]
+Extracted f8951d05  ADV_hidden_peek  params={}  risks=[survivorship]
+Extracted aed77cc5  ADV_length_tell  params={}  risks=[lookahead,survivorship]
+Extracted 428dcf2a  双均线金叉死叉，简单但有效？  params={"fast":10,"slow":30}  risks=[no_costs,survivorship]
+Extracted f8c9594e  布林带均值回归（超跌买入）  params={"window":20,"z":1.5}  risks=[no_costs,survivorship]
+Extracted a99ab98e  ADV_memo_peek  params={}  risks=[lookahead,no_costs,survivorship]
+Extracted 86cd0f47  20日动量 + 波动率过滤  params={"lookback":20,"vol_cap":0.03}  risks=[no_costs,survivorship]
+Extracted 49ca8567  带云端参数同步的网格策略  params={"step":0.02}  risks=[network,no_costs,survivorship]
+Extracted ddaa6688  短期反转：大跌次日抄底，持有一天  params={"threshold":-0.01}  risks=[survivorship]
+Extracted 39daae02  ADV_symlink_out  params={}  risks=[survivorship]
 
 == 3+4. backtests: one fresh container per probe variant, scored on the host ==
 backend: docker (hardened=true)  symbol: SAMPLE_REGIME
-GatePassed 09306b8e  job=14c40b9a [succeeded]  dev ret +101.00% sharpe 1.85 maxDD -8.46% DSR 0.999 (N=1)  — 双均线金叉死叉，简单但有效？
-           ✓ gate passed on development data — to run the one-time vault holdout and promote: cmsq promote 09306b8e  (you will be asked to type the confirmation)
+GatePassed 428dcf2a  job=56f4d45e [succeeded]  dev ret +101.00% sharpe 1.85 maxDD -8.46% DSR 0.999 (N=1)  — 双均线金叉死叉，简单但有效？
+           ✓ gate passed on development data — to run the one-time vault holdout and promote: cmsq promote 428dcf2a  (you will be asked to type the confirmation)
 backend: docker (hardened=true)  symbol: SAMPLE_REGIME
-Rejected   75d9495b  job=1f4ceb2d [succeeded]  dev ret +50.68% sharpe 1.09 maxDD -22.05% DSR 0.918 (N=2)  — 20日动量 + 波动率过滤
+Rejected   86cd0f47  job=72bc6221 [succeeded]  dev ret +50.68% sharpe 1.09 maxDD -22.05% DSR 0.918 (N=2)  — 20日动量 + 波动率过滤
            ✗ deflated_sharpe: DSR 0.918 (min 0.95) over N=2 library trials, SR0/day 0.0186
 backend: docker (hardened=true)  symbol: SAMPLE_RANGE
-Rejected   0947024f  job=63206163 [succeeded]  dev ret +17.67% sharpe 0.39 maxDD -14.00% DSR 0.342 (N=3)  — 布林带均值回归（超跌买入）
+Rejected   f8c9594e  job=6723173b [succeeded]  dev ret +17.67% sharpe 0.39 maxDD -14.00% DSR 0.342 (N=3)  — 布林带均值回归（超跌买入）
            ✗ sharpe: Sharpe 0.39 (min 0.50)
            ✗ deflated_sharpe: DSR 0.342 (min 0.95) over N=3 library trials, SR0/day 0.0392
 backend: docker (hardened=true)  symbol: SAMPLE_RANGE
-Rejected   cc419cf9  job=9675bd95 [succeeded]  dev ret -44.47% sharpe -0.97 maxDD -49.04% DSR 0.000 (N=4)  — 短期反转：大跌次日抄底，持有一天
+Rejected   ddaa6688  job=18dc708d [succeeded]  dev ret -44.47% sharpe -0.97 maxDD -49.04% DSR 0.000 (N=4)  — 短期反转：大跌次日抄底，持有一天
            ✗ net_return_positive: net return -44.47%
            ✗ sharpe: Sharpe -0.97 (min 0.50)
            ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=4 library trials, SR0/day 0.0797
@@ -69,89 +74,89 @@ Rejected   cc419cf9  job=9675bd95 [succeeded]  dev ret -44.47% sharpe -0.97 maxD
            ✗ cost_stress_2x: net return with 2x costs -64.48%
            ✗ max_drawdown: max DD -49.0% (floor -35%)
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Rejected   78f8b73d  job=21f5d460 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=5)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
+Rejected   b3d7786a  job=dc9fe1f3 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=5)  — 收益率惊人的“明日涨跌”策略（年化 300%！）
            ✗ no_lookahead: positions changed when the future changed (4 variant(s))
            ✗ static_risks: lookahead
            ✗ net_return_positive: net return -45.34%
            ✗ sharpe: Sharpe -0.96 (min 0.50)
-           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=5 library trials, SR0/day 0.0940
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=5 library trials, SR0/day 0.0903
            ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
            ✗ cost_stress_2x: net return with 2x costs -66.09%
            ✗ max_drawdown: max DD -57.7% (floor -35%)
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Failed     0d78cf9b  job=721b73a5 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
+Failed     49ca8567  job=ccbb5c8d [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — 带云端参数同步的网格策略
            ✗ runner exit 2: strategy error: URLError(OSError(101, 'Network is unreachable'))
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Rejected   3884d4f5  job=1a23cdf5 [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.005 (N=6)  — ADV_forge
+Rejected   7b042eb2  job=6d6de1e6 [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.007 (N=6)  — ADV_forge
            ✗ net_return_positive: net return 0.00%
            ✗ sharpe: Sharpe 0.00 (min 0.50)
-           ✗ deflated_sharpe: DSR 0.005 (min 0.95) over N=6 library trials, SR0/day 0.0921
+           ✗ deflated_sharpe: DSR 0.007 (min 0.95) over N=6 library trials, SR0/day 0.0879
            ✗ walk_forward: 0/4 walk-forward folds positive (min 3)
            ✗ cost_stress_2x: net return with 2x costs 0.00%
            ✗ exposure: avg exposure 0.0%
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Rejected   5e70312e  job=3cb50ff9 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=7)  — ADV_memo_peek
-           ✗ no_lookahead: positions changed when the future changed (4 variant(s))
+Rejected   a99ab98e  job=86fa3cc6 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=7)  — ADV_memo_peek
+           ✗ no_lookahead: positions changed when the future changed (3 variant(s))
            ✗ static_risks: lookahead
            ✗ net_return_positive: net return -45.34%
            ✗ sharpe: Sharpe -0.96 (min 0.50)
-           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=7 library trials, SR0/day 0.0980
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=7 library trials, SR0/day 0.0938
            ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
            ✗ cost_stress_2x: net return with 2x costs -66.09%
            ✗ max_drawdown: max DD -57.7% (floor -35%)
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Failed     888b10a8  job=d18ff82a [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_data_peek
+Failed     4f6bab9e  job=58b07fa4 [strategy_error]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_data_peek
            ✗ runner exit 2: strategy error: FileNotFoundError(2, 'No such file or directory')
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Rejected   29f98718  job=1439effd [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=8)  — ADV_hidden_peek
-           ✗ no_lookahead: positions changed when the future changed (2 variant(s))
+Rejected   f8951d05  job=446348ab [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=8)  — ADV_hidden_peek
+           ✗ no_lookahead: positions changed when the future changed (6 variant(s))
            ✗ net_return_positive: net return -45.34%
            ✗ sharpe: Sharpe -0.96 (min 0.50)
-           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=8 library trials, SR0/day 0.1011
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=8 library trials, SR0/day 0.0987
            ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
            ✗ cost_stress_2x: net return with 2x costs -66.09%
            ✗ max_drawdown: max DD -57.7% (floor -35%)
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Rejected   c84700dc  job=c482a1af [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=9)  — ADV_length_tell
-           ✗ no_lookahead: positions changed when the future changed (5 variant(s))
+Rejected   aed77cc5  job=5e9a3ca5 [succeeded]  dev ret -45.34% sharpe -0.96 maxDD -57.69% DSR 0.000 (N=9)  — ADV_length_tell
+           ✗ no_lookahead: positions changed when the future changed (7 variant(s))
            ✗ static_risks: lookahead
            ✗ net_return_positive: net return -45.34%
            ✗ sharpe: Sharpe -0.96 (min 0.50)
-           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=9 library trials, SR0/day 0.1027
+           ✗ deflated_sharpe: DSR 0.000 (min 0.95) over N=9 library trials, SR0/day 0.1029
            ✗ walk_forward: 2/4 walk-forward folds positive (min 3)
            ✗ cost_stress_2x: net return with 2x costs -66.09%
            ✗ max_drawdown: max DD -57.7% (floor -35%)
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Failed     18b92258  job=44d985e4 [bad_output]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_symlink_out
+Failed     39daae02  job=cafd9576 [bad_output]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_symlink_out
            ✗ positions.csv is not a regular file under 8 MiB
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Rejected   b5eeaf5b  job=b54c73e2 [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.003 (N=10)  — ADV_escape
+Rejected   befa69e7  job=8df00ecd [succeeded]  dev ret +0.00% sharpe 0.00 maxDD +0.00% DSR 0.003 (N=10)  — ADV_escape
            ✗ net_return_positive: net return 0.00%
            ✗ sharpe: Sharpe 0.00 (min 0.50)
-           ✗ deflated_sharpe: DSR 0.003 (min 0.95) over N=10 library trials, SR0/day 0.1004
+           ✗ deflated_sharpe: DSR 0.003 (min 0.95) over N=10 library trials, SR0/day 0.0972
            ✗ walk_forward: 0/4 walk-forward folds positive (min 3)
            ✗ cost_stress_2x: net return with 2x costs 0.00%
            ✗ exposure: avg exposure 0.0%
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Failed     66f376b2  job=dab90e21 [oom]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_forkbomb
+Failed     a687de0e  job=8f97bb60 [oom]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_forkbomb
            ✗ out of memory (limit 512 MB)
 backend: docker (hardened=true)  symbol: SAMPLE_TREND
-Failed     a8c5de1d  job=8455c09f [oom]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_bigout
+Failed     dc3d7d2c  job=2fc42f81 [oom]  dev ret - sharpe - maxDD - DSR - (N=null)  — ADV_bigout
            ✗ out of memory (limit 512 MB)
 
 == 5. typed confirmation + one-time vault holdout ==
 -- id prefix alone is refused:
-Error: confirmation mismatch: type exactly "PROMOTE 09306b8e"
-  · container 1/5: variant resample@976#0 (1221 bars)
-  · container 2/5: variant resample@1098#0 (1221 bars)
-  · container 3/5: variant trunc@1098 (1098 bars)
-  · container 4/5: variant trunc@976 (976 bars)
-  · container 5/5: variant full (1221 bars)
-REJECTED 09306b8e  双均线金叉死叉，简单但有效？  — vault holdout not profitable: return -10.50%, Sharpe -0.62
+Error: confirmation mismatch: type exactly "PROMOTE 428dcf2a"
+  · container 1/5: variant trunc@976 (976 bars)
+  · container 2/5: variant resample@976#0 (1221 bars)
+  · container 3/5: variant resample@1098#0 (1221 bars)
+  · container 4/5: variant full (1221 bars)
+  · container 5/5: variant trunc@1098 (1098 bars)
+REJECTED 428dcf2a  双均线金叉死叉，简单但有效？  — vault holdout not profitable: return -10.50%, Sharpe -0.62
 (vault decided: not promoted)
 final: Rejected
 -- the vault is one-shot:
-Error: cannot promote 09306b8e-4351-4128-ab06-9571bd5ae32e: status is Rejected, promotion requires GatePassed
+Error: cannot promote 428dcf2a-6e0c-4e74-826f-0b917c7aac73: status is Rejected, promotion requires GatePassed
 
 == expected outcomes ==
 TITLE              SYMBOL         STATUS       EXPECTED
@@ -173,51 +178,51 @@ ADV_bigout         SAMPLE_TREND   Failed       Failed                 ok
 
 == library / jobs / trials / signals ==
 ID        STATUS      TRY  SOURCE         TITLE
-a8c5de1d  Failed        1  adv            ADV_bigout  [sample]
-888b10a8  Failed        1  adv            ADV_data_peek  [sample]
-b5eeaf5b  Rejected      1  adv            ADV_escape  [sample]
-3884d4f5  Rejected      1  adv            ADV_forge  [sample]
-66f376b2  Failed        1  adv            ADV_forkbomb  [sample]
-78f8b73d  Rejected      1  quant-forum    收益率惊人的“明日涨跌”策略（年化 300%！）  [sample]
-29f98718  Rejected      1  adv            ADV_hidden_peek  [sample]
-c84700dc  Rejected      1  adv            ADV_length_tell  [sample]
-09306b8e  Rejected      1  quant-forum    双均线金叉死叉，简单但有效？  [sample]
-0947024f  Rejected      1  quant-forum    布林带均值回归（超跌买入）  [sample]
-5e70312e  Rejected      1  adv            ADV_memo_peek  [sample]
-75d9495b  Rejected      1  quant-blog     20日动量 + 波动率过滤  [sample]
-0d78cf9b  Failed        1  quant-blog     带云端参数同步的网格策略  [sample]
-cc419cf9  Rejected      1  quant-blog     短期反转：大跌次日抄底，持有一天  [sample]
-18b92258  Failed        1  adv            ADV_symlink_out  [sample]
-d7519758  vault docker               succeeded       SAMPLE_REGIME   2841ms  strategy 09306b8e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-8455c09f  dev   docker               oom             SAMPLE_TREND    884ms  strategy a8c5de1d  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-dab90e21  dev   docker               oom             SAMPLE_TREND   2746ms  strategy 66f376b2  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-b54c73e2  dev   docker               succeeded       SAMPLE_TREND   5720ms  strategy b5eeaf5b  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-44d985e4  dev   docker               bad_output      SAMPLE_TREND    556ms  strategy 18b92258  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-c482a1af  dev   docker               succeeded       SAMPLE_TREND   5516ms  strategy c84700dc  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-1439effd  dev   docker               succeeded       SAMPLE_TREND   5600ms  strategy 29f98718  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-d18ff82a  dev   docker               strategy_error  SAMPLE_TREND    525ms  strategy 888b10a8  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-3cb50ff9  dev   docker               succeeded       SAMPLE_TREND   5746ms  strategy 5e70312e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-1a23cdf5  dev   docker               succeeded       SAMPLE_TREND   5729ms  strategy 3884d4f5  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-721b73a5  dev   docker               strategy_error  SAMPLE_TREND    543ms  strategy 0d78cf9b  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-21f5d460  dev   docker               succeeded       SAMPLE_TREND   5543ms  strategy 78f8b73d  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-9675bd95  dev   docker               succeeded       SAMPLE_RANGE   5569ms  strategy cc419cf9  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-63206163  dev   docker               succeeded       SAMPLE_RANGE   5916ms  strategy 0947024f  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-1f4ceb2d  dev   docker               succeeded       SAMPLE_REGIME   5673ms  strategy 75d9495b  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
-14c40b9a  dev   docker               succeeded       SAMPLE_REGIME   5680ms  strategy 09306b8e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+dc3d7d2c  Failed        1  adv            ADV_bigout  [sample]
+4f6bab9e  Failed        1  adv            ADV_data_peek  [sample]
+befa69e7  Rejected      1  adv            ADV_escape  [sample]
+7b042eb2  Rejected      1  adv            ADV_forge  [sample]
+a687de0e  Failed        1  adv            ADV_forkbomb  [sample]
+b3d7786a  Rejected      1  quant-forum    收益率惊人的“明日涨跌”策略（年化 300%！）  [sample]
+f8951d05  Rejected      1  adv            ADV_hidden_peek  [sample]
+aed77cc5  Rejected      1  adv            ADV_length_tell  [sample]
+428dcf2a  Rejected      1  quant-forum    双均线金叉死叉，简单但有效？  [sample]
+f8c9594e  Rejected      1  quant-forum    布林带均值回归（超跌买入）  [sample]
+a99ab98e  Rejected      1  adv            ADV_memo_peek  [sample]
+86cd0f47  Rejected      1  quant-blog     20日动量 + 波动率过滤  [sample]
+49ca8567  Failed        1  quant-blog     带云端参数同步的网格策略  [sample]
+ddaa6688  Rejected      1  quant-blog     短期反转：大跌次日抄底，持有一天  [sample]
+39daae02  Failed        1  adv            ADV_symlink_out  [sample]
+8c8d618d  vault docker               succeeded       SAMPLE_REGIME   2961ms  strategy 428dcf2a  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+2fc42f81  dev   docker               oom             SAMPLE_TREND    839ms  strategy dc3d7d2c  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+8f97bb60  dev   docker               oom             SAMPLE_TREND   2352ms  strategy a687de0e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+8df00ecd  dev   docker               succeeded       SAMPLE_TREND   5554ms  strategy befa69e7  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+cafd9576  dev   docker               bad_output      SAMPLE_TREND    573ms  strategy 39daae02  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+5e9a3ca5  dev   docker               succeeded       SAMPLE_TREND   5700ms  strategy aed77cc5  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+446348ab  dev   docker               succeeded       SAMPLE_TREND   5543ms  strategy f8951d05  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+58b07fa4  dev   docker               strategy_error  SAMPLE_TREND    569ms  strategy 4f6bab9e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+86fa3cc6  dev   docker               succeeded       SAMPLE_TREND   5638ms  strategy a99ab98e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+6d6de1e6  dev   docker               succeeded       SAMPLE_TREND   5731ms  strategy 7b042eb2  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+ccbb5c8d  dev   docker               strategy_error  SAMPLE_TREND    548ms  strategy 49ca8567  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+dc9fe1f3  dev   docker               succeeded       SAMPLE_TREND   5954ms  strategy b3d7786a  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+18dc708d  dev   docker               succeeded       SAMPLE_RANGE   5583ms  strategy ddaa6688  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+6723173b  dev   docker               succeeded       SAMPLE_RANGE   5698ms  strategy f8c9594e  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+72bc6221  dev   docker               succeeded       SAMPLE_REGIME   5646ms  strategy 86cd0f47  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
+56f4d45e  dev   docker               succeeded       SAMPLE_REGIME   5826ms  strategy 428dcf2a  runner sha256:8af203cf1641…cmsq.runner.version=2.0.0
 library-wide trials: 10  (distinct ideas: 10)
-09306b8e  idea 7062daccf1  params 42ac6b203a9c26a4  SAMPLE_REGIME SR/day +0.1167
-75d9495b  idea 8de90926e1  params 02f573e872490d1c  SAMPLE_REGIME SR/day +0.0687
+428dcf2a  idea 7062daccf1  params 42ac6b203a9c26a4  SAMPLE_REGIME SR/day +0.1167
+86cd0f47  idea 8de90926e1  params 02f573e872490d1c  SAMPLE_REGIME SR/day +0.0687
 no signals (only promoted strategies emit observe-only signals)
 
 == audit: verify, then reviewer tamper attacks on the live DB (restored after each) ==
-audit chain OK: 124 entries, HMAC-keyed, head 700b4bea11bed490 anchored at seq Some(124) in /tmp/cmsq-e2e.4kIU.secrets/anchors/d2104cb6553b1450.anchor
+audit chain OK: 124 entries, HMAC-keyed, head 714923b1f8821160 anchored at seq Some(124) in /tmp/cmsq-e2e.EukY.secrets/anchors/450ac0264e69ea17.anchor
 AUDIT CHAIN BROKEN at seq Some(3): HMAC mismatch (entry modified or chain re-computed without the key)
    (edit detected as expected)
 AUDIT CHAIN BROKEN at seq Some(122): log truncated: anchor says head is seq 124, database ends at 121
    (truncate detected as expected)
 AUDIT CHAIN BROKEN at seq Some(1): HMAC mismatch (entry modified or chain re-computed without the key)
    (rechain detected as expected)
-audit chain OK: 124 entries, HMAC-keyed, head 700b4bea11bed490 anchored at seq Some(124) in /tmp/cmsq-e2e.4kIU.secrets/anchors/d2104cb6553b1450.anchor
+audit chain OK: 124 entries, HMAC-keyed, head 714923b1f8821160 anchored at seq Some(124) in /tmp/cmsq-e2e.EukY.secrets/anchors/450ac0264e69ea17.anchor
 
 == result ==
-E2E OK — workspace kept at /tmp/cmsq-e2e.4kIU
+E2E OK — workspace kept at /tmp/cmsq-e2e.EukY

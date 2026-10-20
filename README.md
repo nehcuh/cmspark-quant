@@ -41,7 +41,10 @@ CLI（`CMSQ_HOME` 默认 `./var`；密钥目录 `CMSQ_SECRETS_DIR` 默认 `~/.co
 
 ```bash
 cmsq init
-cmsq data fetch SH600519 --count 1500            # 宿主机经 rstdx 拉日线（未复权 → data_adjusted 门禁不通过）
+cmsq data calendar                               # tushare trade_cal → data/_calendar_SSE.txt
+cmsq data fetch SH600519 --count 2500            # 多源路由：tushare(含 adj_factor) → akshare → baostock → tdx；交叉校验收盘价
+cmsq data sources                                # 各数据源健康 / 冷却状态
+cmsq replay SH600519 --strategy ma_crossover     # 宿主机原生逐 bar 回放（参考用，不过门禁）
 cmsq data import <csv> --adjustment hfq          # 导入带 adj_factor 的复权数据
 cmsq ingest [path] | extract
 cmsq backtest <id>|--all --symbol SAMPLE_REGIME [--backend docker|process]   # 默认 docker；process 大声警告且永不可晋升
@@ -69,15 +72,19 @@ cmsq list | show <id> | jobs | jobs reap | trials | signals | audit verify | aud
   （`<secrets>/anchors/*.anchor`）记录链头；`audit verify` 检出修改、删除、截断、回滚、无密钥/有密钥重链。
 
 ## 验证结果（本机，2026-10-20）
-* `cargo test --workspace`：core 37 + pipeline 3 通过（Docker 测试 #[ignore]）。
+* `cargo test --workspace`：core 46 + pipeline 3 通过（Docker 测试 #[ignore]）。
 * `scripts/test_docker.sh`：pipeline 3 + sandbox 6 + rstdx security_bars 13 通过（含全部攻击贴回归）。
 * `cargo clippy --workspace --all-targets -- -D warnings`：通过。
+* `scripts/e2e_real.sh`（真实 A 股，tushare + akshare 交叉校验，6 只股票 × 6 个样例帖 = 36 次 Docker 回测）：
+  **0 个通过门禁、0 个晋升**。"明日涨跌" 每次都被前视探针抓到；SH600519 有 1 天 tushare/akshare 收盘价差 0.11%（2017-02-27），
+  该数据集被 `data_cross_validated` 阻断；其余均因 Sharpe / DSR / 回撤 / 净收益不达标被拒。输出见 `docs/e2e-real-output.txt`。
 * `scripts/e2e.sh`：输出见 `docs/e2e-output.txt`，全部符合预期；无策略被晋升（双均线门禁通过但 vault 段亏损被拒）。
 * 截图：`docs/screenshots/01-overview.png` … `13-no-docker-banner.png`。
 * 外部审查问题 → 修复映射：`docs/reviews/04-external-review-fixes.md`。
 
 ## 已知局限
-ST ±5% 未建模；rstdx 无除权除息数据（真实 TDX 数据为未复权，门禁拒绝）；同时持有密钥并改写锚点的攻击者仍可伪造历史；
+ST ±5% 未建模（meta 中标记 is_st）；只有 tushare 提供 adj_factor，akshare/baostock/TDX 作为备份时数据为未复权、门禁拒绝；
+本机 baostock 与 TDX 不可达、Eastmoney 断连，交叉校验实际只有 tushare↔akshare(Sina) 一对；同时持有密钥并改写锚点的攻击者仍可伪造历史；
 DEV（bwrap）后端隔离较弱且永不可晋升；相近重复识别为启发式；SAMPLE_REGIME 为合成数据，参数为演示调过。
 
 ## 明确不做（P0）
