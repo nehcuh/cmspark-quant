@@ -28,7 +28,30 @@ pub struct SandboxLimits {
     pub timeout_secs: u64,
     /// Empty = deny all network (the only mode supported in P0).
     pub network_allowlist: Vec<String>,
+    /// Hard budget for everything written to `/out` (bytes / inodes), enforced by
+    /// the kernel (size-capped tmpfs) while the job runs (issue #9).
+    #[serde(default = "d_out_bytes")]
+    pub out_bytes: u64,
+    #[serde(default = "d_out_inodes")]
+    pub out_inodes: u64,
+    /// Live budget for stdout+stderr combined; exceeding it kills the job
+    /// (`QuotaExceeded`). The daemon's per-container log file is capped too.
+    #[serde(default = "d_log_bytes")]
+    pub log_bytes: u64,
 }
+fn d_out_bytes() -> u64 {
+    POSITIONS_CAP as u64 + 64 * 1024
+}
+fn d_out_inodes() -> u64 {
+    16
+}
+fn d_log_bytes() -> u64 {
+    // positions are framed back over stderr, plus OUTPUT_CAP of ordinary logs per stream
+    POSITIONS_CAP as u64 + 2 * OUTPUT_CAP as u64 + 64 * 1024
+}
+
+/// Largest positions.csv accepted.
+pub const POSITIONS_CAP: usize = 8 * 1024 * 1024;
 
 impl Default for SandboxLimits {
     fn default() -> Self {
@@ -38,6 +61,9 @@ impl Default for SandboxLimits {
             pids: 128,
             timeout_secs: 120,
             network_allowlist: vec![],
+            out_bytes: d_out_bytes(),
+            out_inodes: d_out_inodes(),
+            log_bytes: d_log_bytes(),
         }
     }
 }
@@ -64,6 +90,8 @@ pub enum Outcome {
     Exited,
     TimedOut,
     OomKilled,
+    /// killed for exceeding the output/log budget
+    QuotaExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

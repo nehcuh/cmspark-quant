@@ -56,13 +56,13 @@ try:
 except Exception: res["rootfs_write"] = "blocked"
 res["uid"] = os.getuid()
 res["docker_sock"] = os.path.exists("/var/run/docker.sock")
-open("/out/r.json", "w").write(json.dumps(res))
+open("/out/positions.csv", "w").write(json.dumps(res))  # the one file the host gets back
 print(json.dumps(res))
 "#;
 
 fn check_probe(out: &std::path::Path) {
     let r: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(out.join("r.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(out.join("positions.csv")).unwrap()).unwrap();
     assert_eq!(r["net"], "blocked", "{r}");
     assert_eq!(r["data_write"], "blocked", "{r}");
     assert_eq!(r["rootfs_write"], "blocked", "{r}");
@@ -159,4 +159,59 @@ async fn docker_output_flood_is_capped() {
         .await
         .unwrap();
     assert_eq!(r.stdout.len(), cmsq_core::sandbox::OUTPUT_CAP);
+    assert_eq!(
+        r.outcome,
+        Outcome::QuotaExceeded,
+        "streamed output is killed live"
+    );
+}
+
+/// #9: /out is a kernel-capped tmpfs; nothing but positions.csv reaches the host.
+#[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
+async fn docker_out_budget_is_enforced_while_running() {
+    let d = docker().await;
+    // one big unrelated file (the reviewer's 9 MiB probe) with a small budget
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut q = req("from pathlib import Path\ntry:\n    Path('/out/unrelated.bin').write_bytes(b'Z'*(9*1024*1024)); print('WROTE')\nexcept OSError as e: print('ENOSPC', e.errno); Path('/out/unrelated.bin').unlink()\nopen('/out/positions.csv','w').write('ok')\n", ro.path(), out.path(), 30);
+    q.limits.out_bytes = 1024 * 1024;
+    let r = d.execute(&q).await.unwrap();
+    assert!(r.stdout.contains("ENOSPC"), "{} {}", r.stdout, r.stderr);
+    assert!(
+        !out.path().join("unrelated.bin").exists(),
+        "unrelated files never reach the host"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.path().join("positions.csv")).unwrap(),
+        "ok"
+    );
+    // many small files: inode budget
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let r = d.execute(&req("n=0\ntry:\n    for i in range(10000): open(f'/out/f{i}','w').write('x'); n+=1\nexcept OSError: pass\nprint('FILES', n)\n", ro.path(), out.path(), 30)).await.unwrap();
+    let n: usize = r.stdout.trim().rsplit(' ').next().unwrap().parse().unwrap();
+    assert!(n < 16, "inode budget: wrote {n} files");
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    // continuous small-chunk stderr stream: killed live, container removed
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let q = req(
+        "import sys\nwhile True: sys.stderr.write('E'*4096)\n",
+        ro.path(),
+        out.path(),
+        60,
+    );
+    let t0 = std::time::Instant::now();
+    let r = d.execute(&q).await.unwrap();
+    assert_eq!(r.outcome, Outcome::QuotaExceeded);
+    assert!(
+        t0.elapsed().as_secs() < 30,
+        "killed by budget, not by timeout"
+    );
+    let gone = std::process::Command::new("docker")
+        .args(["ps", "-aq", "--filter", &format!("label=cmsq.job={}", q.id)])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&gone.stdout).trim().is_empty(),
+        "container removed"
+    );
 }

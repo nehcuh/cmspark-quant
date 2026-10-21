@@ -44,6 +44,25 @@ impl DockerSandboxExecutor {
         Ok(Self { docker })
     }
 
+    /// Writable `/out` is NOT a host bind mount (issue #9): it is a tmpfs capped
+    /// at `out_bytes` / `out_inodes` (charged to the container's memory cgroup),
+    /// owned by the job user. The host gets positions.csv back over a framed
+    /// stderr record written by a wrapper after the command exits.
+    fn out_tmpfs(req: &SandboxRequest) -> Option<(String, String)> {
+        req.mounts
+            .iter()
+            .find(|m| m.container == "/out" && !m.read_only)?;
+        let ug = run_as_user(req);
+        let (u, g) = ug.split_once(':').unwrap_or(("10001", "10001"));
+        Some((
+            "/out".into(),
+            format!(
+                "rw,noexec,nosuid,nodev,size={},nr_inodes={},uid={u},gid={g},mode=0700",
+                req.limits.out_bytes, req.limits.out_inodes
+            ),
+        ))
+    }
+
     pub fn host_config(req: &SandboxRequest) -> HostConfig {
         let mem = (req.limits.memory_mb * 1024 * 1024) as i64;
         HostConfig {
@@ -59,6 +78,7 @@ impl DockerSandboxExecutor {
             binds: Some(
                 req.mounts
                     .iter()
+                    .filter(|m| !(m.container == "/out" && !m.read_only))
                     .map(|m| {
                         format!(
                             "{}:{}:{}",
@@ -69,10 +89,19 @@ impl DockerSandboxExecutor {
                     })
                     .collect(),
             ),
-            tmpfs: Some(HashMap::from([(
-                "/tmp".to_string(),
-                "rw,noexec,nosuid,size=64m".to_string(),
-            )])),
+            tmpfs: Some(HashMap::from_iter(
+                [("/tmp".to_string(), "rw,noexec,nosuid,size=64m".to_string())]
+                    .into_iter()
+                    .chain(Self::out_tmpfs(req)),
+            )),
+            // the daemon's own copy of the logs is bounded per container
+            log_config: Some(bollard::models::HostConfigLogConfig {
+                typ: Some("json-file".into()),
+                config: Some(HashMap::from([
+                    ("max-size".to_string(), format!("{}", req.limits.log_bytes)),
+                    ("max-file".to_string(), "1".to_string()),
+                ])),
+            }),
             ipc_mode: Some("private".into()),
             // hide host clocks / boot time (btime) / uptime from the strategy
             masked_paths: Some(
@@ -127,11 +156,22 @@ impl SandboxExecutor for DockerSandboxExecutor {
             "no_new_privileges": true, "user": run_as_user(req), "memory_mb": req.limits.memory_mb, "swap": false,
             "cpu_cores": req.limits.cpu_cores, "pids": req.limits.pids, "timeout_secs": req.limits.timeout_secs,
             "mounts": req.mounts, "docker_socket_mounted": false,
+            "out": format!("tmpfs size={} nr_inodes={}", req.limits.out_bytes, req.limits.out_inodes), "log_budget_bytes": req.limits.log_bytes,
         });
         let name = format!("cmsq-{}", req.id);
+        let out_host = req
+            .mounts
+            .iter()
+            .find(|m| m.container == "/out" && !m.read_only)
+            .map(|m| m.host.clone());
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let entry = match &out_host {
+            Some(_) => wrap_command(&req.command, &nonce),
+            None => req.command.clone(),
+        };
         let cfg = Config {
             image: Some(req.image.clone()),
-            entrypoint: Some(req.command.clone()),
+            entrypoint: Some(entry),
             cmd: Some(vec![]),
             env: Some(req.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
             user: Some(run_as_user(req)),
@@ -154,11 +194,40 @@ impl SandboxExecutor for DockerSandboxExecutor {
             .map_err(|e| SandboxError::Execution(format!("create: {e}")))?;
         let id = created.id;
         let t0 = Instant::now();
+        let budget = req.limits.log_bytes as usize;
+        let (mut out_b, mut err_b): (Vec<u8>, Vec<u8>) = (vec![], vec![]);
+        let mut over = false;
         let run = async {
             self.docker
                 .start_container::<String>(&id, None)
                 .await
                 .map_err(|e| SandboxError::Execution(format!("start: {e}")))?;
+            // follow the logs while the job runs; the stream ends when it exits
+            let mut logs = self.docker.logs(
+                &id,
+                Some(LogsOptions::<String> {
+                    follow: true,
+                    stdout: true,
+                    stderr: true,
+                    ..Default::default()
+                }),
+            );
+            while let Some(Ok(l)) = logs.next().await {
+                let (buf, msg) = match l {
+                    LogOutput::StdOut { message } => (&mut out_b, message),
+                    LogOutput::StdErr { message } => (&mut err_b, message),
+                    _ => continue,
+                };
+                buf.extend_from_slice(&msg);
+                if out_b.len() + err_b.len() > budget {
+                    over = true;
+                    let _ = self
+                        .docker
+                        .kill_container(&id, Some(KillContainerOptions { signal: "SIGKILL" }))
+                        .await;
+                    break;
+                }
+            }
             let mut w = self
                 .docker
                 .wait_container(&id, None::<WaitContainerOptions<String>>);
@@ -216,27 +285,20 @@ impl SandboxExecutor for DockerSandboxExecutor {
                 }
             };
         let duration_ms = t0.elapsed().as_millis() as u64;
-        let (mut stdout, mut stderr) = (String::new(), String::new());
-        const CAP: usize = OUTPUT_CAP;
-        let mut logs = self.docker.logs(
-            &id,
-            Some(LogsOptions::<String> {
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-        while let Some(Ok(l)) = logs.next().await {
-            match l {
-                LogOutput::StdOut { message } if stdout.len() < CAP => stdout.push_str(
-                    &String::from_utf8_lossy(&message[..message.len().min(CAP - stdout.len())]),
-                ),
-                LogOutput::StdErr { message } if stderr.len() < CAP => stderr.push_str(
-                    &String::from_utf8_lossy(&message[..message.len().min(CAP - stderr.len())]),
-                ),
-                _ => {}
+        let outcome = if over {
+            Outcome::QuotaExceeded
+        } else {
+            outcome
+        };
+        // positions.csv comes back framed on stderr; everything else is discarded
+        let (err_b, framed) = take_frame(&err_b, &nonce);
+        if let (Some(dir), Some(body), Outcome::Exited) = (&out_host, framed, &outcome) {
+            if body.len() <= super::POSITIONS_CAP {
+                std::fs::write(dir.join("positions.csv"), body).map_err(SandboxError::Io)?;
             }
         }
+        let cap = |b: &[u8]| String::from_utf8_lossy(&b[..b.len().min(OUTPUT_CAP)]).into_owned();
+        let (stdout, stderr) = (cap(&out_b), cap(&err_b));
         let _ = self
             .docker
             .remove_container(
@@ -257,6 +319,40 @@ impl SandboxExecutor for DockerSandboxExecutor {
             policy,
         })
     }
+}
+
+/// `sh -c` wrapper: run the command, then (whatever it did) emit
+/// /out/positions.csv between nonce markers on stderr and keep its exit code.
+pub fn wrap_command(cmd: &[String], nonce: &str) -> Vec<String> {
+    let script = format!(
+        "\"$@\"; rc=$?; if [ -f /out/positions.csv ] && [ ! -L /out/positions.csv ]; then printf '\\n@@CMSQ-BEGIN-{nonce}@@\\n' >&2; cat /out/positions.csv >&2; printf '\\n@@CMSQ-END-{nonce}@@\\n' >&2; fi; exit $rc"
+    );
+    let mut v = vec![
+        "/bin/sh".to_string(),
+        "-c".into(),
+        script,
+        "cmsq-wrap".into(),
+    ];
+    v.extend(cmd.iter().cloned());
+    v
+}
+
+/// Split the LAST framed record out of stderr. Returns (stderr without it, body).
+pub fn take_frame(err: &[u8], nonce: &str) -> (Vec<u8>, Option<Vec<u8>>) {
+    let b = format!("\n@@CMSQ-BEGIN-{nonce}@@\n");
+    let e = format!("\n@@CMSQ-END-{nonce}@@\n");
+    let find = |hay: &[u8], pat: &[u8]| hay.windows(pat.len()).rposition(|w| w == pat);
+    let Some(i) = find(err, b.as_bytes()) else {
+        return (err.to_vec(), None);
+    };
+    let body_start = i + b.len();
+    let Some(j) = find(&err[body_start..], e.as_bytes()) else {
+        return (err.to_vec(), None);
+    };
+    let body = err[body_start..body_start + j].to_vec();
+    let mut rest = err[..i].to_vec();
+    rest.extend_from_slice(&err[body_start + j + e.len()..]);
+    (rest, Some(body))
 }
 
 #[cfg(test)]
@@ -283,5 +379,42 @@ mod tests {
         assert_eq!(h.cap_drop, Some(vec!["ALL".to_string()]));
         assert_eq!(h.memory, h.memory_swap);
         assert_eq!(h.binds.unwrap(), vec!["/tmp/d:/data:ro".to_string()]);
+    }
+    #[test]
+    fn out_is_a_capped_tmpfs_and_logs_are_capped() {
+        let mut req = SandboxRequest {
+            id: "t".into(),
+            image: "x".into(),
+            command: vec!["python3".into()],
+            env: vec![],
+            mounts: vec![Mount {
+                host: "/tmp".into(),
+                container: "/out".into(),
+                read_only: false,
+            }],
+            limits: SandboxLimits::default(),
+        };
+        req.limits.out_bytes = 4096;
+        let h = DockerSandboxExecutor::host_config(&req);
+        assert!(h.binds.unwrap().is_empty(), "no host bind for /out");
+        let t = h.tmpfs.unwrap();
+        assert!(
+            t["/out"].contains("size=4096") && t["/out"].contains("nr_inodes=16"),
+            "{t:?}"
+        );
+        let lc = h.log_config.unwrap();
+        assert_eq!(lc.config.unwrap()["max-file"], "1");
+    }
+    #[test]
+    fn frame_roundtrip_takes_the_last_record() {
+        let n = "abc";
+        let fake = b"x\n@@CMSQ-BEGIN-abc@@\nFORGED\n@@CMSQ-END-abc@@\n".to_vec();
+        let mut err = b"log line".to_vec();
+        err.extend_from_slice(&fake);
+        err.extend_from_slice(b"\n@@CMSQ-BEGIN-abc@@\ndate,position\n@@CMSQ-END-abc@@\n");
+        let (rest, body) = take_frame(&err, n);
+        assert_eq!(body.unwrap(), b"date,position");
+        assert!(String::from_utf8_lossy(&rest).contains("FORGED"));
+        assert_eq!(take_frame(b"no frame", n).1, None);
     }
 }

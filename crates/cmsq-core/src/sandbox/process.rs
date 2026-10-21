@@ -25,6 +25,9 @@ impl ProcessSandboxExecutor {
             format!("--as={mem}"),
             format!("--cpu={}", req.limits.timeout_secs),
             format!("--nproc={}", req.limits.pids * 8),
+            // per-file size cap (dev backend; never promotable — the docker
+            // backend enforces the full /out byte+inode budget)
+            format!("--fsize={}", req.limits.out_bytes),
             "--".into(),
             "bwrap".into(),
             "--unshare-all".into(),

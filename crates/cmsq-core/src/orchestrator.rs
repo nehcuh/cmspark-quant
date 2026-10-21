@@ -804,6 +804,15 @@ impl Orchestrator {
                     format!("out of memory (limit {} MB)", self.limits.memory_mb),
                 ))
             }
+            Outcome::QuotaExceeded => {
+                return Err((
+                    "quota_exceeded".into(),
+                    format!(
+                        "output budget exceeded (/out {} B / {} inodes, logs {} B); container killed (variant {})",
+                        self.limits.out_bytes, self.limits.out_inodes, self.limits.log_bytes, v.name
+                    ),
+                ))
+            }
             Outcome::Exited => {}
         }
         if r.stdout.len() >= OUTPUT_CAP || r.stderr.len() >= OUTPUT_CAP {
