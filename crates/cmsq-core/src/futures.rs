@@ -19,8 +19,8 @@
 //! close / close-today), main-contract roll (old contract closed and new one
 //! opened at the roll-day open: both legs pay fees and slippage).
 //! Close-today (平今): every open lot is tagged with its trading day; a close
-//! consumes lots in the exchange's [`CloseOrder`] and lots opened on the same
-//! trading day pay the close-today tier. At daily granularity a position is
+//! is split between the close-today and close fee tiers by the exchange rule
+//! ([`CloseOrder`]: SHFE/INE trader-chosen, others close-today-fee-first). At daily granularity a position is
 //! always opened and closed on different trading days, so the tier only bites
 //! in [`simulate_session`] with intraday bars (and after a roll, whose new
 //! lots count as opened that day).
@@ -60,27 +60,30 @@ pub struct ContractSpec {
     pub close_order: Option<CloseOrder>,
 }
 
-/// Order in which a closing trade consumes today's vs earlier lots (decides
-/// whether the close-today fee tier applies).
+/// How a closing trade is split between the close-today and the ordinary
+/// close fee tier. Sources checked 2026-10-21: broker FAQs (国金期货 "平仓及平今仓的
+/// 手续费和盈亏如何计算", 国盛期货 "下单时能否指定平今仓") and 信易科技's exchange
+/// close-rule notes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CloseOrder {
-    /// oldest lots first (DCE / CZCE / GFEX default: 先开先平)
+    /// SHFE / INE: orders carry 平今 or 平昨, the trader chooses; modelled as the
+    /// cheaper bucket first (favourable to the strategy; labelled).
+    TraderChooses,
+    /// DCE / CZCE / CFFEX / GFEX: no 平今 instruction; the position is reduced
+    /// old-lots-first (先开先平) but, while lots opened today exist, fees are
+    /// charged at the close-today rate first, until the close-today-charged lots
+    /// reach the lots opened today.
+    FifoFeeTodayFirst,
+    /// plain FIFO for position and fee (override only)
     Fifo,
-    /// today's lots first (CFFEX default)
-    TodayFirst,
-    /// trader chooses CloseToday / CloseYesterday explicitly (SHFE / INE):
-    /// modelled as the cheaper bucket first
-    Cheapest,
 }
 
-/// Default close order per exchange. These are modelling assumptions, not
-/// broker facts: override per product with `close_order` in `CMSQ_FUTURES_SPECS`.
+/// Default per exchange; override per product with `close_order` in `CMSQ_FUTURES_SPECS`.
 pub fn default_close_order(exchange: &str) -> CloseOrder {
     match exchange {
-        "SHFE" | "INE" => CloseOrder::Cheapest,
-        "CFFEX" => CloseOrder::TodayFirst,
-        _ => CloseOrder::Fifo,
+        "SHFE" | "INE" => CloseOrder::TraderChooses,
+        _ => CloseOrder::FifoFeeTodayFirst,
     }
 }
 
@@ -90,10 +93,13 @@ impl ContractSpec {
     }
 }
 
-/// Open lots of ONE side, tagged with the trading day they were opened.
+/// Open lots of ONE side, tagged with the trading day they were opened, plus
+/// the per-day fee counters the non-SHFE rule needs.
 #[derive(Debug, Clone, Default)]
 struct Ledger {
     lots: std::collections::VecDeque<(String, f64)>,
+    /// (trading day, lots opened that day, lots already charged close-today that day)
+    fee_day: (String, f64, f64),
 }
 
 impl Ledger {
@@ -102,34 +108,45 @@ impl Ledger {
             Some((d, x)) if d == day => *x += q,
             _ => self.lots.push_back((day.to_string(), q)),
         }
+        if self.fee_day.0 != day {
+            self.fee_day = (day.to_string(), 0.0, 0.0);
+        }
+        self.fee_day.1 += q;
     }
     fn total(&self) -> f64 {
         self.lots.iter().map(|x| x.1).sum()
     }
-    /// Close `q` lots on `day`; returns (earlier-day lots closed, today's lots closed).
-    fn close(&mut self, day: &str, q: f64, order: CloseOrder, today_cheaper: bool) -> (f64, f64) {
-        let today_first = match order {
-            CloseOrder::Fifo => false,
-            CloseOrder::TodayFirst => true,
-            CloseOrder::Cheapest => today_cheaper,
-        };
-        let (mut left, mut his, mut tod) = (q, 0.0, 0.0);
+    fn take(&mut self, day: &str, mut left: f64, today_first: bool) -> (f64, f64) {
+        let (mut his, mut tod) = (0.0, 0.0);
         while left > 1e-9 {
-            let idx = if today_first {
-self.lots.iter().position(|x| x.0 == day).unwrap_or_default()
-            } else {
-self.lots.iter().position(|x| x.0 != day).unwrap_or_default()
-            };
+            let idx = if today_first { self.lots.iter().position(|x| x.0 == day) } else { self.lots.iter().position(|x| x.0 != day) }.unwrap_or_default();
             let Some(slot) = self.lots.get_mut(idx) else { break };
-            let take = slot.1.min(left);
-            slot.1 -= take;
-            left -= take;
-            if slot.0 == day { tod += take } else { his += take }
+            let t = slot.1.min(left);
+            slot.1 -= t;
+            left -= t;
+            if slot.0 == day { tod += t } else { his += t }
             if slot.1 <= 1e-9 {
                 self.lots.remove(idx);
             }
         }
         (his, tod)
+    }
+    /// Close `q` lots on `day`; returns (lots charged the ordinary close fee, lots charged close-today).
+    fn close(&mut self, day: &str, q: f64, order: CloseOrder, today_cheaper: bool) -> (f64, f64) {
+        let q = q.min(self.total());
+        match order {
+            CloseOrder::TraderChooses => self.take(day, q, today_cheaper),
+            CloseOrder::Fifo => self.take(day, q, false),
+            CloseOrder::FifoFeeTodayFirst => {
+                self.take(day, q, false);
+                if self.fee_day.0 != day {
+                    return (q, 0.0);
+                }
+                let tod = q.min((self.fee_day.1 - self.fee_day.2).max(0.0));
+                self.fee_day.2 += tod;
+                (q - tod, tod)
+            }
+        }
     }
 }
 
@@ -596,14 +613,22 @@ mod tests {
         let mut l = Ledger::default();
         l.open("d1", 3.0);
         l.open("d2", 2.0);
+        // SHFE/INE: trader picks the cheaper bucket
+        assert_eq!(l.clone().close("d2", 1.0, CloseOrder::TraderChooses, true), (0.0, 1.0));
+        assert_eq!(l.clone().close("d2", 1.0, CloseOrder::TraderChooses, false), (1.0, 0.0));
         assert_eq!(l.clone().close("d2", 4.0, CloseOrder::Fifo, true), (3.0, 1.0));
-        assert_eq!(l.clone().close("d2", 4.0, CloseOrder::TodayFirst, false), (2.0, 2.0));
-        assert_eq!(l.clone().close("d2", 1.0, CloseOrder::Cheapest, true), (0.0, 1.0));
-        assert_eq!(l.clone().close("d2", 1.0, CloseOrder::Cheapest, false), (1.0, 0.0));
+        // DCE/CZCE/CFFEX/GFEX: old lots leave first, but fees are close-today first
+        let mut x = l.clone();
+        assert_eq!(x.close("d2", 1.0, CloseOrder::FifoFeeTodayFirst, false), (0.0, 1.0));
+        assert_eq!(x.lots.front().map(|s| (s.0.as_str(), s.1)), Some(("d1", 2.0)), "position reduced old-first");
+        assert_eq!(x.close("d2", 3.0, CloseOrder::FifoFeeTodayFirst, false), (2.0, 1.0), "close-today charged up to the 2 lots opened today");
+        assert_eq!(x.close("d2", 1.0, CloseOrder::FifoFeeTodayFirst, false), (1.0, 0.0));
+        assert_eq!(l.clone().close("d3", 2.0, CloseOrder::FifoFeeTodayFirst, false), (2.0, 0.0), "nothing opened on d3");
         assert_eq!(l.close("d2", 99.0, CloseOrder::Fifo, false), (3.0, 2.0), "never closes more than held");
-        assert_eq!(spec_for("FUT_IF").unwrap().close_order(), CloseOrder::TodayFirst);
-        assert_eq!(spec_for("FUT_RB").unwrap().close_order(), CloseOrder::Cheapest);
-        assert_eq!(spec_for("FUT_M").unwrap().close_order(), CloseOrder::Fifo);
+        assert_eq!(spec_for("FUT_IF").unwrap().close_order(), CloseOrder::FifoFeeTodayFirst);
+        assert_eq!(spec_for("FUT_RB").unwrap().close_order(), CloseOrder::TraderChooses);
+        assert_eq!(spec_for("FUT_SC").unwrap().close_order(), CloseOrder::TraderChooses);
+        assert_eq!(spec_for("FUT_M").unwrap().close_order(), CloseOrder::FifoFeeTodayFirst);
     }
 
     #[test]

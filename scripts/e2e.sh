@@ -23,7 +23,7 @@ hr "build"
 cargo build -q -p cmsq-cli
 if docker info >/dev/null 2>&1; then
   BACKEND=docker
-  docker image inspect cmsq-runner:2.2.1 >/dev/null 2>&1 || scripts/build_runner.sh
+  docker image inspect cmsq-runner:2.2.2 >/dev/null 2>&1 || scripts/build_runner.sh
 elif [ $ALLOW_DEV = 1 ]; then
   BACKEND=process; echo "!!! DEV backend (--allow-dev): nothing may pass the gate"
 else

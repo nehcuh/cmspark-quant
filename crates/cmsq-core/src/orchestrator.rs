@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub use crate::scorer::CostModel;
 
-pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.1";
+pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.2";
 pub const RUNNER_CMD: [&str; 4] = ["python3", "-I", "-B", "/runner/signal_runner.py"];
 
 /// Progress sink (dashboard log stream / CLI stderr). Called from the job thread.
@@ -404,8 +404,9 @@ impl Orchestrator {
 
     // ---------------- sandbox: one variant per fresh container ----------------
     #[allow(clippy::too_many_arguments)]
-    async fn run_variant(&self, exec: &dyn SandboxExecutor, jd: &Path, idx: usize, v: &Variant, code: &str, params: &serde_json::Value, lo: f64)
+    async fn run_variant(&self, exec: &dyn SandboxExecutor, jd: &Path, idx: usize, v: &Variant, code: &str, params: &serde_json::Value, side: (f64, f64))
         -> std::result::Result<(Vec<f64>, u64), (String, String)> {
+        let (lo, tick) = side;
         let io = |e: std::io::Error| ("error".to_string(), format!("host io: {e}"));
         let vd = jd.join("variants").join(format!("{idx:02}"));
         let (vin, vjob, vout) = (vd.join("input"), vd.join("job"), vd.join("out"));
@@ -414,7 +415,7 @@ impl Orchestrator {
         }
         std::fs::write(vin.join("bars.csv"), market::to_csv(&v.bars, false)).map_err(io)?;
         std::fs::write(vjob.join("strategy.py"), code).map_err(io)?;
-        std::fs::write(vjob.join("job.json"), json!({"params": params, "position_min": lo}).to_string()).map_err(io)?;
+        std::fs::write(vjob.join("job.json"), json!({"params": params, "position_min": lo, "pricetick": tick}).to_string()).map_err(io)?;
         // no real timestamps reach the sandbox: pin input mtimes to the fake epoch
         let epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800); // 2000-01-01
         for f in [vin.join("bars.csv"), vjob.join("strategy.py"), vjob.join("job.json")] {
@@ -477,7 +478,7 @@ impl Orchestrator {
     }
 
     /// Runs a shuffled probe plan, one fresh container per variant.
-    async fn run_plan(&self, exec: &dyn SandboxExecutor, jd: &Path, plan: &[Variant], code: &str, params: &serde_json::Value, lo: f64)
+    async fn run_plan(&self, exec: &dyn SandboxExecutor, jd: &Path, plan: &[Variant], code: &str, params: &serde_json::Value, side: (f64, f64))
         -> std::result::Result<(Vec<f64>, ProbeReport, u64), (String, String)> {
         use futures_util::stream::{self, StreamExt};
         let n = plan.len();
@@ -485,7 +486,7 @@ impl Orchestrator {
         let outs: Vec<VariantOut> = stream::iter(plan.iter().enumerate())
             .map(|(i, v)| async move {
                 self.log(&format!("container {}/{n}: variant {} ({} bars)", i + 1, v.name, v.bars.len()));
-                (i, self.run_variant(exec, jd, i, v, code, params, lo).await)
+                (i, self.run_variant(exec, jd, i, v, code, params, side).await)
             })
             .buffer_unordered(self.parallel.max(1))
             .collect().await;
@@ -565,7 +566,7 @@ impl Orchestrator {
         self.log(&format!("job {} [{run_kind}] {symbol}: {} variants, one fresh container each, random order", &job_id[..8], plan.len()));
         let t0 = std::time::Instant::now();
         let lo = if fut.is_some() { -1.0 } else { 0.0 };
-        let (full, probe_rep, _) = match self.run_plan(exec, &jd, &plan, code, params, lo).await {
+        let (full, probe_rep, _) = match self.run_plan(exec, &jd, &plan, code, params, (lo, fut.as_ref().map(|f| f.tick).unwrap_or(0.01))).await {
             Ok(x) => x,
             Err((status, reason)) => {
                 let ms = t0.elapsed().as_millis() as i64;
@@ -1008,7 +1009,7 @@ impl Orchestrator {
         // the vault runs the exact parameters that were gated (sweep winner included)
         let params = dev_job.result.as_ref().and_then(|r| r.get("params").cloned()).filter(|p| p.is_object()).unwrap_or_else(|| Self::params_for(&e, None));
         let t0 = std::time::Instant::now();
-        let outcome = self.run_plan(exec, &jd, &plan, &code, &params, if fut.is_some() { -1.0 } else { 0.0 }).await;
+        let outcome = self.run_plan(exec, &jd, &plan, &code, &params, (if fut.is_some() { -1.0 } else { 0.0 }, fut.as_ref().map(|f| f.tick).unwrap_or(0.01))).await;
         let ms = t0.elapsed().as_millis() as i64;
         let s = self.get(&s.id)?;
         let (full, rep) = match outcome {
@@ -1071,7 +1072,7 @@ impl Orchestrator {
         let vault = jobs.iter().find(|j| j.kind == "vault" && j.status == "succeeded" && j.result.as_ref().is_some_and(|r| r["passed"] == true))
             .ok_or_else(|| anyhow::anyhow!("no passed vault job for {}", &s.id[..8]))?;
         let r = vault.result.as_ref().unwrap();
-        anyhow::ensure!(r["account"].is_object(), "vault job {} predates account snapshots (cmsq ≤ 2.2.1); no QIFI data", &vault.id[..8]);
+        anyhow::ensure!(r["account"].is_object(), "vault job {} predates account snapshots (older cmsq); no QIFI data", &vault.id[..8]);
         let sigs: Vec<Signal> = self.store.list_signals()?.into_iter().map(|x| x.0).filter(|g| g.strategy_id == s.id).collect();
         let doc = crate::qifi::build(&s.id, &s.title, &r["account"], &sigs, &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         let path = match out {

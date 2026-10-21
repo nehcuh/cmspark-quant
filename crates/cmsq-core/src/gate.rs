@@ -7,7 +7,7 @@ use crate::scorer::{Dsr, Metrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const RUNNER_VERSION: &str = "2.2.1";
+pub const RUNNER_VERSION: &str = "2.2.2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
@@ -40,7 +40,7 @@ impl Default for GateConfig {
 pub struct GateInput<'a> {
     pub job_status: &'a str,
     pub hardened: bool,
-    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.2.1"
+    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.2.2"
     pub runner_identity: Option<&'a str>,
     pub dev: &'a Metrics,
     pub dev_cost_2x: &'a Metrics,
@@ -131,7 +131,7 @@ mod tests {
         Fx { c2: m(0.2, 1.0), folds: vec![m(0.05, 1.0); 4], dsr, probe: ProbeReport { detected: false, variants: 10, containers: 10, ..Default::default() }, risks: vec![], dev, bh: m(0.1, 0.3) }
     }
     fn input(f: &Fx) -> GateInput<'_> {
-        GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.1"), expected_runner: Some("sha256:abc"), buy_hold: &f.bh, dev: &f.dev, dev_cost_2x: &f.c2,
+        GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.2"), expected_runner: Some("sha256:abc"), buy_hold: &f.bh, dev: &f.dev, dev_cost_2x: &f.c2,
             folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, data_validated: (true, "sample".into()), high_risks: &f.risks }
     }
     #[test]
