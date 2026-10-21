@@ -50,7 +50,16 @@ impl SignalDriver {
                         (t * eq / (q.last * spec.multiplier)).trunc() as i64
                     }
                     Some(Market::AShare { .. }) => {
-                        ((t.max(0.0) * eq / q.last) / 100.0).floor() as i64 * 100
+                        // a market buy freezes cash at the up-limit (+ fees): size against
+                        // that, or a full-equity target can never be accepted
+                        let freeze = ps
+                            .engine
+                            .price_band(&self.instrument, Some(q))
+                            .0
+                            .unwrap_or(q.last * 1.2)
+                            .max(q.last)
+                            * 1.012; // engine freezes value + 1% slippage buffer + commission
+                        ((t.max(0.0) * eq / freeze) / 100.0).floor() as i64 * 100
                     }
                     None => 0,
                 };

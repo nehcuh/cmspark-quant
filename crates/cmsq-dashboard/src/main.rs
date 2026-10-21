@@ -2618,6 +2618,8 @@ impl Render for Dashboard {
             .child(self.sidebar(cx))
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().overflow_hidden()
                 .child(self.toolbar(cx))
+                .when(self.home.is_demo(), |x| x.child(div().px_3().py_2().bg(rgb(0x4a3b00)).border_b_1().border_color(rgb(0xf2cc60)).text_sm().text_color(rgb(0xffe9a8))
+                    .child("演示工作区 DEMO — 策略只在合成数据上验证，时间推进是模拟的；成交与收益不构成任何有效性证据。DEMO workspace: synthetic-validated, simulated time, NOT evidence.")))
                 .when(self.docker() == Some(false), |x| x.child(div().px_3().py_2().bg(rgb(0x5a1e1e)).border_b_1().border_color(rgb(0xf85149)).text_sm().text_color(rgb(0xffd7d0))
                     .child(format!("⚠ 未连接 Docker — NOT RUNNING ON DOCKER: {}. Only DEV (bwrap) runs are possible; their results can never pass the gate or be promoted. See README “Docker setup”.",
                         self.progress.lock().unwrap().docker_detail.chars().take(120).collect::<String>()))))

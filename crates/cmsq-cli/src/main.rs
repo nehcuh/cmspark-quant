@@ -164,8 +164,25 @@ enum Cmd {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    /// Observe-only signals of promoted strategies
-    Signals,
+    /// Observe-only signals of promoted strategies (history); `--refresh` reruns every
+    /// Promoted strategy in the sandbox on freshly fetched signed data of its own symbol
+    Signals {
+        #[arg(long)]
+        refresh: bool,
+        /// only this strategy
+        #[arg(long)]
+        id: Option<String>,
+        /// fetch fresh bars before refreshing (A-share/futures via the router)
+        #[arg(long)]
+        fetch: bool,
+        #[arg(long, default_value_t = 1500)]
+        count: usize,
+        /// repeat, e.g. 1d
+        #[arg(long)]
+        every: Option<String>,
+        #[arg(long, value_enum, default_value_t = Backend::Docker)]
+        backend: Backend,
+    },
     /// Native host-side bar-by-bar replay of a reference strategy (not gated; for reference/cross-checks)
     Replay {
         symbol: String,
@@ -611,6 +628,9 @@ async fn main() -> Result<()> {
             socket.display()
         );
         return Ok(());
+    }
+    if home.is_demo() {
+        eprintln!("################ DEMO WORKSPACE — synthetic-validated strategy, simulated time; NOT evidence of any edge ################");
     }
     let mut o = Orchestrator::open(home)?;
     if !cli.json {
@@ -1201,10 +1221,75 @@ async fn main() -> Result<()> {
             }
             out(serde_json::json!(v.iter().map(|t| serde_json::json!({"strategy": t.strategy_id, "idea_key": t.idea_key, "params_hash": t.params_hash, "symbol": t.symbol, "sharpe_daily": t.sharpe_daily})).collect::<Vec<_>>()), lines.join("\n"));
         }
-        Cmd::Signals => {
+        Cmd::Signals {
+            refresh,
+            id,
+            fetch,
+            count,
+            every,
+            backend,
+        } => {
+            if refresh {
+                let exec = executor(backend).await?;
+                loop {
+                    let targets: Vec<_> = o
+                        .store
+                        .list_strategies(Some(StrategyStatus::Promoted))?
+                        .into_iter()
+                        .filter(|s| id.as_deref().is_none_or(|i| s.id.starts_with(i)))
+                        .collect();
+                    for s in &targets {
+                        if fetch {
+                            if let Some(sym) = o
+                                .store
+                                .list_jobs(Some(&s.id))?
+                                .into_iter()
+                                .find(|j| j.kind == "vault")
+                                .map(|j| j.symbol)
+                            {
+                                let r = if sym.starts_with("SAMPLE") {
+                                    o.fetch_data(&SampleSource, &sym, count).await.map(|_| ())
+                                } else {
+                                    let (router, _) = o.data_router(None, true);
+                                    o.fetch_routed(&router, &sym, count).await.map(|_| ())
+                                };
+                                if let Err(e) = r {
+                                    eprintln!("  · fetch {sym} failed: {e:#}");
+                                }
+                            }
+                        }
+                        match o.refresh_signals(&s.id, exec.as_ref()).await {
+                            Ok(r) => {
+                                let flag = if r["live_decay"]["flagged"] == true {
+                                    format!("  ⚠ LIVE DECAY: {}", r["live_decay"]["reasons"])
+                                } else {
+                                    String::new()
+                                };
+                                out(
+                                    r.clone(),
+                                    format!(
+                                        "{}  {}  +{} signals{}",
+                                        &s.id[..8],
+                                        r["symbol"].as_str().unwrap_or("-"),
+                                        r["new_signals"],
+                                        flag
+                                    ),
+                                );
+                            }
+                            Err(e) => eprintln!("{}  refresh failed: {e:#}", &s.id[..8]),
+                        }
+                    }
+                    match &every {
+                        Some(e) => tokio::time::sleep(parse_every(e)?).await,
+                        None => break,
+                    }
+                }
+                return Ok(());
+            }
             let v = o.store.list_signals()?;
             let lines: Vec<String> = v
                 .iter()
+                .filter(|(s, ..)| id.as_deref().is_none_or(|i| s.strategy_id.starts_with(i)))
                 .map(|(s, t, _)| {
                     format!(
                         "{}  {}  target={:.2}  {}  [OBSERVE ONLY]",
