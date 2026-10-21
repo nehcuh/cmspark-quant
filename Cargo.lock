@@ -1096,6 +1096,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmsq-paper"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "cmsq-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

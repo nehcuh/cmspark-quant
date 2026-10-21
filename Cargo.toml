@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/cmsq-core", "crates/cmsq-cli", "crates/cmsq-dashboard"]
-default-members = ["crates/cmsq-core", "crates/cmsq-cli"]
+members = ["crates/cmsq-core", "crates/cmsq-cli", "crates/cmsq-dashboard", "crates/cmsq-paper"]
+default-members = ["crates/cmsq-core", "crates/cmsq-cli", "crates/cmsq-paper"]
 exclude = ["third_party/rstdx"]
 
 [workspace.package]
