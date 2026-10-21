@@ -109,6 +109,11 @@ pub struct InstrumentSetup {
     pub prev_close: f64,
     #[serde(default)]
     pub suspended: bool,
+    /// exchange-published limits by trading day (YYYY-MM-DD -> (up, down)), e.g. tushare
+    /// stk_limit / ft_limit. Used when the quote itself carries no limits (stored ticks,
+    /// replayed bars); takes precedence over the rule-derived band.
+    #[serde(default)]
+    pub exchange_limits: std::collections::BTreeMap<String, (f64, f64)>,
 }
 
 /// One incoming quote. `cum_volume` is the trading day's cumulative volume
@@ -467,7 +472,11 @@ impl PaperEngine {
                 Some(round_tick(pc * (1.0 - spec.limit_pct), spec.tick)),
             ),
         };
-        (qu.or(cu), ql.or(cl))
+        let (eu, el) = match i.setup.exchange_limits.get(&day) {
+            Some(&(u, l)) => (Some(u), Some(l)),
+            None => (None, None),
+        };
+        (qu.or(eu).or(cu), ql.or(el).or(cl))
     }
 
     fn reject(

@@ -46,6 +46,7 @@ fn ashare(cfg: PaperConfig) -> PaperEngine {
         },
         prev_close: 10.0,
         suspended: false,
+        exchange_limits: Default::default(),
     });
     e
 }
@@ -58,6 +59,7 @@ fn fut(sym: &str) -> PaperEngine {
         },
         prev_close: 3500.0,
         suspended: false,
+        exchange_limits: Default::default(),
     });
     e
 }
@@ -486,6 +488,7 @@ fn run(cfg: PaperConfig) -> (String, f64) {
         },
         prev_close: 3500.0,
         suspended: false,
+        exchange_limits: Default::default(),
     });
     for (i, qu) in tape().iter().enumerate() {
         e.on_quote(qu);
@@ -545,4 +548,44 @@ fn qifi_export_is_marked_simulated() {
     assert!(v["cmsq"]["broker"].is_null());
     assert_eq!(v["positions"]["FUT_RB"]["volume_long"], 1);
     assert_eq!(v["trades"].as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn exchange_published_limits_override_rule_band_but_not_quote_limits() {
+    let s = strat(StrategyStatus::Promoted);
+    let buy = |e: &mut PaperEngine, px: f64| {
+        e.submit(
+            &s,
+            "SH600000",
+            Side::Buy,
+            Offset::Open,
+            OrderKind::Limit { price: px },
+            100,
+            "t",
+        )
+    };
+    // rule band alone (prev 10, ±10%): 10.80 is inside
+    let mut plain = ashare(PaperConfig::default());
+    plain.on_quote(&q("SH600000", D1, "09:30:00", 10.0, 1000.0, 9.99, 10.01));
+    assert!(buy(&mut plain, 10.8).is_ok());
+    // exchange data says the band that day is [9.50, 10.50] (e.g. ST/odd reference): rejected
+    let mut e = PaperEngine::new(PaperConfig::default());
+    e.add_instrument(InstrumentSetup {
+        symbol: "SH600000".into(),
+        market: Market::AShare {
+            rules: Rules::default(),
+        },
+        prev_close: 10.0,
+        suspended: false,
+        exchange_limits: [(D1.to_string(), (10.5, 9.5))].into_iter().collect(),
+    });
+    e.on_quote(&q("SH600000", D1, "09:30:00", 10.0, 1000.0, 9.99, 10.01));
+    assert!(buy(&mut e, 10.8).unwrap_err().0.contains("price band"));
+    assert!(buy(&mut e, 10.5).is_ok());
+    // a live quote that carries its own limits wins
+    let mut lq = q("SH600000", D1, "09:31:00", 10.0, 1100.0, 9.99, 10.01);
+    lq.upper_limit = Some(11.0);
+    lq.lower_limit = Some(9.0);
+    e.on_quote(&lq);
+    assert!(buy(&mut e, 10.8).is_ok());
 }

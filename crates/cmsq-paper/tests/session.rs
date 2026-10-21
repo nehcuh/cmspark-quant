@@ -47,6 +47,7 @@ fn engine() -> PaperEngine {
         },
         prev_close: 3500.0,
         suspended: false,
+        exchange_limits: Default::default(),
     });
     e
 }

@@ -219,6 +219,19 @@ enum DataCmd {
     },
     /// Per-source health / cooldown / rate-limit state
     Sources,
+    /// Exchange-published daily price limits (tushare stk_limit / ft_limit) into
+    /// data/<SYMBOL>.limits.csv; paper trading uses them when quotes carry no limits
+    Limits {
+        /// SH600519, or a futures product FUT_RB together with --contract
+        symbol: String,
+        /// futures contract (CTP instrument id, e.g. rb2601); limits are stored under it
+        #[arg(long)]
+        contract: Option<String>,
+        #[arg(long, default_value = "2015-01-01")]
+        start: String,
+        #[arg(long)]
+        end: Option<String>,
+    },
     /// Import a CSV (date,open,high,low,close,volume[,adj_factor]) as SYMBOL
     Import {
         symbol: String,
@@ -1284,6 +1297,54 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Data {
+            cmd:
+                DataCmd::Limits {
+                    symbol,
+                    contract,
+                    start,
+                    end,
+                },
+        } => {
+            let t = cmsq_core::data::tushare::Tushare::from_secrets(&o.home.secrets)?;
+            let end = end.unwrap_or_else(chrono_today);
+            let (code, fut, symbol) = match cmsq_core::futures::spec_for(&symbol) {
+                Some(spec) => {
+                    let c = contract.context("futures need --contract (e.g. rb2601)")?;
+                    anyhow::ensure!(
+                        c.to_uppercase().starts_with(&spec.product)
+                            && c.len() <= 12
+                            && c.chars().all(|x| x.is_ascii_alphanumeric()),
+                        "contract {c} is not a {} contract",
+                        spec.product
+                    );
+                    (format!("{}.{}", c.to_uppercase(), spec.ts_suffix), true, c)
+                }
+                None => (cmsq_core::data::tushare::ts_code(&symbol)?, false, symbol),
+            };
+            let rows = t.price_limits(&code, fut, &start, &end).await?;
+            anyhow::ensure!(
+                !rows.is_empty(),
+                "tushare returned no price limits for {code}"
+            );
+            std::fs::create_dir_all(o.home.data_dir())?;
+            let p = limits_path(&o.home.data_dir(), &symbol);
+            let mut csv = String::from("date,up_limit,down_limit\n");
+            for (d, u, l) in &rows {
+                csv.push_str(&format!("{d},{u},{l}\n"));
+            }
+            std::fs::write(&p, &csv)?;
+            let sha = cmsq_core::calendars::sha256_hex(csv.as_bytes());
+            o.store.audit("data", "price_limits_fetch", Some(&symbol), serde_json::json!({"source": if fut {"tushare ft_limit"} else {"tushare stk_limit"}, "ts_code": code, "days": rows.len(), "first": rows[0].0, "last": rows[rows.len()-1].0, "snapshot_sha256": sha}), true)?;
+            out(
+                serde_json::json!({"symbol": symbol, "days": rows.len(), "path": p}),
+                format!(
+                    "{} days of exchange price limits for {code} -> {}",
+                    rows.len(),
+                    p.display()
+                ),
+            );
+        }
+        Cmd::Data {
             cmd: DataCmd::Calendar { start, exchange },
         } => {
             let t = cmsq_core::data::tushare::Tushare::from_secrets(&o.home.secrets)?;
@@ -1644,6 +1705,7 @@ fn paper_cmd(
                 market,
                 prev_close,
                 suspended: false,
+                exchange_limits: read_limits(&o.home.data_dir(), &inst),
             });
             let id = session.unwrap_or_else(|| {
                 format!(
@@ -1778,6 +1840,31 @@ async fn md_cmd(
         }
     }
     Ok(())
+}
+
+fn limits_path(data: &std::path::Path, symbol: &str) -> std::path::PathBuf {
+    data.join(format!("{symbol}.limits.csv"))
+}
+
+/// data/<SYMBOL>.limits.csv -> trading day -> (up, down); empty when absent/unparseable rows
+fn read_limits(
+    data: &std::path::Path,
+    symbol: &str,
+) -> std::collections::BTreeMap<String, (f64, f64)> {
+    let mut m = std::collections::BTreeMap::new();
+    if let Ok(s) = std::fs::read_to_string(limits_path(data, symbol)) {
+        for l in s.lines().skip(1) {
+            let f: Vec<&str> = l.split(',').collect();
+            if let [d, u, dn] = f[..] {
+                if let (Ok(u), Ok(dn)) = (u.parse::<f64>(), dn.parse::<f64>()) {
+                    if u.is_finite() && dn.is_finite() && u > dn && dn > 0.0 {
+                        m.insert(d.to_string(), (u, dn));
+                    }
+                }
+            }
+        }
+    }
+    m
 }
 
 fn chrono_today() -> String {
