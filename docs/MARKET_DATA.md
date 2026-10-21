@@ -51,6 +51,11 @@ Evaluated `/workspace/huquant` @ `928aff4`:
 * **Cross-source validation**: after the primary succeeds, the next reachable source is fetched and **raw closes are compared day by day** (volume-0 filler days skipped). A day with a >0.1% difference is flagged. The result goes into `meta.extra.validation` (`ok` | `divergent` | `unvalidated`, plus a sample of the divergent days). Gate check `data_cross_validated` **fails** for `divergent` and for `unvalidated` real data (synthetic samples pass; a user CSV passes, labelled "user attests").
 * **Provenance + snapshots**: `meta.json` records source, endpoint, fetch time, router attempts, validators and adjustment. The cache CSV is mode 0444, and an immutable content-addressed copy is written to `data/snapshots/<sha256>.csv`. The sha goes into meta and into the audit chain (`market_data_fetch`). A backtest refuses to run if the cache no longer matches its snapshot sha.
 * **Trade calendar**: `cmsq data calendar` saves the SSE `trade_cal` to `data/_calendar_SSE.txt` (audited).
+  `cmsq data calendar --exchange futures` (or one of SHFE DCE CZCE CFFEX INE GFEX) saves each futures exchange's
+  `trade_cal` to `data/_calendar_<EX>.txt` (sha256 in the audit entry). Used for CTP trading-day labels
+  (night session → next trading day across holidays), the holiday-eve "no night session" flag, and futures
+  calendar-gap filling. Without a snapshot the only fallback is "weekdays open", reported as such
+  (`md` audit entry `calendars`). No holiday is hard-coded.
 * **Native replay** (replaces huquant BarPlayer/Strategy): `cmsq_core::replay` provides `Calendar`, `Strategy` trait, `BarPlayer` (the strategy only ever gets `bars[..=i]`), and `MaCrossover`/`Momentum`/`BuyAndHold`. `cmsq replay <SYM> --strategy …` is a reference run, **not gated**. The Docker test asserts that BarPlayer reproduces the sandboxed runner's ma_crossover positions bar for bar.
 * **Real-data e2e**: `scripts/e2e_real.sh` (output in `docs/e2e-real-output.txt`).
 

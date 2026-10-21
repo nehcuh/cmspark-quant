@@ -115,6 +115,11 @@ if [ "$(vst "$PASS")" = GatePassed ]; then
   $V promote "$PASS" --confirm "PROMOTE $PASS" || echo "(vault decided: not promoted)"
   FINAL=$(vst "$PASS"); echo "final: $FINAL"
   case "$FINAL" in Promoted|Rejected) ;; *) bad "after vault, status $FINAL";; esac
+  if [ "$FINAL" = Promoted ]; then
+    echo "-- optional QIFI export (observe-only paper account):"; $V export-qifi "$PASS" || bad "QIFI export failed"
+  else
+    $V export-qifi "$PASS" >/dev/null 2>&1 && bad "QIFI export allowed for a non-promoted strategy" || echo "   QIFI export refused for $FINAL (expected)"
+  fi
   echo "-- the vault is one-shot:"; $V promote "$PASS" --confirm "PROMOTE $PASS" && bad "vault reused" || true
   echo "-- a re-post of the same idea (new title/text) gets no fresh vault:"
   python3 - fixtures/posts/ma_crossover.json > "$V_HOME/drop/repost.json" <<'PY'

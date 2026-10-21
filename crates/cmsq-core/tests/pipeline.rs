@@ -242,3 +242,34 @@ async fn docker_reviewer_attacks_never_pass() {
     }
     assert!(o.store.verify_audit().unwrap().ok);
 }
+
+#[tokio::test]
+async fn qifi_export_of_promoted_paper_account() {
+    use cmsq_core::market::Bar;
+    let (_d, o) = setup().await;
+    let id = add(&o, "posts", "ma_crossover").await.unwrap();
+    assert!(o.export_qifi(&id, None).is_err(), "not promoted yet");
+    let spec = cmsq_core::futures::spec_for("FUT_RB").unwrap();
+    let bars: Vec<Bar> = (0..10).map(|i| Bar { date: format!("2024-01-{:02}", i + 2), open: 4000.0 + i as f64, high: 4010.0, low: 3990.0, close: 4001.0 + i as f64, volume: 1e5, adj_factor: Some(1.0) }).collect();
+    let pos: Vec<f64> = (0..10).map(|i| if i < 6 { 1.0 } else { -0.5 }).collect();
+    let sim = cmsq_core::futures::simulate(&spec, &bars, &pos, &Default::default(), &Default::default());
+    let acct = cmsq_core::qifi::account_inputs("FUT_RB", Some(&spec), &sim, &bars, 5);
+    let job = cmsq_core::JobRecord { id: uuid::Uuid::new_v4().to_string(), strategy_id: id.clone(), backend: "docker".into(), image: "x".into(), symbol: "FUT_RB".into(),
+        data_source: "t".into(), status: "running".into(), exit_code: None, started_at: chrono::Utc::now(), finished_at: None, duration_ms: None, job_dir: "/tmp".into(),
+        error: None, result: None, owner_pid: None, runner_identity: None, kind: "vault".into(), owner_host: None };
+    o.store.insert_job(&job).unwrap();
+    o.store.finish_job(&job.id, "succeeded", Some(0), 1, None, Some(&serde_json::json!({"passed": true, "account": acct}))).unwrap();
+    o.store.insert_signal(&cmsq_core::Signal { strategy_id: id.clone(), job_id: job.id.clone(), symbol: "FUT_RB".into(), date: "2024-01-11".into(), target_position: -0.5, created_at: chrono::Utc::now() }).unwrap();
+    o.store.set_status(&id, StrategyStatus::Promoted, None).unwrap();
+    let out = _d.path().join("q.json");
+    let (p, q) = o.export_qifi(&id, Some(&out)).unwrap();
+    assert_eq!(p, out);
+    let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+    assert_eq!(disk, q);
+    assert!(q["positions"]["SHFE.RB"]["volume_short"].as_f64().unwrap() > 0.0, "{q:#}");
+    assert!(q["trades"].as_object().unwrap().values().any(|t| t["offset"] == "CLOSE"), "flip inside the vault window closes the long");
+    assert_eq!(q["orders"], serde_json::json!({}));
+    assert_eq!(q["cmsq"]["signals"][0]["target_position"], -0.5);
+    let a = o.store.audit_entries(Some(&id), 50).unwrap().into_iter().find(|e| e.action == "qifi_export").unwrap();
+    assert_eq!(a.details["sha256"].as_str().unwrap().len(), 64);
+}

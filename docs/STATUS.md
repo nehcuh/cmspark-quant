@@ -108,7 +108,28 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * DEV(bwrap) 后端缺少 vnpy_shim.py → 已随 runner 一起写入。
 * Dashboard 原来只读 SQLite → 改为按配置只读打开（PG 用运行时角色，不跑迁移）。
 * e2e 中 `| head` 触发 SIGPIPE 导致误报失败 → 改为先写文件再看。
-* 新增缺口：CLI 进程从 db.env 读取了 owner URL（只用于迁移）；交易日归属没有节假日表；回放源不能代替实网验证。
+* 新增缺口：CLI 进程从 db.env 读取了 owner URL（只用于迁移）；回放源不能代替实网验证。（节假日表已在第 10 节补上。）
+
+## 10. 本轮（2026-10-21）：平今、交易所日历、QIFI 导出、交易统计
+* **A 平今手续费**：每笔开仓按交易日打标签（逐日 lot 账本）；平仓按交易所顺序消耗 lot——大商所、郑商所、广期所先开先平，
+  中金所先平今，上期所和能源中心由交易者指定（按"较便宜的一档先平"建模）。当日开当日平的 lot 收平今档手续费。
+  可在 `CMSQ_FUTURES_SPECS` 里按品种设 `close_order` 覆盖。日线下开平总在不同交易日，所以平今档不会出现（有测试锁定）；
+  新的 `futures::simulate_session` 支持分钟 K 线和交易日标签，夜盘开仓、次日上午平仓也算平今。
+  设计只参考了 qa-rs 的思路（该仓库没有许可证），没有拷贝代码或数据。
+* **B 交易所日历**：`cmsq data calendar --exchange futures` 拉取六家期货交易所的 tushare trade_cal 快照
+  （本机实测 SHFE/DCE/CZCE/CFFEX 各 3160 个交易日，INE 2580，GFEX 1220，覆盖到 2027-12-31，sha256 写入审计）。
+  CTP 行情的交易日归属改用对应交易所的日历；节前没有夜盘的 tick 会计入 `no_night_session_per_calendar`
+  （只标记不丢弃，因为 7x24 仿真前置本来就会推这类 tick）。期货的日历缺口填补也改用交易所日历。
+  没有快照时退回"工作日都开市"，并在报告里写明。
+* **C QIFI 导出（可选）**：`cmsq export-qifi <id> [--out]` 只对已晋升的策略开放，按 QIFI 布局（accounts / positions / trades / orders）
+  导出 vault 窗口内的模拟账户和观察信号。`orders` 恒为空，并标注 `cmsq.observe_only=true`；导出写审计并记录 sha256。
+  vault 结果里新增 `account` 快照；2.2.1 之前的 vault 结果没有这份快照，会被拒绝导出。
+* **D 交易级统计（只展示）**：根据宿主机记录的成交逐笔 FIFO 配对，在复权价尺度上计算胜率、盈亏比、盈利因子、平均/最长持仓 bar 数，
+  换月腿成本单独列出。开发期和 vault 的 `result.json` 都带 `trade_stats`（`display_only: true`）。
+  门禁不读取它，有单元测试检查 gate.rs 不引用该模块。
+* Dashboard：每个 run 下面显示交易统计和平今成本；通过 vault 的 run 再显示 QIFI 账户摘要。
+* 对抗审查记录见 `docs/reviews/06-pingjin-calendar-qifi-tradestats.md`。
+* 验证：`cargo test` 全部通过（core 单元测试 81 个，另有集成测试），clippy 0 告警，`test_docker.sh` 通过，`e2e.sh` 通过（E2E OK）。
 
 ## 9. 后续阶段
 * **P1：组合与参数扫描。** 多标的组合回测、参数网格扫描。每个参数点都计入全库 trial 账本和 DSR 的 N，
