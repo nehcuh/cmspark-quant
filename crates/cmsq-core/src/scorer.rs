@@ -1326,6 +1326,120 @@ pub fn regime_slices(market: &[f64], strat: &[f64], from: usize, to: usize) -> V
         .collect()
 }
 
+/// One out-of-sample fold of a re-fit (anchored) walk-forward.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RefitFold {
+    pub fold: usize,
+    /// index into the candidate list chosen for this fold
+    pub chosen: usize,
+    /// per-bar Sharpe of the chosen candidate on its training window
+    pub train_sharpe_daily: f64,
+    /// training window is bars `[1, train_end)` (everything before the fold)
+    pub train_end: usize,
+    pub oos: Metrics,
+}
+
+/// Fold `k` of `folds` over the scoring window `[warm, end)`: `(start, end)`.
+pub fn fold_bounds(warm: usize, end: usize, folds: usize, k: usize) -> (usize, usize) {
+    let len = (end - warm) / folds.max(1);
+    (
+        warm + k * len,
+        if k + 1 == folds {
+            end
+        } else {
+            warm + (k + 1) * len
+        },
+    )
+}
+
+/// Anchored walk-forward with a re-fit per fold: for every fold, pick the
+/// candidate (e.g. sweep point) with the best Sharpe on all bars BEFORE the fold,
+/// then score only that candidate on the fold. The fold results are therefore
+/// out-of-sample with respect to parameter selection, unlike fixed-parameter folds
+/// of a point that was itself chosen on the whole window.
+pub fn refit_walk_forward(
+    bars: &[Bar],
+    sims: &[SimResult],
+    warm: usize,
+    end: usize,
+    folds: usize,
+) -> Vec<RefitFold> {
+    if sims.is_empty() || folds == 0 || end <= warm + folds {
+        return vec![];
+    }
+    (0..folds)
+        .map(|k| {
+            let (a, b) = fold_bounds(warm, end, folds, k);
+            let (chosen, train) = sims
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    (
+                        i,
+                        if a > 2 {
+                            metrics(bars, s, 1, a).sharpe_daily
+                        } else {
+                            0.0
+                        },
+                    )
+                })
+                .fold(
+                    (0, f64::NEG_INFINITY),
+                    |acc, x| if x.1 > acc.1 { x } else { acc },
+                );
+            RefitFold {
+                fold: k,
+                chosen,
+                train_sharpe_daily: train,
+                train_end: a,
+                oos: metrics(bars, &sims[chosen], a, b),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod refit_tests {
+    use super::*;
+    fn bars(n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| Bar {
+                date: format!("d{i:04}"),
+                ..Default::default()
+            })
+            .collect()
+    }
+    fn sim(rets: impl Fn(usize) -> f64, n: usize) -> SimResult {
+        let mut e = vec![1.0];
+        for t in 1..n {
+            e.push(e[t - 1] * (1.0 + rets(t)));
+        }
+        SimResult {
+            equity: e,
+            exposure: vec![1.0; n],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn refit_picks_on_past_only() {
+        let n = 500;
+        let b = bars(n);
+        // A wins in the first half, B in the second half (noise keeps Sharpe finite)
+        let wig = |t: usize| if t.is_multiple_of(2) { 0.001 } else { -0.001 };
+        let a = sim(|t| wig(t) + if t < 250 { 0.002 } else { -0.002 }, n);
+        let bb = sim(|t| wig(t) + if t < 250 { -0.002 } else { 0.002 }, n);
+        let f = refit_walk_forward(&b, &[a, bb], 100, n, 4);
+        assert_eq!(f.len(), 4);
+        // folds start at 100,200,300,400: training data before 300 favours A,
+        // so the re-fit keeps choosing A and loses out-of-sample in the B regime
+        assert_eq!(f[2].chosen, 0);
+        assert!(f[2].oos.total_return < 0.0);
+        assert!(f
+            .iter()
+            .all(|x| x.train_end == fold_bounds(100, n, 4, x.fold).0));
+    }
+}
+
 #[cfg(test)]
 mod regime_tests {
     use super::*;

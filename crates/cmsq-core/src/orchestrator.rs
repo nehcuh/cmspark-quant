@@ -1286,6 +1286,7 @@ impl Orchestrator {
             dev_bars: dev.to_vec(),
             result,
             high_risks: high,
+            exposure: sim.exposure.clone(),
             equity: sim.equity,
             synthetic,
             capacity,
@@ -1638,9 +1639,18 @@ impl Orchestrator {
         outs.sort_by_key(|o| o.0);
         let mut table = vec![];
         let mut best: Option<Box<Scored>> = None;
+        // probe-clean candidates for the re-fit walk-forward: (point, equity, exposure)
+        let mut cands: Vec<(usize, scorer::SimResult)> = vec![];
+        let mut dev_bars: Vec<Bar> = vec![];
         for (i, o) in outs {
             match o {
                 Ok(RunOutcome::Scored(sc)) => {
+                    if !sc.probe.detected {
+                        cands.push((i, scorer::SimResult { equity: sc.equity.clone(), exposure: sc.exposure.clone(), ..Default::default() }));
+                        if dev_bars.is_empty() {
+                            dev_bars = sc.dev_bars.clone();
+                        }
+                    }
                     table.push(json!({"point": i, "params": points[i], "job": sc.job_id, "status": "succeeded", "sharpe": sc.dm.sharpe, "total_return": sc.dm.total_return,
                         "max_drawdown": sc.dm.max_drawdown, "dsr_at_record": sc.dsr.dsr, "lookahead": sc.probe.detected}));
                     if !sc.probe.detected && best.as_ref().is_none_or(|b| sc.dm.sharpe > b.dm.sharpe) {
@@ -1676,12 +1686,25 @@ impl Orchestrator {
         // the selected point is judged against the FINAL ledger (all K points recorded)
         let (dsr, info) = self.dsr_for(&self.store.trials()?, &best.dm);
         best.dsr = dsr.clone();
+        // walk-forward is judged on re-fit folds: per fold the point is chosen on
+        // earlier bars only, so selecting the best point does not leak into the folds
+        let dev_end = dev_bars.len();
+        let warm = ((dev_end as f64) * self.warmup_frac) as usize;
+        let sims: Vec<scorer::SimResult> = cands.iter().map(|c| c.1.clone()).collect();
+        let refit = scorer::refit_walk_forward(&dev_bars, &sims, warm, dev_end, self.folds);
+        if !refit.is_empty() {
+            best.folds = refit.iter().map(|f| f.oos.clone()).collect();
+        }
+        let refit_json: Vec<serde_json::Value> = refit
+            .iter()
+            .map(|f| json!({"fold": f.fold, "point": cands[f.chosen].0, "params": points[cands[f.chosen].0], "train_bars": f.train_end, "train_sharpe_daily": f.train_sharpe_daily, "oos": f.oos}))
+            .collect();
         let (st, reasons) = self.conclude(
             &s,
             &best,
-            json!({"sweep_run": run_id, "points": table.len(), "trial_info": info}),
+            json!({"sweep_run": run_id, "points": table.len(), "trial_info": info, "walk_forward_refit": refit_json}),
         )?;
-        let r = json!({"points": table, "best": {"job": best.job_id, "params": best.params, "development": best.dm, "dsr": dsr, "trial_info": info}, "status": st, "reasons": reasons});
+        let r = json!({"points": table, "best": {"job": best.job_id, "params": best.params, "development": best.dm, "dsr": dsr, "trial_info": info}, "walk_forward_refit": refit_json, "status": st, "reasons": reasons});
         self.store.finish_run(&run_id, "succeeded", &r)?;
         Ok(SweepSummary {
             run_id,
@@ -2621,6 +2644,7 @@ pub struct Scored {
     pub result: serde_json::Value,
     pub high_risks: Vec<String>,
     pub equity: Vec<f64>,
+    pub exposure: Vec<f64>,
     pub synthetic: bool,
     pub capacity: Option<f64>,
     pub roll_unpriced: usize,
