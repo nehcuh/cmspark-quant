@@ -53,6 +53,11 @@ pub struct SampleSource;
 
 const SAMPLES: &[(&str, &str, &str)] = &[
     (
+        "SAMPLE_DEMO",
+        include_str!("../../../fixtures/market/SAMPLE_DEMO.csv"),
+        include_str!("../../../fixtures/market/SAMPLE_DEMO.meta.json"),
+    ),
+    (
         "SAMPLE_TREND",
         include_str!("../../../fixtures/market/SAMPLE_TREND.csv"),
         include_str!("../../../fixtures/market/SAMPLE_TREND.meta.json"),
@@ -257,6 +262,10 @@ impl MarketDataSource for SampleSource {
             )
         })?;
         let mut bars = parse_csv(csv)?;
+        // DEMO only: simulate the passage of time on a synthetic series (never real data)
+        if let Ok(asof) = std::env::var("CMSQ_SAMPLE_AS_OF") {
+            bars.retain(|b| b.date <= asof);
+        }
         if bars.len() > count {
             bars.drain(..bars.len() - count);
         }

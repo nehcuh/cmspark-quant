@@ -452,6 +452,11 @@ impl PaperEngine {
         self.account.cash - self.account.frozen - self.account.margin
     }
 
+    /// (up, down) price band in force for `sym` at quote `q` (quote > exchange data > rules)
+    pub fn price_band(&self, sym: &str, q: Option<&Quote>) -> (Option<f64>, Option<f64>) {
+        self.limits(sym, q)
+    }
+
     fn limits(&self, sym: &str, q: Option<&Quote>) -> (Option<f64>, Option<f64>) {
         let i = &self.inst[sym];
         let (qu, ql) = q

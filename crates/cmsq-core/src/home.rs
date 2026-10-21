@@ -154,6 +154,11 @@ impl Home {
             chain,
         })
     }
+    /// A DEMO workspace (file `DEMO` in the root): synthetic-validated, not evidence.
+    /// CLI and dashboard show a banner; created only by scripts/paper_demo.sh.
+    pub fn is_demo(&self) -> bool {
+        self.root.join("DEMO").exists()
+    }
     pub fn from_env() -> Self {
         Self::new(std::env::var("CMSQ_HOME").unwrap_or_else(|_| "var".into()))
     }

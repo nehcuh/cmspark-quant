@@ -455,3 +455,47 @@ mod tests {
         );
     }
 }
+
+/// Live-decay flags on the out-of-sample segment since promotion (display-only: the
+/// strategy's status is NOT changed automatically). Thresholds: drawdown worse than
+/// -20%, or (with >= 60 live bars) annualised Sharpe below -0.5.
+pub fn live_decay(live: Option<&crate::scorer::Metrics>) -> serde_json::Value {
+    let Some(m) = live else {
+        return serde_json::json!({"flagged": false, "reasons": [], "note": "no live bars yet"});
+    };
+    let mut reasons = vec![];
+    if m.max_drawdown < -0.20 {
+        reasons.push(format!(
+            "live max drawdown {:.1}% < -20%",
+            m.max_drawdown * 100.0
+        ));
+    }
+    if m.bars >= 60 && m.sharpe < -0.5 {
+        reasons.push(format!(
+            "live Sharpe {:.2} < -0.5 over {} bars",
+            m.sharpe, m.bars
+        ));
+    }
+    serde_json::json!({"flagged": !reasons.is_empty(), "reasons": reasons, "bars": m.bars,
+        "policy": "display-only flag; status unchanged, a human decides (reject manually)"})
+}
+
+#[cfg(test)]
+mod live_decay_tests {
+    #[test]
+    fn flags_drawdown_and_sharpe_only_with_enough_bars() {
+        let mut m = crate::scorer::Metrics {
+            bars: 30,
+            sharpe: -2.0,
+            max_drawdown: -0.05,
+            ..Default::default()
+        };
+        assert_eq!(super::live_decay(Some(&m))["flagged"], false);
+        m.bars = 60;
+        assert_eq!(super::live_decay(Some(&m))["flagged"], true);
+        m.sharpe = 1.0;
+        m.max_drawdown = -0.25;
+        assert_eq!(super::live_decay(Some(&m))["flagged"], true);
+        assert_eq!(super::live_decay(None)["flagged"], false);
+    }
+}

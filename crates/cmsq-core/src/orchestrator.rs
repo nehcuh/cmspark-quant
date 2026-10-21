@@ -601,10 +601,15 @@ impl Orchestrator {
         }
         let bars = market::parse_csv(&text)?;
         if att.details["source"] == "sample" {
-            let (sb, _) = market::SampleSource
+            let (mut sb, _) = market::SampleSource
                 .daily_bars(symbol, usize::MAX)
                 .await
                 .map_err(|_| fail("source=sample but not a bundled sample".into()))?;
+            // a DEMO snapshot may be a contiguous window of the bundled series
+            // (CMSQ_SAMPLE_AS_OF / count): compare against the same window
+            if let (Some(a), Some(b)) = (bars.first(), bars.last()) {
+                sb.retain(|x| x.date >= a.date && x.date <= b.date);
+            }
             if hex::encode(sha2::Sha256::digest(market::to_csv(&sb, true).as_bytes())) != sha {
                 return Err(fail(
                     "source=sample but bars differ from the bundled sample".into(),
@@ -2251,6 +2256,212 @@ impl Orchestrator {
             true,
         )?;
         self.get(&s.id)
+    }
+
+    /// Daily signal refresh for a PROMOTED strategy (observe-only). Reruns the exact gated
+    /// code + params in the sandbox on the CURRENT signed snapshot of the SAME symbol, with
+    /// look-ahead/consistency probes concentrated on the bars added since the last signal,
+    /// then appends one signal per new bar (history kept). Live decay since promotion is
+    /// computed on the host and FLAGGED (display-only; the status is not changed — a human
+    /// decides; see docs/SIGNALS.md). Every refresh is audited.
+    pub async fn refresh_signals(
+        &self,
+        id: &str,
+        exec: &dyn SandboxExecutor,
+    ) -> Result<serde_json::Value> {
+        let s = self.get(id)?;
+        anyhow::ensure!(
+            s.status == StrategyStatus::Promoted,
+            "signal refresh is only for Promoted strategies ({} is {})",
+            &s.id[..8],
+            s.status
+        );
+        if !exec.hardened() && self.gate.require_hardened_backend {
+            anyhow::bail!("signal refresh requires the Docker backend");
+        }
+        let jobs = self.store.list_jobs(Some(&s.id))?;
+        let vault = jobs
+            .iter()
+            .find(|j| j.kind == "vault" && j.status == "succeeded")
+            .context("no successful vault job")?;
+        let symbol = vault.symbol.clone();
+        let params = vault
+            .result
+            .as_ref()
+            .and_then(|r| r.get("params").cloned())
+            .filter(|p| p.is_object())
+            .context("vault params missing")?;
+        let promoted_end = vault
+            .result
+            .as_ref()
+            .and_then(|r| r["latest_position"]["date"].as_str())
+            .context("vault end date missing")?
+            .to_string();
+        let mut hist: Vec<Signal> = self
+            .store
+            .list_signals()?
+            .into_iter()
+            .map(|x| x.0)
+            .filter(|g| g.strategy_id == s.id && g.symbol == symbol)
+            .collect();
+        hist.sort_by(|a, b| a.date.cmp(&b.date));
+        let last = hist
+            .last()
+            .map(|g| g.date.clone())
+            .unwrap_or(promoted_end.clone());
+        let (bars, _meta, att) = self.load_dataset(&symbol).await?;
+        let synthetic = !attested_real_data(&att, &symbol);
+        anyhow::ensure!(
+            !synthetic || self.gate.allow_synthetic,
+            "{symbol}: current snapshot is not an attested real-market fetch; refusing to emit signals"
+        );
+        let n = bars.len();
+        let from = bars.iter().position(|b| b.date > last).unwrap_or(n);
+        if from >= n {
+            let r = json!({"strategy": s.id, "symbol": symbol, "new_signals": 0, "last_signal": last, "note": "no new bars since the last signal (fetch data first)"});
+            self.store.audit(
+                "system",
+                "signal_refresh_noop",
+                Some(&s.id),
+                r.clone(),
+                true,
+            )?;
+            return Ok(r);
+        }
+        let (_, code) = Self::code_of(&s)?;
+        let fut = crate::futures::spec_for(&symbol);
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let jd = self.home.job_dir(&s.id, &job_id);
+        std::fs::create_dir_all(&jd)?;
+        let identity = exec.runner_identity(RUNNER_IMAGE).await;
+        self.store.insert_job(&JobRecord {
+            id: job_id.clone(),
+            strategy_id: s.id.clone(),
+            backend: exec.name().into(),
+            image: RUNNER_IMAGE.into(),
+            symbol: symbol.clone(),
+            data_source: att["source"].as_str().unwrap_or("-").into(),
+            status: "running".into(),
+            exit_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+            duration_ms: None,
+            job_dir: jd.display().to_string(),
+            error: None,
+            result: None,
+            owner_pid: None,
+            runner_identity: identity.clone(),
+            kind: "signal_refresh".into(),
+            owner_host: None,
+        })?;
+        // probes: random + tail cuts over the new region (at least the last 20 bars)
+        let lo_ix = from.min(n.saturating_sub(20)).max(1);
+        let view = probe::container_view(&bars);
+        let seed = Rng::from_uuid().next_u64();
+        let mut rng = Rng::new(seed);
+        let lim = match &fut {
+            Some(f) => f.limit_pct - 0.005,
+            None => scorer::limit_pct(&symbol, &bars[n - 1].date) - 0.005,
+        };
+        let pcfg = probe::ProbeConfig {
+            lo: lo_ix as f64 / n as f64,
+            ..self.probe.clone()
+        };
+        let (mut rcuts, tcuts) = probe::choose_cuts(n, lo_ix, &pcfg, &mut rng);
+        rcuts.insert(0, lo_ix);
+        let trunc: Vec<usize> = rcuts.iter().chain(&tcuts).copied().collect();
+        let mcuts = probe::strata_cuts(n, lo_ix, &pcfg, &mut rng);
+        let plan = probe::plan_with_mirrors(&view, &trunc, &rcuts, &mcuts, 1, lim, &mut rng);
+        self.store.audit("sandbox", "signal_refresh_start", Some(&s.id), json!({"job": job_id, "symbol": symbol, "dataset_sha256": att["snapshot_sha256"], "new_from": bars[from].date, "seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts}), true)?;
+        let t0 = std::time::Instant::now();
+        let outcome = self
+            .run_plan(
+                exec,
+                &jd,
+                &plan,
+                &code,
+                &params,
+                (
+                    if fut.is_some() { -1.0 } else { 0.0 },
+                    fut.as_ref().map(|f| f.tick).unwrap_or(0.01),
+                ),
+            )
+            .await;
+        let ms = t0.elapsed().as_millis() as i64;
+        let (full, rep) = match outcome {
+            Ok((f, r, _)) => (f, r),
+            Err((status, reason)) => {
+                self.store
+                    .finish_job(&job_id, &status, None, ms, Some(&reason), None)?;
+                self.store.audit(
+                    "sandbox",
+                    "signal_refresh_failed",
+                    Some(&s.id),
+                    json!({"job": job_id, "status": status, "reason": reason}),
+                    false,
+                )?;
+                anyhow::bail!("signal refresh run failed ({status}): {reason}");
+            }
+        };
+        if rep.detected {
+            let r = json!({"job": job_id, "lookahead_probe": rep});
+            self.store.finish_job(
+                &job_id,
+                "failed",
+                Some(0),
+                ms,
+                Some("look-ahead/consistency probe failed"),
+                Some(&r),
+            )?;
+            self.store
+                .audit("sandbox", "signal_refresh_rejected", Some(&s.id), r, false)?;
+            anyhow::bail!(
+                "signal refresh rejected: look-ahead/consistency probe failed; no signals emitted"
+            );
+        }
+        // live decay since promotion (host, trusted): bars after the vault's last date
+        let rules: scorer::Rules = serde_json::from_value(att["rules"].clone()).unwrap_or_default();
+        let sim = match &fut {
+            Some(spec) => {
+                let fx = crate::futures::FuturesCosts::default();
+                match signed_rolls(&att) {
+                    Some(rs) => crate::futures::simulate_with_rolls(
+                        spec,
+                        &bars,
+                        &rs,
+                        &full,
+                        &fx,
+                        &self.costs,
+                    ),
+                    None => crate::futures::simulate(spec, &bars, &full, &fx, &self.costs),
+                }
+            }
+            None => scorer::simulate_with(&symbol, &bars, &full, &self.costs, &rules),
+        };
+        let live_from = bars.iter().position(|b| b.date > promoted_end).unwrap_or(n);
+        let live = (n - live_from >= 2).then(|| scorer::metrics(&bars, &sim, live_from, n));
+        let decay = crate::gate::live_decay(live.as_ref());
+        let mut added = vec![];
+        for i in from..n {
+            let g = Signal {
+                strategy_id: s.id.clone(),
+                job_id: job_id.clone(),
+                symbol: symbol.clone(),
+                date: bars[i].date.clone(),
+                target_position: full[i],
+                created_at: Utc::now(),
+            };
+            self.store.insert_signal(&g)?;
+            added.push(json!({"date": g.date, "target": g.target_position}));
+        }
+        let r = json!({"kind": "signal_refresh", "strategy": s.id, "symbol": symbol, "job": job_id, "dataset_sha256": att["snapshot_sha256"],
+            "synthetic_data": synthetic, "new_signals": added.len(), "signals": added, "lookahead_probe": rep,
+            "live": live, "live_decay": decay, "observe_only": true, "computed_by": "cmsq-core scorer (host, trusted)"});
+        std::fs::write(jd.join("result.json"), serde_json::to_string_pretty(&r)?)?;
+        self.store
+            .finish_job(&job_id, "succeeded", Some(0), ms, None, Some(&r))?;
+        self.store.audit("system", "signal_refresh", Some(&s.id), json!({"job": job_id, "new_signals": added.len(), "first": bars[from].date, "last": bars[n-1].date, "dataset_sha256": att["snapshot_sha256"], "live_decay": decay}), true)?;
+        Ok(r)
     }
 
     /// Optional QIFI-style export of a PROMOTED strategy's observe-only paper

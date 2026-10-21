@@ -1,0 +1,12 @@
+{
+  "symbol": "SAMPLE_DEMO",
+  "source": "synthetic",
+  "label": "SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES (DEMO)",
+  "generator": "SAMPLE_PERSIST generator (same seed) extended through 2020 on weekdays; paper-trading DEMO only (scripts/paper_demo.sh)",
+  "seed": 2027,
+  "calendar": "SSE dates through 2019, plain weekdays in 2020",
+  "start": "2015-01-05",
+  "end": "2020-12-31",
+  "bars": 1482,
+  "adjustment": "n/a"
+}
