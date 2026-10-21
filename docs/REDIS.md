@@ -1,6 +1,6 @@
 # Optional Redis hot layer
 
-`scripts/redis_up.sh` starts the `redis` compose service (profile `redis`, pinned digest, password from `<secrets>/redis_pw`, bound to 127.0.0.1:56379). It also writes `<secrets>/redis.env`. cmsq picks up the connection from `CMSQ_REDIS_URL` or from `redis.env`. Set `CMSQ_REDIS=off` to turn it off.
+`scripts/redis_up.sh` starts the `redis` compose service (profile `hot`, pinned digest, password from `<secrets>/redis_pw`, bound to 127.0.0.1:56379). It also writes `<secrets>/redis.env`. cmsq picks up the connection from `CMSQ_REDIS_URL` or from `redis.env`. Set `CMSQ_REDIS=off` to turn it off.
 
 | Use | Key / channel | Fallback without Redis |
 |---|---|---|

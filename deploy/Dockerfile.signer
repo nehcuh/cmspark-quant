@@ -1,0 +1,8 @@
+# Audit signer image: the host-built release `cmsq` binary (deploy.sh builds it) on Debian 13,
+# running as an unprivileged dedicated uid. Holds the audit key in a private volume.
+FROM debian:trixie-slim
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin cmsq-signer \
+ && install -d -o 10001 -g 10001 -m 0700 /var/lib/cmsq-signer
+COPY cmsq /usr/local/bin/cmsq
+USER 10001
+ENTRYPOINT ["/usr/local/bin/cmsq"]
