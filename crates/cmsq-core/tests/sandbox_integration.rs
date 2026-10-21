@@ -83,6 +83,50 @@ async fn docker_enforces_isolation() {
     check_probe(out.path());
 }
 
+const CLOCK_PROBE: &str = r#"
+import ctypes, json, os, time
+libc = ctypes.CDLL(None, use_errno=True)
+buf = (ctypes.c_long * 2)()
+res = {"time_time_year": time.gmtime(time.time()).tm_year}
+for name, nr, clk in [("realtime", 228, 0), ("realtime_coarse", 228, 5), ("tai", 228, 11), ("boottime", 228, 7), ("monotonic", 228, 1)]:
+    r = libc.syscall(nr, clk, buf)
+    res[name] = "ok" if r == 0 else "errno%d" % ctypes.get_errno()
+r = libc.syscall(96, buf, None)   # gettimeofday
+res["gettimeofday"] = "ok" if r == 0 else "errno%d" % ctypes.get_errno()
+r = libc.syscall(201, None)       # time
+res["time"] = "ok" if r >= 0 and r < 10**12 and r > 0 else "errno%d" % ctypes.get_errno()
+res["monotonic_py"] = time.monotonic() > 0
+open("/out/positions.csv", "w").write(json.dumps(res))
+"#;
+
+#[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
+async fn docker_denies_raw_wall_clock_syscalls() {
+    let d = docker().await;
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let r = d
+        .execute(&req(CLOCK_PROBE, ro.path(), out.path(), 60))
+        .await
+        .unwrap();
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path().join("positions.csv")).unwrap())
+            .unwrap();
+    assert_eq!(v["time_time_year"], 2000, "libfaketime frozen clock: {v}");
+    for k in [
+        "realtime",
+        "realtime_coarse",
+        "tai",
+        "boottime",
+        "gettimeofday",
+        "time",
+    ] {
+        assert_eq!(v[k], "errno1", "{k} must be denied: {v}");
+    }
+    assert_eq!(v["monotonic"], "ok", "{v}");
+    assert_eq!(v["monotonic_py"], true, "{v}");
+}
+
 #[tokio::test]
 #[ignore = "requires docker: scripts/test_docker.sh"]
 async fn docker_timeout_kills() {

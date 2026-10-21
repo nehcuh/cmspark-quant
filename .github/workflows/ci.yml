@@ -19,6 +19,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt -p cmsq-core -p cmsq-cli -p cmsq-paper --check
+      - name: seccomp profile up to date
+        run: python3 scripts/gen_seccomp.py --check
       - name: clippy
         run: cargo clippy -p cmsq-core -p cmsq-cli -p cmsq-paper --all-targets -- -D warnings
       - name: tests
