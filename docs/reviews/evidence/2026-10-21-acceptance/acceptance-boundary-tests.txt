@@ -1,0 +1,25 @@
+   Compiling cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+    Finished `test` profile [unoptimized] target(s) in 0.53s
+     Running tests/reviewer_boundaries.rs (/workspace/baseline/target/debug/deps/reviewer_boundaries-2f0b0a8969cb7d5d)
+
+running 5 tests
+test docker_cancellation_cleans_container ... ignored, bounded Docker cancellation acceptance
+test docker_host_copy_error_cleans_container ... ignored, bounded Docker cleanup acceptance
+test docker_inode_and_live_log_limits_hold ... ignored, bounded Docker acceptance
+new leg open=210, volume=0, roll_unpriced=0, roll_open=[Fill { t: 2, date: "2024-01-04", qty: 1000.0, price: 210.0, adj_price: 105.0, cost: 0.0, kind: "roll_open" }]
+
+thread 'new_roll_leg_must_be_executable' (63739226) panicked at crates/cmsq-core/tests/reviewer_boundaries.rs:35:9:
+non-executable new leg must not silently qualify
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test new_roll_leg_must_be_executable ... FAILED
+mutated signed source refused: audit log integrity failure: data attestation entry seq 3 fails its HMAC
+test signed_source_change_without_hmac_is_refused ... ok
+
+failures:
+
+failures:
+    new_roll_leg_must_be_executable
+
+test result: FAILED. 1 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p cmsq-core --test reviewer_boundaries`

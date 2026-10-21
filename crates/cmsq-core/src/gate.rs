@@ -83,7 +83,7 @@ pub struct GateInput<'a> {
     pub synthetic: bool,
     /// capacity estimate (CNY); None = no trades to estimate from
     pub capacity: Option<f64>,
-    /// futures: rolls held through without an executable old-leg price (issue #10)
+    /// futures: rolls held through without executable old and new legs (issue #10)
     pub roll_unpriced: usize,
 }
 
@@ -189,6 +189,14 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
         } else {
             "signed data source is not an independent real-market fetch (sample/csv/unknown): cannot pass the gate".into()
         },
+    );
+    check(
+        "futures_roll_ledger",
+        i.roll_unpriced == 0,
+        format!(
+            "{} roll(s) without executable old/new legs; approximations are display-only",
+            i.roll_unpriced
+        ),
     );
     check(
         "capacity",

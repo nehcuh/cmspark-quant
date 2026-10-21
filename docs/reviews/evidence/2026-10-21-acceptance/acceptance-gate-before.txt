@@ -1,0 +1,21 @@
+   Compiling cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+    Finished `test` profile [unoptimized] target(s) in 0.50s
+     Running tests/reviewer_boundaries.rs (/workspace/baseline/target/debug/deps/reviewer_boundaries-2f0b0a8969cb7d5d)
+
+running 1 test
+actual development gate with unpriced roll: passed=true, reasons=[]
+
+thread 'unpriced_roll_is_rejected_by_actual_gate' (63816126) panicked at crates/cmsq-core/tests/reviewer_boundaries.rs:49:5:
+assertion failed: !result.passed &&
+    result.reasons.iter().any(|r| r.starts_with("futures_roll_ledger"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test unpriced_roll_is_rejected_by_actual_gate ... FAILED
+
+failures:
+
+failures:
+    unpriced_roll_is_rejected_by_actual_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p cmsq-core --test reviewer_boundaries`

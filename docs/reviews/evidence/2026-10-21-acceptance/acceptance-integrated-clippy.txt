@@ -1,0 +1,2 @@
+    Checking cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+    Finished `dev` profile [unoptimized] target(s) in 0.27s

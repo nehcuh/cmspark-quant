@@ -1158,6 +1158,8 @@ impl Orchestrator {
             symbol,
             dataset_sha: &dataset_sha,
             bars: dm.bars,
+            score_start: &dm.start,
+            score_end: &dm.end,
             sharpe_daily: dm.sharpe_daily,
             positions: &full,
             lookahead: probe_rep.detected,
@@ -1291,7 +1293,7 @@ impl Orchestrator {
         (
             dsr,
             json!({"library_trials": all.len(), "idea_clusters": clusters, "configurations": configs, "selections": selections,
-            "counting_rule": "N = distinct (idea, params, symbol, snapshot, scoring bars, run kind, group); exact reruns dedupe; no correlation discount (conservative)", "n_effective": n_eff, "n_floor": self.gate.dsr_min_trials,
+            "counting_rule": "N = distinct (idea, params, symbol, snapshot, scoring bars, score start/end, run kind, group); exact reruns dedupe; unknown legacy windows count per row; no correlation discount (conservative)", "n_effective": n_eff, "n_floor": self.gate.dsr_min_trials,
             "variance_pool": kept, "excluded_lookahead": all.len() - pool.len(), "excluded_implausible": implausible}),
         )
     }
@@ -1838,6 +1840,8 @@ impl Orchestrator {
                 .collect::<Vec<_>>()
                 .join(","),
             bars: pm.bars,
+            score_start: &pm.start,
+            score_end: &pm.end,
             sharpe_daily: pm.sharpe_daily,
             positions: &ps.sim.exposure,
             lookahead: false,
@@ -2174,7 +2178,7 @@ impl Orchestrator {
         Self::write_equity(&jd.join("equity.csv"), &bars, &full, &sim, &sim2)?;
         let mut reasons = vec![];
         if sim.roll_unpriced > 0 {
-            reasons.push(format!("futures roll ledger: {} roll(s) held through without an executable old-leg price (approximation is display-only)", sim.roll_unpriced));
+            reasons.push(format!("futures roll ledger: {} roll(s) held through without executable old/new legs (approximation is display-only)", sim.roll_unpriced));
         }
         if rep.detected {
             reasons.push(format!(

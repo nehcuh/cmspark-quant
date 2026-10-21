@@ -732,7 +732,29 @@ fn simulate_core(
             }
             _ => None,
         });
-        if rolled && lots != 0.0 && old_leg.is_none() {
+        // Reopening the new leg is an order too: neither a suspended bar nor
+        // a locked open in the order direction can support that fill. Flag the
+        // whole roll as display-only, just as for an unexecutable old leg.
+        let new_leg_executable = if rolled && lots != 0.0 {
+            let prev_new = match (b.adj_factor, pb.adj_factor) {
+                (Some(a1), Some(a0)) if a1 > 0.0 => pb.close * a0 / a1,
+                _ => pb.close,
+            };
+            let up = round_tick(prev_new * (1.0 + spec.limit_pct), spec.tick);
+            let down = round_tick(prev_new * (1.0 - spec.limit_pct), spec.tick);
+            b.volume.is_finite()
+                && b.volume > 0.0
+                && b.open.is_finite()
+                && b.open > 0.0
+                && if lots > 0.0 {
+                    b.open < up - spec.tick * 0.5
+                } else {
+                    b.open > down + spec.tick * 0.5
+                }
+        } else {
+            true
+        };
+        if rolled && lots != 0.0 && (old_leg.is_none() || !new_leg_executable) {
             r.roll_unpriced += 1;
         }
         // previous close in the price terms the held lots are marked in

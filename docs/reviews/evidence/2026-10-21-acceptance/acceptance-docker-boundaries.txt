@@ -1,0 +1,29 @@
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running tests/reviewer_boundaries.rs (/workspace/baseline/target/debug/deps/reviewer_boundaries-2f0b0a8969cb7d5d)
+
+running 3 tests
+inode probe: FILES 15
+
+host-copy result=Err(Io(Os { code: 20, kind: NotADirectory, message: "Not a directory" })); container remained=true; reviewer cleanup completed
+
+thread 'docker_host_copy_error_cleans_container' (63753759) panicked at crates/cmsq-core/tests/reviewer_boundaries.rs:63:30:
+host I/O error must remove job container
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test docker_host_copy_error_cleans_container ... FAILED
+cancelled container remained=true; reviewer cleanup completed
+
+thread 'docker_cancellation_cleans_container' (63753758) panicked at crates/cmsq-core/tests/reviewer_boundaries.rs:74:5:
+dropping cancelled execution must remove container
+test docker_cancellation_cleans_container ... FAILED
+live budget outcome=QuotaExceeded, duration=81ms
+test docker_inode_and_live_log_limits_hold ... ok
+
+failures:
+
+failures:
+    docker_cancellation_cleans_container
+    docker_host_copy_error_cleans_container
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.75s
+
+error: test failed, to rerun pass `-p cmsq-core --test reviewer_boundaries`

@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized] target(s) in 0.23s
+     Running tests/reviewer_boundaries.rs (/workspace/baseline/target/debug/deps/reviewer_boundaries-2f0b0a8969cb7d5d)
+
+running 3 tests
+host-copy result=Err(Io(Os { code: 20, kind: NotADirectory, message: "Not a directory" })); container remained=false; reviewer cleanup completed
+test docker_host_copy_error_cleans_container ... ok
+inode probe: FILES 15
+
+cancelled container remained=false; reviewer cleanup completed
+test docker_cancellation_cleans_container ... ok
+live budget outcome=QuotaExceeded, duration=82ms
+test docker_inode_and_live_log_limits_hold ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.87s
