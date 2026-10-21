@@ -161,6 +161,11 @@ pub struct Aggregator {
     cur: HashMap<String, MinuteBar>,
     pub bars: Vec<MinuteBar>,
     pub rejected: BTreeMap<String, u64>,
+    /// per-exchange calendars (snapshot or weekday fallback) for the trading-day label
+    pub calendars: crate::calendars::FuturesCalendars,
+    /// ticks accepted but flagged: e.g. a night-session tick on a holiday eve
+    /// (exchanges hold no night session then; simulated 7x24 fronts do)
+    pub flagged: BTreeMap<String, u64>,
 }
 
 fn clean(x: f64) -> Option<f64> {
@@ -206,7 +211,13 @@ impl Aggregator {
         let dv = r.volume - self.last_vol.get(&r.instrument).copied().unwrap_or(r.volume);
         self.last_ts.insert(r.instrument.clone(), ts);
         self.last_vol.insert(r.instrument.clone(), r.volume);
-        let td = crate::futures::trading_day_for(ts, |_| true).format("%Y-%m-%d").to_string();
+        let cal = self.calendars.for_instrument(&r.instrument);
+        if let Some(ev) = crate::calendars::ExchangeCalendar::night_evening(ts) {
+            if cal.cal.is_some() && !cal.has_night_session(ev) {
+                *self.flagged.entry("no_night_session_per_calendar".into()).or_default() += 1;
+            }
+        }
+        let td = cal.trading_day(ts).format("%Y-%m-%d").to_string();
         let minute = ts.with_second(0).and_then(|t| t.with_nanosecond(0)).unwrap_or(ts).format("%Y-%m-%d %H:%M").to_string();
         match self.cur.get_mut(&r.instrument) {
             Some(b) if b.minute == minute => {
@@ -253,6 +264,10 @@ pub struct MdReport {
     pub rejected_by_reason: BTreeMap<String, u64>,
     pub status: Vec<String>,
     pub bars_csv: String,
+    /// accepted-but-flagged ticks (e.g. night session the calendar says does not exist)
+    pub flagged: BTreeMap<String, u64>,
+    /// trading-day calendar used per exchange of the subscribed instruments
+    pub calendars: BTreeMap<String, String>,
 }
 
 pub async fn run_md(o: &Orchestrator, feed: Box<dyn MdFeed>, cfg: &MdConfig) -> Result<MdReport> {
@@ -269,6 +284,7 @@ pub fn run_md_blocking(o: &Orchestrator, mut feed: Box<dyn MdFeed>, cfg: &MdConf
     feed.start(cfg)?;
     let source = format!("ctp:{}", feed.name());
     let mut agg = Aggregator::new(&cfg.instruments);
+    agg.calendars = crate::calendars::FuturesCalendars::load(&o.home.data_dir());
     let mut buf: Vec<Tick> = Vec::new();
     let mut stored = 0usize;
     let mut status = Vec::new();
@@ -307,9 +323,11 @@ pub fn run_md_blocking(o: &Orchestrator, mut feed: Box<dyn MdFeed>, cfg: &MdConf
         rejected_by_reason: agg.rejected.clone(),
         status,
         bars_csv: csv.display().to_string(),
+        flagged: agg.flagged.clone(),
+        calendars: cfg.instruments.iter().map(|i| { let c = agg.calendars.for_instrument(i); (c.exchange.clone(), c.source()) }).collect(),
     };
     o.store.audit("md", "md_session", None, serde_json::json!({"feed": rep.feed, "front": rep.front, "instruments": cfg.instruments,
-        "ticks": rep.ticks, "bars": rep.bars, "rejected": rep.rejected_by_reason, "observe_only": true}), true)?;
+        "ticks": rep.ticks, "bars": rep.bars, "rejected": rep.rejected_by_reason, "flagged": rep.flagged, "calendars": rep.calendars, "observe_only": true}), true)?;
     Ok(rep)
 }
 
@@ -382,6 +400,32 @@ mod tests {
         let t = a.accept(&r, "t").unwrap();
         assert_eq!((t.bid1, t.ask1, t.open_interest), (None, Some(3501.0), None));
         assert_eq!(t.trading_day, "2026-10-20");
+    }
+
+    #[test]
+    fn exchange_calendar_labels_holiday_eve_night_ticks() {
+        use chrono::Datelike;
+        // SHFE snapshot: National Day 2024 (10-01..10-07 closed)
+        let mut days = vec![];
+        let mut x = NaiveDate::from_ymd_opt(2024, 9, 23).unwrap();
+        while x <= NaiveDate::from_ymd_opt(2024, 10, 18).unwrap() {
+            let wk = !matches!(x.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun);
+            days.push((x.format("%Y-%m-%d").to_string(), wk && !(x.month() == 10 && x.day() <= 7)));
+            x += chrono::Duration::days(1);
+        }
+        let mut a = Aggregator::new(&ins());
+        a.calendars.by_exchange.insert("SHFE".into(), crate::calendars::ExchangeCalendar { exchange: "SHFE".into(), cal: Some(crate::replay::Calendar::from_days(days)) });
+        let tick = |day: &str, t: &str, v: f64| RawTick { instrument: "rb2601".into(), action_day: day.into(), update_time: t.into(), last: 3500.0, volume: v, ..Default::default() };
+        let t = a.accept(&tick("20240930", "21:01:00", 1.0), "t").unwrap();
+        assert_eq!(t.trading_day, "2024-10-08", "holiday skipped via the exchange calendar");
+        assert_eq!(a.flagged.get("no_night_session_per_calendar"), Some(&1));
+        let t = a.accept(&tick("20241008", "21:01:00", 2.0), "t").unwrap();
+        assert_eq!(t.trading_day, "2024-10-09");
+        assert_eq!(a.flagged.get("no_night_session_per_calendar"), Some(&1));
+        // no snapshot for the exchange: weekday fallback, nothing flagged
+        let mut b = Aggregator::new(&ins());
+        assert_eq!(b.accept(&tick("20240930", "21:01:00", 1.0), "t").unwrap().trading_day, "2024-10-01");
+        assert!(b.flagged.is_empty());
     }
 
     #[test]

@@ -283,7 +283,9 @@ impl Orchestrator {
         if meta.source == "sample" {
             return bars;
         }
-        let Ok(cal) = crate::replay::Calendar::load(&self.home.data_dir().join("_calendar_SSE.txt")) else { return bars };
+        // futures: the exchange's own calendar (falls back to SSE, which matches on all but rare days)
+        let ex_cal = crate::futures::spec_for(&meta.symbol).and_then(|s| crate::calendars::ExchangeCalendar::load(&self.home.data_dir(), &s.exchange).cal);
+        let Some(cal) = ex_cal.or_else(|| crate::replay::Calendar::load(&self.home.data_dir().join("_calendar_SSE.txt")).ok()) else { return bars };
         let (missing, _) = cal.check(&bars);
         if missing.is_empty() {
             return bars;

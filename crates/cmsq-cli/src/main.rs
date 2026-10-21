@@ -141,10 +141,13 @@ enum DataCmd {
         #[arg(long)]
         no_validate: bool,
     },
-    /// Fetch the SSE trade calendar from tushare into data/_calendar_SSE.txt
+    /// Fetch trade calendars from tushare into data/_calendar_<EX>.txt (snapshot, sha256 audited)
     Calendar {
         #[arg(long, default_value = "2005-01-01")]
         start: String,
+        /// SSE (default), one futures exchange (SHFE DCE CZCE CFFEX INE GFEX), or `futures` for all six
+        #[arg(long, default_value = "SSE")]
+        exchange: String,
     },
     /// Per-source health / cooldown / rate-limit state
     Sources,
@@ -495,16 +498,33 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Data { cmd: DataCmd::Calendar { start } } => {
+        Cmd::Data { cmd: DataCmd::Calendar { start, exchange } } => {
             let t = cmsq_core::data::tushare::Tushare::from_secrets(&o.home.secrets)?;
-            let today = chrono_today();
-            let days = t.trade_cal(&start, &today).await?;
-            let cal = cmsq_core::replay::Calendar::from_days(days);
+            // through the end of next year: exchanges publish the holiday schedule in advance
+            let end = format!("{}-12-31", chrono_today()[..4].parse::<i32>().unwrap_or(2026) + 1);
+            let ex = exchange.to_uppercase();
+            let list: Vec<String> = if ex == "FUTURES" { cmsq_core::calendars::FUTURES_EXCHANGES.iter().map(|x| x.to_string()).collect() } else { vec![ex] };
             std::fs::create_dir_all(o.home.data_dir())?;
-            let p = o.home.data_dir().join("_calendar_SSE.txt");
-            cal.save(&p)?;
-            o.store.audit("data", "trade_calendar_fetch", None, serde_json::json!({"source": "tushare trade_cal", "first": cal.first, "last": cal.last, "open_days": cal.open.len()}), true)?;
-            out(serde_json::json!({"path": p, "open_days": cal.open.len()}), format!("SSE calendar {}..{}: {} open days → {}", cal.first, cal.last, cal.open.len(), p.display()));
+            let (mut js, mut lines, mut fail) = (vec![], vec![], false);
+            for ex in list {
+                match t.trade_cal_for(&ex, &start, &end).await {
+                    Ok(days) if days.iter().any(|d| d.1) => {
+                        let cal = cmsq_core::replay::Calendar::from_days(days);
+                        let p = cmsq_core::calendars::ExchangeCalendar::path(&o.home.data_dir(), &ex);
+                        cal.save_as(&p, &ex)?;
+                        let sha = cmsq_core::calendars::sha256_hex(&std::fs::read(&p)?);
+                        o.store.audit("data", "trade_calendar_fetch", None, serde_json::json!({"source": "tushare trade_cal", "exchange": ex, "first": cal.first, "last": cal.last, "open_days": cal.open.len(), "snapshot_sha256": sha}), true)?;
+                        lines.push(format!("{ex} calendar {}..{}: {} open days → {} (sha256 {})", cal.first, cal.last, cal.open.len(), p.display(), &sha[..12]));
+                        js.push(serde_json::json!({"exchange": ex, "path": p, "open_days": cal.open.len(), "sha256": sha}));
+                    }
+                    Ok(_) => { fail = true; lines.push(format!("{ex}: tushare returned no open days; snapshot left unchanged")); }
+                    Err(e) => { fail = true; lines.push(format!("{ex}: FAILED {e:#}; snapshot left unchanged")); }
+                }
+            }
+            out(serde_json::Value::Array(js), lines.join("\n"));
+            if fail {
+                std::process::exit(1);
+            }
         }
         Cmd::Data { cmd: DataCmd::Sources } => {
             let (router, notes) = o.data_router(None, true);

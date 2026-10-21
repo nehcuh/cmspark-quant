@@ -21,7 +21,11 @@ impl Calendar {
             open: all.into_iter().filter(|d| d.1).map(|d| d.0).collect() }
     }
     pub fn save(&self, p: &Path) -> Result<()> {
-        let mut s = format!("# SSE trade calendar {}..{} (open days only)\n", self.first, self.last);
+        self.save_as(p, "SSE")
+    }
+    /// Header keeps the range at whitespace token 4 (`load` parses it).
+    pub fn save_as(&self, p: &Path, exchange: &str) -> Result<()> {
+        let mut s = format!("# {exchange} trade calendar {}..{} (open days only)\n", self.first, self.last);
         for d in &self.open {
             s.push_str(d);
             s.push('\n');

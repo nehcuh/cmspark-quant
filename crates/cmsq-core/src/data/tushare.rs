@@ -151,7 +151,12 @@ impl Tushare {
     }
 
     pub async fn trade_cal(&self, start: &str, end: &str) -> Result<Vec<(String, bool)>> {
-        let (f, items) = self.query("trade_cal", json!({"exchange": "SSE", "start_date": start.replace('-', ""), "end_date": end.replace('-', "")}), "cal_date,is_open").await?;
+        self.trade_cal_for("SSE", start, end).await
+    }
+
+    /// `exchange`: SSE, SZSE, CFFEX, SHFE, CZCE, DCE, INE, GFEX (tushare codes).
+    pub async fn trade_cal_for(&self, exchange: &str, start: &str, end: &str) -> Result<Vec<(String, bool)>> {
+        let (f, items) = self.query("trade_cal", json!({"exchange": exchange, "start_date": start.replace('-', ""), "end_date": end.replace('-', "")}), "cal_date,is_open").await?;
         let (ci, oi) = (idx(&f, "cal_date")?, idx(&f, "is_open")?);
         let mut v: Vec<(String, bool)> = items.iter().filter_map(|r| Some((ymd(r[ci].as_str()?), r[oi].as_i64().or_else(|| r[oi].as_str()?.parse().ok())? == 1))).collect();
         v.sort();

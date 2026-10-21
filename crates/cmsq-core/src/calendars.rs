@@ -13,6 +13,11 @@ use chrono::{Datelike, Duration, NaiveDate, Weekday};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+pub fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(b))
+}
+
 pub const FUTURES_EXCHANGES: [&str; 6] = ["SHFE", "DCE", "CZCE", "CFFEX", "INE", "GFEX"];
 
 /// Calendar for one exchange, or the weekday fallback.
