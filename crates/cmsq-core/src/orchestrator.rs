@@ -117,23 +117,24 @@ impl Orchestrator {
     pub fn reap_stale_jobs(&self) -> Result<Vec<String>> {
         let mut reaped = vec![];
         for j in self.store.stale_running_jobs()? {
-            self.store.finish_job(
+            if self.store.abandon_job(
                 &j.id,
-                "abandoned",
-                None,
-                0,
-                Some("owner process exited before the job finished (crash recovery)"),
-                None,
-            )?;
-            self.store.audit(
-                "orchestrator",
-                "job_reaped",
-                Some(&j.strategy_id),
-                json!({"job": j.id, "owner_pid": j.owner_pid}),
-                true,
-            )?;
-            reaped.push(j.id);
+                "owner process exited before the job finished (crash recovery)",
+            )? {
+                self.store.audit(
+                    "orchestrator",
+                    "job_reaped",
+                    Some(&j.strategy_id),
+                    json!({"job": j.id, "owner_pid": j.owner_pid}),
+                    true,
+                )?;
+                reaped.push(j.id);
+            }
         }
+        // A Backtesting strategy is recovered only when its run lease is provably
+        // dead on this host (issue #8); a live owner between status change and job
+        // insert, or between sweep children, is never touched. Legacy rows without
+        // a lease fall back to "no running job".
         let live: Vec<String> = self
             .store
             .list_jobs(None)?
@@ -145,13 +146,22 @@ impl Orchestrator {
             .store
             .list_strategies(Some(StrategyStatus::Backtesting))?
         {
-            if !live.contains(&s.id) {
-                self.transition(
-                    &s,
-                    StrategyStatus::Failed,
+            let lease = self.store.run_owner(&s.id)?;
+            let dead = match lease.as_deref() {
+                Some(l) => crate::store::lease_alive(l) == Some(false),
+                None => !live.contains(&s.id),
+            };
+            if !dead {
+                continue;
+            }
+            let why = "recovered: backtest was interrupted (owner process exited)";
+            if self.store.reap_backtesting(&s.id, lease.as_deref(), why)? {
+                self.store.audit(
                     "orchestrator",
-                    Some("recovered: backtest was interrupted (process crashed or was killed)"),
-                    json!({"recovery": true}),
+                    "transition:Backtesting->Failed",
+                    Some(&s.id),
+                    json!({"reason": why, "details": {"recovery": true, "lease": lease}}),
+                    true,
                 )?;
                 reaped.push(s.id);
             }

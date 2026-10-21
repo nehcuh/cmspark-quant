@@ -8,7 +8,34 @@ use cmsq_core::{Home, Orchestrator};
 use serde_json::json;
 
 async fn setup() -> (tempfile::TempDir, Orchestrator, String) {
+    setup_db(false).await
+}
+
+/// `pg`: a fresh schema on the deployed PostgreSQL (CMSQ_TEST_DB_ENV, scripts/test_pg.sh).
+async fn setup_db(pg: bool) -> (tempfile::TempDir, Orchestrator, String) {
     let d = tempfile::tempdir().unwrap();
+    if pg {
+        let f = std::env::var("CMSQ_TEST_DB_ENV").expect("PostgreSQL required: scripts/test_pg.sh");
+        let env = std::fs::read_to_string(f).unwrap();
+        let schema = format!("t_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        std::fs::create_dir_all(d.path().join("secrets")).unwrap();
+        std::fs::write(
+            d.path().join("secrets/db.env"),
+            format!("{env}\nCMSQ_DATABASE_SCHEMA={schema}\n"),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            d.path().join("secrets"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            d.path().join("secrets/db.env"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let o = Orchestrator::open(Home::with_secrets(
         d.path().join("home"),
         d.path().join("secrets"),
@@ -344,4 +371,135 @@ fn probe_covers_the_whole_scored_domain() {
     let mut rng = probe::Rng::new(7);
     let (_, tc) = probe::choose_cuts(60, 12, &probe::ProbeConfig::default(), &mut rng);
     assert!(tc.contains(&12), "{tc:?}");
+}
+
+/// Opens a second Orchestrator (as another CLI/dashboard process would) at every
+/// runner_identity call: between Backtesting and insert_job, and between sweep children.
+struct Observer(Home, std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl SandboxExecutor for Observer {
+    fn name(&self) -> &'static str {
+        "audit-test-double"
+    }
+    fn hardened(&self) -> bool {
+        true
+    }
+    async fn runner_identity(&self, _: &str) -> Option<String> {
+        let obs = Orchestrator::open(self.0.clone()).unwrap();
+        for s in obs.store.list_strategies(None).unwrap() {
+            assert_ne!(
+                s.status,
+                cmsq_core::StrategyStatus::Failed,
+                "observer reaped a live run"
+            );
+        }
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some("sha256:audit-test-double|cmsq.runner.version=2.2.2".into())
+    }
+    async fn execute(&self, q: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
+        MockSignal.execute(q).await
+    }
+}
+
+/// #8: an observer opening mid-run never fails an active backtest; it concludes normally.
+#[tokio::test]
+async fn observer_does_not_reap_active_backtest() {
+    observer_backtest(false).await
+}
+#[tokio::test]
+#[ignore = "requires PostgreSQL: scripts/test_pg.sh"]
+async fn pg_observer_does_not_reap_active_backtest() {
+    observer_backtest(true).await
+}
+#[tokio::test]
+#[ignore = "requires PostgreSQL: scripts/test_pg.sh"]
+async fn pg_observer_does_not_reap_active_sweep() {
+    observer_sweep(true).await
+}
+async fn observer_backtest(pg: bool) {
+    let (_d, o, id) = setup_db(pg).await;
+    assert_eq!(o.store.backend(), if pg { "postgres" } else { "sqlite" });
+    let obs = Observer(o.home.clone(), Default::default());
+    let r = o.backtest(&id, "SAMPLE_REGIME", &obs, None).await;
+    assert!(obs.1.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    let st = o.get(&id).unwrap().status;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(
+        matches!(
+            st,
+            cmsq_core::StrategyStatus::Evaluated
+                | cmsq_core::StrategyStatus::GatePassed
+                | cmsq_core::StrategyStatus::Rejected
+        ),
+        "{st:?}"
+    );
+    assert_eq!(o.store.run_owner(&id).unwrap(), None, "lease released");
+}
+
+/// #8: same between sweep children.
+#[tokio::test]
+async fn observer_does_not_reap_active_sweep() {
+    observer_sweep(false).await
+}
+async fn observer_sweep(pg: bool) {
+    let (_d, o, id) = setup_db(pg).await;
+    let obs = Observer(o.home.clone(), Default::default());
+    let grid = json!({"fast": [5, 10], "slow": [30]});
+    let r = o
+        .sweep(&id, "SAMPLE_REGIME", grid.as_object().unwrap(), &obs, 1)
+        .await;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(obs.1.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    assert_ne!(
+        o.get(&id).unwrap().status,
+        cmsq_core::StrategyStatus::Failed
+    );
+}
+
+/// #8: a dead owner on this host is recovered; a lease from another host is not;
+/// recovery never overwrites a finished job.
+#[tokio::test]
+async fn recovery_only_reaps_dead_owners() {
+    let (_d, o, id) = setup().await;
+    let s = o.get(&id).unwrap();
+    assert!(o
+        .store
+        .cas_status(&id, s.status, cmsq_core::StrategyStatus::Backtesting, None)
+        .unwrap());
+    let mine = o.store.run_owner(&id).unwrap().unwrap();
+    assert_eq!(cmsq_core::store::lease_alive(&mine), Some(true));
+    // alive owner (this process): untouched
+    assert!(o.reap_stale_jobs().unwrap().is_empty());
+    // owner on another host: untouched (that host recovers it)
+    o.store
+        .set_run_owner_for_test(&id, Some("some-other-host|1|1"))
+        .unwrap();
+    assert!(o.reap_stale_jobs().unwrap().is_empty());
+    assert_eq!(
+        o.get(&id).unwrap().status,
+        cmsq_core::StrategyStatus::Backtesting
+    );
+    // dead PID on this host
+    let mut c = std::process::Command::new("true").spawn().unwrap();
+    let pid = c.id();
+    c.wait().unwrap();
+    let dead = format!("{}|{pid}|x", cmsq_core::store::hostname());
+    assert_eq!(cmsq_core::store::lease_alive(&dead), Some(false));
+    // PID reuse: our own PID with a different start time is dead too
+    let reused = format!("{}|{}|0", cmsq_core::store::hostname(), std::process::id());
+    assert_eq!(cmsq_core::store::lease_alive(&reused), Some(false));
+    o.store.set_run_owner_for_test(&id, Some(&dead)).unwrap();
+    assert_eq!(o.reap_stale_jobs().unwrap(), vec![id.clone()]);
+    assert_eq!(
+        o.get(&id).unwrap().status,
+        cmsq_core::StrategyStatus::Failed
+    );
+    // abandon after finish is a no-op
+    let (_d2, o2, id2) = setup().await;
+    o2.backtest(&id2, "SAMPLE_REGIME", &MockSignal, None)
+        .await
+        .unwrap();
+    let j = &o2.store.list_jobs(Some(&id2)).unwrap()[0];
+    assert!(!o2.store.abandon_job(&j.id, "late recovery").unwrap());
+    assert_eq!(o2.store.list_jobs(Some(&id2)).unwrap()[0].status, j.status);
 }
