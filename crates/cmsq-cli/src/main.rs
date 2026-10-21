@@ -322,6 +322,23 @@ enum SignerCmd {
         #[arg(long)]
         dir: std::path::PathBuf,
     },
+    /// Health check: the signer answers on its socket
+    Ping {
+        #[arg(long)]
+        socket: std::path::PathBuf,
+    },
+    /// Low-level enrollment (run inside the signer's own account, e.g. `docker compose exec signer`).
+    /// Normally use `cmsq audit signer-enroll`, which computes chain/seq/mac.
+    Enroll {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        chain: String,
+        #[arg(long)]
+        seq: i64,
+        #[arg(long)]
+        mac: String,
+    },
     /// Import an existing in-process audit.key as key 0 (migration), then delete the original
     Import {
         #[arg(long)]
@@ -358,8 +375,11 @@ enum AuditCmd {
     /// Pin this workspace's audit chain (at its current head) in the signer directory.
     /// Run as the operator who can write the signer dir; replaces trust-on-first-use.
     SignerEnroll {
+        #[arg(long, required_unless_present = "print")]
+        signer_dir: Option<std::path::PathBuf>,
+        /// only print `<chain> <seq> <mac>` (for `cmsq signer enroll` in another account)
         #[arg(long)]
-        signer_dir: std::path::PathBuf,
+        print: bool,
     },
     /// Move an existing workspace from the app-side audit.key to the signer: import the key,
     /// enroll the chain at its verified head, re-verify the whole chain THROUGH the running
@@ -390,11 +410,10 @@ async fn executor(b: Backend) -> Result<Box<dyn SandboxExecutor>> {
 /// (chain id, head seq, head mac) of the workspace's audit chain; the chain must verify.
 fn audit_head(home: &Home, cfg: cmsq_core::audit::AuditConfig) -> Result<(String, i64, String)> {
     let chain = cfg.chain.clone();
-    let has_db = home.db().exists()
-        || std::env::var("CMSQ_DB")
-            .map(|v| v != "sqlite")
-            .unwrap_or(false);
-    if !has_db {
+    // Only a workspace that does not exist yet may be enrolled at the empty head. Enrolling an
+    // existing chain at seq 0 would let the app re-sign history from GENESIS, so for anything
+    // else the store must open and the head comes from the verified chain.
+    if !home.abs().exists() {
         return Ok((chain, 0, cmsq_core::audit::GENESIS.to_string()));
     }
     let st = cmsq_core::Store::open_configured(&home.db(), &home.db_config(), cfg)?;
@@ -462,6 +481,27 @@ async fn main() -> Result<()> {
                 let id = cmsq_core::signer::SignerCore::open(dir)?.rotate()?;
                 println!("new audit key {id}; restart the signer; new entries start epoch {id}");
             }
+            SignerCmd::Ping { socket } => {
+                use cmsq_core::audit::KeyProvider;
+                cmsq_core::signer::SocketSigner::new(socket).head("ping")?;
+                println!("signer ok");
+            }
+            SignerCmd::Enroll {
+                dir,
+                chain,
+                seq,
+                mac,
+            } => {
+                cmsq_core::signer::SignerCore::enroll(
+                    dir,
+                    &cmsq_core::signer::Enrollment {
+                        chain: chain.clone(),
+                        seq: *seq,
+                        mac: mac.clone(),
+                    },
+                )?;
+                println!("enrolled chain {chain} at head seq {seq}");
+            }
             SignerCmd::Import { dir, key_file } => {
                 cmsq_core::signer::SignerCore::import(dir, &std::fs::read_to_string(key_file)?)?;
                 println!(
@@ -474,9 +514,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if let Cmd::Audit {
-        cmd: AuditCmd::SignerEnroll { signer_dir },
+        cmd: AuditCmd::SignerEnroll { signer_dir, print },
     } = &cli.cmd
     {
+        // the chain id derives from the canonical workspace path: make it exist first
+        std::fs::create_dir_all(home.abs())?;
+        if *print {
+            // read-only: works with the app-side key too (used by the migration in deploy.sh)
+            let (chain, seq, mac) = audit_head(&home, home.audit_config()?)?;
+            println!("{chain} {seq} {mac}");
+            return Ok(());
+        }
+        let signer_dir = signer_dir.as_ref().unwrap();
         anyhow::ensure!(
             std::env::var("CMSQ_AUDIT_SIGNER").is_ok(),
             "set CMSQ_AUDIT_SIGNER (signer mode); for a workspace with an app-side audit.key use `audit migrate-to-signer`"

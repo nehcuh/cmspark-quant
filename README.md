@@ -1,4 +1,23 @@
-# CMspark Quant — P0
+# CMspark Quant
+
+本地优先的量化策略**发现、沙箱验证与模拟盘**系统（只观察，无实盘下单路径）。
+
+## 一键部署
+
+```bash
+git clone https://github.com/nehcuh/cmspark-quant && cd cmspark-quant
+scripts/deploy.sh                    # PostgreSQL/TimescaleDB + 审计签名进程 + 工作区 ~/cmsq-home
+scripts/deploy.sh --hot              # 另外启用 Redis 热层（可选）
+scripts/deploy.sh --anchor-repo https://github.com/<you>/<anchors>   # 另外每小时把审计链头推送到私有锚点仓库
+set -a; . ~/.config/cmsq/cmsq.env; set +a
+cmsq list
+```
+
+可重复执行。完整说明（数据源、日常流程、模拟盘、看板、审计与运维）见 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**。
+
+---
+
+## 开发者说明（原 P0 文档）
 
 本地优先的量化策略**发现与沙箱验证**闭环（无实盘、无 IB）：
 

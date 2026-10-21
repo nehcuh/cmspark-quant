@@ -8,7 +8,7 @@
 name: cmsq
 services:
   db:
-    image: timescale/timescaledb@sha256:${CMSQ_PG_IMAGE_DIGEST:?set by scripts/db_up.sh}
+    image: timescale/timescaledb@sha256:${CMSQ_PG_IMAGE_DIGEST:-6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f}
     restart: unless-stopped
     environment:
       POSTGRES_USER: cmsq_owner
@@ -29,10 +29,35 @@ services:
       timeout: 3s
       retries: 30
     shm_size: 256mb
+  # Audit signer (DEFAULT audit-key mode): the key lives only in the cmsq-signer volume, owned
+  # by uid 10001. The socket is bind-mounted to the host (${CMSQ_RUN_DIR}/sock); the host app
+  # sets CMSQ_AUDIT_SIGNER to it. Only the host uid in --allow-uid may connect (SO_PEERCRED).
+  # No network at all. Chains must be enrolled explicitly (deploy.sh does it).
+  signer:
+    build:
+      context: ${CMSQ_SIGNER_CONTEXT:-./.signer-build}
+      dockerfile: Dockerfile.signer
+    image: cmsq-signer:local
+    restart: unless-stopped
+    user: "10001:${CMSQ_HOST_GID:?set by scripts/deploy.sh}"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["signer", "serve", "--dir", "/var/lib/cmsq-signer", "--socket", "/run/cmsq-signer/sock",
+              "--allow-uid", "${CMSQ_HOST_UID:?set by scripts/deploy.sh},10001"]
+    volumes:
+      - cmsq-signer:/var/lib/cmsq-signer
+      - ${CMSQ_RUN_DIR:?set by scripts/deploy.sh}:/run/cmsq-signer
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/cmsq", "signer", "ping", "--socket", "/run/cmsq-signer/sock"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
   # OPTIONAL hot layer (quote cache, pub/sub, distributed rate limits). Ephemeral by design:
-  # no persistence, nothing of record. Start with scripts/redis_up.sh (profile "redis").
+  # no persistence, nothing of record. Opt in with `scripts/deploy.sh --hot` (profile "hot").
   redis:
-    profiles: ["redis"]
+    profiles: ["hot"]
     image: redis@sha256:${CMSQ_REDIS_IMAGE_DIGEST:-858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
     restart: unless-stopped
     secrets: [redis_pw]
@@ -52,3 +77,4 @@ secrets:
     file: ${CMSQ_SECRETS_DIR:?}/redis_pw
 volumes:
   cmsq-pg:
+  cmsq-signer:

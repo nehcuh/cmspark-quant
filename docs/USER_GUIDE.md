@@ -1,0 +1,58 @@
+# 使用指南
+
+## 1. 系统做什么
+从社区抓取策略 → 结构化抽取 → 在断网的 Docker 沙箱里回测（容器只输出目标仓位，成交、成本、指标、前视检测和门槛都由宿主机 Rust 计算）→ 门槛（DSR、walk-forward、一次性留存样本、买入持有对比、真实行情、资金容量）→ 人工确认晋升 → 只观察信号与模拟盘。**没有任何真实下单接口。**
+
+## 2. 部署
+前置：Linux、Docker（当前用户能访问 daemon）、rustup（`rust-toolchain.toml` 固定版本，自动安装）。
+
+```bash
+scripts/deploy.sh [--hot] [--anchor-repo URL] [--home DIR]
+```
+
+| 组件 | 说明 |
+|---|---|
+| `db` | PostgreSQL 16 + TimescaleDB，仅监听 127.0.0.1:55432。应用账号不能改、删审计/试验/行情证据表 |
+| `signer` | 审计签名进程（默认模式）。密钥只在 `cmsq-signer` 卷中，uid 10001，无网络；应用经 `~/.local/state/cmsq/run/sock` 请求签名，读不到密钥 |
+| `redis`（`--hot`） | 可选热层：最新行情缓存、看板推送、多数据源共享限流。不存任何权威数据 |
+| 锚点（`--anchor-repo`） | 每小时把审计链头提交（SSH 签名）并推送到 git 仓库，`cmsq audit verify-git` 校验全部历史锚点 |
+
+部署写出 `~/.config/cmsq/cmsq.env`（`CMSQ_HOME`、`CMSQ_AUDIT_SIGNER` 等），使用前 `set -a; . ~/.config/cmsq/cmsq.env; set +a`。
+
+已有工作区若仍用应用侧 `audit.key`，部署会自动迁移：导入签名进程 → 按已验证链头登记 → 经签名进程全链验证 → 覆写删除旧密钥。新工作区通过显式登记（`cmsq audit signer-enroll`）接入签名进程，签名进程不接受未登记的链。
+
+## 3. 数据源
+真实行情需要 Tushare token：写入 `~/.config/cmsq/secrets.env`（`TUSHARE_TOKEN=...`，权限 600，切勿提交）。路由顺序 tushare → akshare → baostock → TDX，各源独立限流（tushare ≤400 次/分钟，akshare 串行且间隔 ≥1 秒）；启用 `--hot` 时限流计数在 Redis 中共享。多源收盘价逐日交叉校验，差异 >0.1% 的日子会被标记。
+
+```bash
+cmsq data calendar
+cmsq data fetch SH600519 --count 2500
+cmsq data sources
+```
+
+## 4. 日常流程
+```bash
+cmsq scrape --every 6h                 # 抓取社区策略 → 摄入 → 抽取 → 沙箱回测（定时）
+cmsq list                              # 策略状态
+cmsq show <id>                         # 来源、评估、任务、审计
+cmsq sweep / portfolio                 # 参数扫描（每个点计入 DSR 试验账本）/ 多标的组合
+cmsq promote <id>                      # 需键入确认；运行一次性留存样本，通过才晋升
+cmsq signals                           # 已晋升策略的只观察信号
+cmsq paper ...                         # 模拟盘（见 docs/PAPER_TRADING.md）
+```
+
+## 5. 看板
+`cargo run --release -p cmsq-dashboard`（GPUI）。总览、策略、试验、信号、模拟盘、审计等页面，截图见 `docs/screenshots/`。
+
+## 6. 审计与运维
+```bash
+cmsq audit verify                      # 全链 HMAC 校验 + 锚点
+cmsq audit anchor-git --repo DIR --sign --push
+cmsq audit verify-git --repo DIR
+docker compose -f deploy/docker-compose.yml exec signer cmsq signer rotate --dir /var/lib/cmsq-signer   # 轮换密钥，之后重启 signer
+```
+细节：`docs/AUDIT_KEY.md`、`docs/REDIS.md`、`docs/MARKET_DATA.md`、`docs/PAPER_TRADING.md`、`docs/STATUS.md`。
+
+## 7. 边界
+- 不实盘、不接券商；CTP 只接行情接口。
+- 门槛很严格：真实数据上目前没有社区策略通过（见 `docs/STATUS.md`），这是预期内的诚实结果。

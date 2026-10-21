@@ -2,3 +2,4 @@
 /var
 *.db
 __pycache__/
+deploy/.signer-build/
