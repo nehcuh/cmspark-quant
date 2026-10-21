@@ -99,7 +99,8 @@ pub fn publish(
     }
     git(repo, &args)?;
     if push {
-        git(repo, &["push", "-q"])?;
+        // explicit refspec: works for the very first push into an empty remote
+        git(repo, &["push", "-q", "origin", "HEAD"])?;
     }
     Ok(Some(git(repo, &["rev-parse", "HEAD"])?.trim().to_string()))
 }

@@ -12,6 +12,17 @@ fn signer() -> (tempfile::TempDir, std::path::PathBuf) {
     std::fs::create_dir(&kd).unwrap();
     std::fs::set_permissions(&kd, std::fs::Permissions::from_mode(0o700)).unwrap();
     let sock = d.path().join("s.sock");
+    for ch in ["ws1", "ws2", "ws3"] {
+        cmsq_core::signer::SignerCore::enroll(
+            &kd,
+            &cmsq_core::signer::Enrollment {
+                chain: ch.into(),
+                seq: 0,
+                mac: cmsq_core::audit::GENESIS.into(),
+            },
+        )
+        .unwrap();
+    }
     let (k, s) = (kd.clone(), sock.clone());
     std::thread::spawn(move || serve(&k, &s, &[]).unwrap());
     for _ in 0..100 {

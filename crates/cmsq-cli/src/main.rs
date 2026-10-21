@@ -355,6 +355,24 @@ enum AuditCmd {
         #[arg(long, default_value_t = 20)]
         n: i64,
     },
+    /// Pin this workspace's audit chain (at its current head) in the signer directory.
+    /// Run as the operator who can write the signer dir; replaces trust-on-first-use.
+    SignerEnroll {
+        #[arg(long)]
+        signer_dir: std::path::PathBuf,
+    },
+    /// Move an existing workspace from the app-side audit.key to the signer: import the key,
+    /// enroll the chain at its verified head, re-verify the whole chain THROUGH the running
+    /// signer socket, then overwrite and delete the app-side key.
+    MigrateToSigner {
+        #[arg(long)]
+        signer_dir: std::path::PathBuf,
+        #[arg(long)]
+        socket: std::path::PathBuf,
+        /// keep the app-side key (no deletion); for dry runs
+        #[arg(long)]
+        keep_key: bool,
+    },
 }
 
 async fn executor(b: Backend) -> Result<Box<dyn SandboxExecutor>> {
@@ -367,6 +385,41 @@ async fn executor(b: Backend) -> Result<Box<dyn SandboxExecutor>> {
             Ok(Box::new(ProcessSandboxExecutor))
         }
     }
+}
+
+/// (chain id, head seq, head mac) of the workspace's audit chain; the chain must verify.
+fn audit_head(home: &Home, cfg: cmsq_core::audit::AuditConfig) -> Result<(String, i64, String)> {
+    let chain = cfg.chain.clone();
+    let has_db = home.db().exists()
+        || std::env::var("CMSQ_DB")
+            .map(|v| v != "sqlite")
+            .unwrap_or(false);
+    if !has_db {
+        return Ok((chain, 0, cmsq_core::audit::GENESIS.to_string()));
+    }
+    let st = cmsq_core::Store::open_configured(&home.db(), &home.db_config(), cfg)?;
+    let r = st.verify_audit()?;
+    anyhow::ensure!(
+        r.ok || r.entries == 0,
+        "refusing to enroll a broken chain: {}",
+        r.problem.unwrap_or_default()
+    );
+    if r.entries == 0 {
+        return Ok((chain, 0, cmsq_core::audit::GENESIS.to_string()));
+    }
+    Ok((chain, r.entries, r.head_hash))
+}
+
+/// Overwrite a key file with zeros (fsync) then unlink it.
+fn shred(p: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    let n = std::fs::metadata(p)?.len() as usize;
+    let mut f = std::fs::OpenOptions::new().write(true).open(p)?;
+    f.write_all(&vec![0u8; n.max(64)])?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::remove_file(p)?;
+    Ok(())
 }
 
 /// "30m" / "6h" / "1d" / "90s"
@@ -418,6 +471,79 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        return Ok(());
+    }
+    if let Cmd::Audit {
+        cmd: AuditCmd::SignerEnroll { signer_dir },
+    } = &cli.cmd
+    {
+        anyhow::ensure!(
+            std::env::var("CMSQ_AUDIT_SIGNER").is_ok(),
+            "set CMSQ_AUDIT_SIGNER (signer mode); for a workspace with an app-side audit.key use `audit migrate-to-signer`"
+        );
+        let (chain, seq, mac) = audit_head(&home, home.audit_config()?)?;
+        cmsq_core::signer::SignerCore::enroll(
+            signer_dir,
+            &cmsq_core::signer::Enrollment {
+                chain: chain.clone(),
+                seq,
+                mac: mac.clone(),
+            },
+        )?;
+        println!(
+            "enrolled chain {chain} at head seq {seq} ({})",
+            &mac[..mac.len().min(16)]
+        );
+        return Ok(());
+    }
+    if let Cmd::Audit {
+        cmd:
+            AuditCmd::MigrateToSigner {
+                signer_dir,
+                socket,
+                keep_key,
+            },
+    } = &cli.cmd
+    {
+        anyhow::ensure!(
+            std::env::var("CMSQ_AUDIT_SIGNER").is_err() && std::env::var("CMSQ_AUDIT_KEY").is_err(),
+            "unset CMSQ_AUDIT_SIGNER / CMSQ_AUDIT_KEY: migration reads the app-side key file"
+        );
+        let kf = home.key_file();
+        anyhow::ensure!(kf.exists(), "no app-side key at {}", kf.display());
+        let local = home.audit_config()?;
+        let (chain, seq, mac) = audit_head(&home, local.clone())?;
+        let key_hex = std::fs::read_to_string(&kf)?;
+        cmsq_core::signer::SignerCore::import(signer_dir, &key_hex)?;
+        cmsq_core::signer::SignerCore::enroll(
+            signer_dir,
+            &cmsq_core::signer::Enrollment {
+                chain: chain.clone(),
+                seq,
+                mac,
+            },
+        )?;
+        let mut via = local;
+        via.key = Vec::new();
+        via.signer = Some(std::sync::Arc::new(cmsq_core::signer::SocketSigner::new(
+            socket,
+        )));
+        let st = cmsq_core::Store::open_configured(&home.db(), &home.db_config(), via)?;
+        let r = st.verify_audit()?;
+        anyhow::ensure!(
+            r.ok && r.entries == seq,
+            "chain does NOT verify through the signer ({}); app-side key left in place. Restart the signer so it loads key 0, then rerun verification.",
+            r.problem.unwrap_or_default()
+        );
+        if !keep_key {
+            shred(&kf)?;
+        }
+        println!(
+            "migrated chain {chain} ({seq} entries) to the signer; verified through {}; app-side key {}. Now set CMSQ_AUDIT_SIGNER={}",
+            socket.display(),
+            if *keep_key { "KEPT" } else { "overwritten and deleted" },
+            socket.display()
+        );
         return Ok(());
     }
     let mut o = Orchestrator::open(home)?;
@@ -1333,7 +1459,10 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Signer { .. } => unreachable!(),
+        Cmd::Signer { .. }
+        | Cmd::Audit {
+            cmd: AuditCmd::SignerEnroll { .. } | AuditCmd::MigrateToSigner { .. },
+        } => unreachable!(),
         Cmd::Audit {
             cmd: AuditCmd::Tail { n },
         } => {
