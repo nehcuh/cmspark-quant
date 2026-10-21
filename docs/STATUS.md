@@ -1,4 +1,4 @@
-# CMspark Quant — 项目状态（P0，2026-10-20）
+# CMspark Quant — 项目状态（P0–P3，2026-10-20）
 
 ## 1. 产品做什么
 从量化论坛/博客抓取的策略帖 → 抽取代码与参数 → 在**加固 Docker 沙箱**里只输出目标仓位 →
@@ -10,10 +10,12 @@
 ```bash
 cargo --version                      # 必须是 1.99.1（~/.cargo/bin 放在 PATH 前面）
 sudo usermod -aG docker $USER        # 或在当前 shell 里用 sg docker -c "<命令>"
-scripts/build_runner.sh              # 构建 cmsq-runner:2.1.0，并记录镜像 digest
+scripts/db_up.sh                     # 启动独立部署的 PostgreSQL+TimescaleDB（docker compose），口令写入 ~/.config/cmsq/db.env
+scripts/build_runner.sh              # 构建 cmsq-runner:2.2.1（含 vn.py shim），并记录镜像 digest
+scripts/test_pg.sh                   # PostgreSQL 并发/权限/篡改测试
 cargo test --workspace
 scripts/test_docker.sh               # Docker/bwrap 测试与全部攻击回归
-scripts/e2e.sh                       # 合成数据完整闭环
+scripts/e2e.sh                       # 合成数据完整闭环（默认 PostgreSQL；CMSQ_DB=sqlite 走离线 SQLite）
 # 真实数据：把 TUSHARE_TOKEN=... 写进 ~/.config/cmsq/secrets.env（切勿提交）
 CMSQ_PYTHON=<含 akshare 的 python> scripts/e2e_real.sh
 scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
@@ -55,7 +57,7 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 | HMAC 审计链 + 外部锚点 | 改写、截断、无密钥重链，均被检出 |
 | DSR 稳健方差池（剔除作弊 trial，用 MAD），N 下限 20 | 防止作弊结果撑大方差、压低门槛 |
 
-截图见 `docs/screenshots/01-overview.png` … `14-market-data.png`。
+截图见 `docs/screenshots/01-overview.png` … `18-futures-sweep-vnpy.png`。
 
 ## 5. 已知缺口
 * fork bomb 的 `pids_exhausted` 标签是启发式判断；稀疏偷看只能概率性抓到。
@@ -66,7 +68,70 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * e2e 的 vault 演示放在独立工作区，并把 DSR 下限设为 1，否则没有策略能通过门禁。
 * 截图 06 和 07 是同一时刻的画面（vault 运行很快，几乎抓不到"进行中"的状态）。
 
-## 6. 后续阶段（依据 research-cta-data.md）
+## 6. 本轮完成（分支 p1-onward）
+### P0 存储与并发
+* 主存储改为**独立部署的 PostgreSQL 16 + TimescaleDB**（`deploy/docker-compose.yml`，镜像按 digest 固定，仅 127.0.0.1）。
+  sqlx 连接池 + 内嵌迁移；SQLite 只保留给测试与离线（`CMSQ_DB=sqlite`），两种后端共用同一套 SQL 与语义。
+* 最小权限：迁移用 `cmsq_owner`，运行时用 `cmsq_app`（证据表只能 INSERT/SELECT，不能删改、TRUNCATE、停用或删除触发器）。
+  每个工作区一个 schema；`bars`/`ticks` 为 hypertable。
+* 并发正确性：审计追加持 advisory lock + 锚点文件锁，序号与锚点严格有序；trial 账本插入与快照原子化，每个 trial 看到不同的 N；
+  vault 去重与占用在同一把锁内完成，判定只能写一次，之后触发器冻结；状态迁移用 CAS。
+  竞争测试 `tests/store_concurrency.rs`：SQLite 4 项 + PostgreSQL 7 项，全部通过。
+* 并发能力：回测/扫描/组合的各个变体并行跑，用容器槽位信号量限流（`CMSQ_CONTAINER_SLOTS`，默认 CPU 数）；
+  `data fetch A,B,C --concurrency N` 并发拉取，tushare 限速 400 次/分钟，akshare 串行且间隔 ≥1 秒。
+### P1 组合与参数扫描
+* `cmsq sweep`（最多 64 个点，只允许已知参数）：**每个点都计入 DSR 试验账本**；最优点按最终账本重新计算 DSR。
+* `cmsq portfolio`：单账户共享现金、先卖后买；分配方式为等权 / 逆波动率（无前视）/ 固定权重；只用共同开发期。
+  组合门禁只作参考，组合不可晋升。`cmsq backtest --symbols A,B --workers N` 并发跑多标的。
+### P2 vn.py 兼容层与期货规则
+* 沙箱内提供 `CtaTemplate`/`ArrayManager`/`BarGenerator` shim（runner 2.2.1），vn.py 风格策略不改代码即可运行，仍然只输出仓位。
+* 期货：`FUT_<品种>` 主力连续（按持仓量换月，连续 3 日确认，次日生效）、合约乘数、保证金上限、最小变动价位、涨跌停、
+  夜盘交易日归属、逐合约手续费、换月两腿成本；空头仓位 [-1,1]。akshare 逐合约交叉校验，覆盖不足 90% 时记为 partial。
+### P3 CTP 行情（只观察）
+* `cmsq md run/probe`；`--features ctp` 启用 ctp2rs MdApi（只引用行情 API，有单元测试守护）；tick 校验、1 分钟 K 线、落库并写审计。
+* **本机连不上 openctp 7x24（TCP 超时）**，所以用内置回放源（带坏数据）做测试，实时源未经实网验证。
+### Dashboard
+新增"参数扫描/组合"和"期货/CTP"两页；侧栏显示数据库后端。新截图为 `15-sweep`、`16-portfolio`、`17-futures-ctp`、`18-futures-sweep-vnpy`，并重拍了 `01-overview`。
+
+## 7. 本轮真实数据结果（2026-10-20 21:58 UTC+8，PostgreSQL）
+* 参数扫描：双均线在 SH600519 上 6 个点，最优 fast=10/slow=60，Sharpe 0.69，DSR 0.432（N=20），被拒。
+* 组合：SH600519+SZ000858+SH600036，逆波动率(60)，收益 +39.30%，Sharpe 0.39，DSR 0.179；跑输等权持有（+72.8%）。
+* 期货 FUT_RB（1100 根，2022-04 至 2026-10，13 次换月，akshare 逐合约校验 1100/1100 一致）：
+  唐奇安突破 -9.77% / Sharpe -0.11；vn.py 双均线 -12.64% / -0.18。唐奇安扫描 n=10 最好，+11.78%，Sharpe 0.32；
+  vn.py 扫描最好 +0.32%。全部被拒，0 个晋升。
+* A 股交叉校验三只全部为 ok（tushare 对 akshare）。完整输出见 `docs/e2e-real-output.txt`。
+
+## 8. 本轮审查发现并已修复
+* 期货空头的平均敞口为负，被"最低敞口"规则误杀 → 改为总敞口 |x|。
+* 新浪只保留约 5 年合约，导致整段期货校验失败 → 改为逐段容错，并计算覆盖率（不足 90% 记 partial，门禁不通过）。
+* 期货 vault 结果写的是 A 股的执行标签 → 已修正。
+* DEV(bwrap) 后端缺少 vnpy_shim.py → 已随 runner 一起写入。
+* Dashboard 原来只读 SQLite → 改为按配置只读打开（PG 用运行时角色，不跑迁移）。
+* e2e 中 `| head` 触发 SIGPIPE 导致误报失败 → 改为先写文件再看。
+* 新增缺口：CLI 进程从 db.env 读取了 owner URL（只用于迁移）；回放源不能代替实网验证。（节假日表已在第 10 节补上。）
+
+## 10. 本轮（2026-10-21）：平今、交易所日历、QIFI 导出、交易统计
+* **A 平今手续费**：每笔开仓按交易日打标签（逐日 lot 账本）；平仓按交易所顺序消耗 lot——大商所、郑商所、广期所先开先平，
+  中金所先平今，上期所和能源中心由交易者指定（按"较便宜的一档先平"建模）。当日开当日平的 lot 收平今档手续费。
+  可在 `CMSQ_FUTURES_SPECS` 里按品种设 `close_order` 覆盖。日线下开平总在不同交易日，所以平今档不会出现（有测试锁定）；
+  新的 `futures::simulate_session` 支持分钟 K 线和交易日标签，夜盘开仓、次日上午平仓也算平今。
+  设计只参考了 qa-rs 的思路（该仓库没有许可证），没有拷贝代码或数据。
+* **B 交易所日历**：`cmsq data calendar --exchange futures` 拉取六家期货交易所的 tushare trade_cal 快照
+  （本机实测 SHFE/DCE/CZCE/CFFEX 各 3160 个交易日，INE 2580，GFEX 1220，覆盖到 2027-12-31，sha256 写入审计）。
+  CTP 行情的交易日归属改用对应交易所的日历；节前没有夜盘的 tick 会计入 `no_night_session_per_calendar`
+  （只标记不丢弃，因为 7x24 仿真前置本来就会推这类 tick）。期货的日历缺口填补也改用交易所日历。
+  没有快照时退回"工作日都开市"，并在报告里写明。
+* **C QIFI 导出（可选）**：`cmsq export-qifi <id> [--out]` 只对已晋升的策略开放，按 QIFI 布局（accounts / positions / trades / orders）
+  导出 vault 窗口内的模拟账户和观察信号。`orders` 恒为空，并标注 `cmsq.observe_only=true`；导出写审计并记录 sha256。
+  vault 结果里新增 `account` 快照；2.2.1 之前的 vault 结果没有这份快照，会被拒绝导出。
+* **D 交易级统计（只展示）**：根据宿主机记录的成交逐笔 FIFO 配对，在复权价尺度上计算胜率、盈亏比、盈利因子、平均/最长持仓 bar 数，
+  换月腿成本单独列出。开发期和 vault 的 `result.json` 都带 `trade_stats`（`display_only: true`）。
+  门禁不读取它，有单元测试检查 gate.rs 不引用该模块。
+* Dashboard：每个 run 下面显示交易统计和平今成本；通过 vault 的 run 再显示 QIFI 账户摘要。
+* 对抗审查记录见 `docs/reviews/06-pingjin-calendar-qifi-tradestats.md`。
+* 验证：`cargo test` 全部通过（core 单元测试 81 个，另有集成测试），clippy 0 告警，`test_docker.sh` 通过，`e2e.sh` 通过（E2E OK）。
+
+## 9. 后续阶段
 * **P1：组合与参数扫描。** 多标的组合回测、参数网格扫描。每个参数点都计入全库 trial 账本和 DSR 的 N，
   并配合 walk-forward 与 vault 纪律，避免把扫描变成过拟合。同时补上 BaoStock 第二校验源，在国内节点验证 rstdx。
 * **P2：vn.py 兼容的策略层与期货规则。** 在沙箱里提供 `CtaTemplate` / `ArrayManager` 兼容 shim（只复刻接口，MIT），

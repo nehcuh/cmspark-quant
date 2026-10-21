@@ -175,7 +175,33 @@ impl Router {
         let mut validation = Validation { status: "unvalidated".into(), against: None, overlap_days: 0, divergent_days: 0, max_rel_diff: 0.0,
             threshold: DIVERGENCE_THRESHOLD, divergent_sample: vec![], note: "no validator attempted".into() };
         let mut vattempts = vec![];
-        if self.validate {
+        if self.validate && crate::futures::is_futures(symbol) {
+            // futures: compare the held contract's raw closes, segment by segment
+            let segs: Vec<(String, String, String)> = meta.extra.get("segments").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            for s in self.sources.iter().filter(|s| s.name() != primary) {
+                match s.contract_closes(&segs).await {
+                    Ok(other) => {
+                        let raw: Vec<Bar> = bars.iter().map(|b| Bar { adj_factor: None, ..b.clone() }).collect();
+                        validation = compare(&raw, &other, s.name());
+                        validation.note = format!("{} (per-contract raw closes; {} of {} main-series days covered by the validator — older expired contracts are not served)",
+                            validation.note, validation.overlap_days, raw.len());
+                        // agreement on a small recent slice is not validation of the whole series
+                        if validation.status.starts_with("ok") && (validation.overlap_days as f64) < 0.9 * raw.len() as f64 {
+                            validation.status = "partial".into();
+                            validation.note = format!("only partly validated — {}; fetch a shorter history (e.g. --count 1100) for full coverage", validation.note);
+                        }
+                        vattempts.push(json!({"source": s.name(), "ok": true, "status": validation.status, "segments": segs.len()}));
+                        if validation.status != "unvalidated" {
+                            break;
+                        }
+                    }
+                    Err(e) => vattempts.push(json!({"source": s.name(), "ok": false, "error": format!("{e:#}")})),
+                }
+            }
+            if validation.against.is_none() {
+                validation.note = "no independent per-contract source reachable".into();
+            }
+        } else if self.validate {
             for s in self.sources.iter().filter(|s| s.name() != primary) {
                 if self.cooling(s.name()).is_some() {
                     vattempts.push(json!({"source": s.name(), "skipped": "cooldown"}));

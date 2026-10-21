@@ -1,4 +1,5 @@
-//! CMspark Quant Dashboard (GPUI Kit). Reads the real SQLite store; all mutating
+//! CMspark Quant Dashboard (GPUI Kit). Reads the configured store (PostgreSQL
+//! primary, SQLite offline); all mutating
 //! actions go through `cmsq_core::Orchestrator` (same code path as the CLI), so
 //! every action is state-machine checked and audited.
 //!
@@ -26,11 +27,26 @@ enum Tab {
     Data,
     Jobs,
     Signals,
+    Research,
+    Futures,
     Audit,
 }
 
 impl Tab {
-    const ALL: [Tab; 7] = [Tab::Overview, Tab::Library, Tab::Compare, Tab::Data, Tab::Jobs, Tab::Signals, Tab::Audit];
+    const ALL: [Tab; 9] = [Tab::Overview, Tab::Library, Tab::Compare, Tab::Research, Tab::Futures, Tab::Data, Tab::Jobs, Tab::Signals, Tab::Audit];
+    fn from_env() -> Tab {
+        match std::env::var("CMSQ_DASH_TAB").unwrap_or_default().to_lowercase().as_str() {
+            "library" => Tab::Library,
+            "compare" => Tab::Compare,
+            "research" | "sweep" | "portfolio" => Tab::Research,
+            "futures" => Tab::Futures,
+            "data" => Tab::Data,
+            "jobs" => Tab::Jobs,
+            "signals" => Tab::Signals,
+            "audit" => Tab::Audit,
+            _ => Tab::Overview,
+        }
+    }
     fn label(&self) -> &'static str {
         match self {
             Tab::Overview => "总览 Overview",
@@ -39,6 +55,8 @@ impl Tab {
             Tab::Data => "行情数据 Market Data",
             Tab::Jobs => "沙箱任务 Sandbox Jobs",
             Tab::Signals => "信号 Signals (observe-only)",
+            Tab::Research => "参数扫描/组合 Sweep & Portfolio",
+            Tab::Futures => "期货/CTP Futures & Market Data",
             Tab::Audit => "审计 Audit",
         }
     }
@@ -57,6 +75,9 @@ struct Snapshot {
     /// HMAC-verified fetch attestation per dataset (Err = refused)
     attest: Vec<Result<serde_json::Value, String>>,
     health: std::collections::BTreeMap<String, cmsq_core::data::router::SourceHealth>,
+    runs: Vec<cmsq_core::store::ResearchRun>,
+    ticks: i64,
+    backend: String,
 }
 
 /// Shared between the UI thread and the background job thread.
@@ -80,6 +101,7 @@ struct Dashboard {
     pending_promote: Option<String>,
     confirm: Entity<InputState>,
     compare: Vec<String>,
+    run_sel: Option<String>,
     status: String,
     progress: Arc<Mutex<Progress>>,
     seen_version: u64,
@@ -170,6 +192,32 @@ fn equity_chart(pts: &[(String, f64)], split: Option<usize>, height: f32) -> Div
             .child(div().flex_1().flex().justify_end().child(last.0.clone())))
 }
 
+/// Display-only trade stats line (never part of the gate).
+fn trade_stats_line(r: &serde_json::Value) -> Option<String> {
+    let t = &r["trade_stats"];
+    if !t.is_object() {
+        return None;
+    }
+    let p = |k: &str| t[k].as_f64().map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into());
+    let f = |k: &str, d: usize| t[k].as_f64().map(|x| format!("{x:.d$}")).unwrap_or_else(|| "-".into());
+    let ct = r["close_today"]["lots"].as_f64().filter(|x| *x > 0.0).map(|x| format!(" · close-today {x:.0} lots ¥{:.0}", r["close_today"]["fees"].as_f64().unwrap_or(0.0))).unwrap_or_default();
+    Some(format!("交易统计 trades (display only, not gated): {} round trips · win rate {} · P/L ratio {} · profit factor {} · avg hold {} bars (max {}){ct}",
+        t["round_trips"], p("win_rate"), f("pl_ratio", 2), f("profit_factor", 2), f("avg_bars_held", 1), t["max_bars_held"]))
+}
+
+/// QIFI-style account summary of a passed vault run.
+fn qifi_line(r: &serde_json::Value) -> Option<String> {
+    let a = &r["account"];
+    if !a.is_object() {
+        return None;
+    }
+    let f = |k: &str| a[k].as_f64().unwrap_or(0.0);
+    let units = f("final_units");
+    let pos = if units.abs() < 1e-9 { "flat".to_string() } else if a["exchange"].is_string() { format!("{} {:.0} lots", if units > 0.0 { "long" } else { "short" }, units.abs()) } else { format!("{:.0} shares", units) };
+    Some(format!("QIFI 账户 (observe-only paper) {} · balance ¥{:.0} (from ¥{:.0}) · margin ¥{:.0} · {pos} @ {} · {} fills — export: cmsq export-qifi <id>",
+        a["trading_day"].as_str().unwrap_or(""), f("balance"), f("start_equity"), f("margin"), f("final_price"), a["fills"].as_array().map(|x| x.len()).unwrap_or(0)))
+}
+
 fn section(title: &str) -> Div {
     div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(c_text()).mt_2().child(title.to_string())
 }
@@ -197,10 +245,13 @@ impl Dashboard {
             }
         });
         let mut d = Self {
-            home, tab: Tab::Overview, snap: Snapshot::default(), selected: None, symbol_ix: 0, pending_promote: None, confirm, compare: vec![],
+            home, tab: Tab::from_env(), snap: Snapshot::default(), selected: None, symbol_ix: 0, pending_promote: None, confirm, compare: vec![], run_sel: None,
             status: "ready".into(), progress, seen_version: 0, _poll: Some(poll),
         };
         d.reload();
+        if let Ok(k) = std::env::var("CMSQ_DASH_RUN") {
+            d.run_sel = d.snap.runs.iter().find(|r| r.kind == k).map(|r| r.id.clone());
+        }
         if let Some(i) = d.snap.datasets.iter().position(|m| m.symbol == "SAMPLE_REGIME") {
             d.symbol_ix = i;
         }
@@ -281,7 +332,7 @@ impl Dashboard {
 
     fn reload(&mut self) {
         let r = (|| -> anyhow::Result<Snapshot> {
-            let st = Store::open_readonly(&self.home.db(), self.home.audit_config()?)?;
+            let st = Store::open_configured_readonly(&self.home.db(), &self.home.db_config(), self.home.audit_config()?)?;
             let v = st.verify_audit()?;
             let mut datasets = vec![];
             if let Ok(rd) = std::fs::read_dir(self.home.data_dir()) {
@@ -306,6 +357,7 @@ impl Dashboard {
                 strategies: st.list_strategies(None)?, jobs: st.list_jobs(None)?, signals: st.list_signals()?,
                 audit: st.audit_entries(None, 200)?, audit_ok: Some((v.ok, v.entries, v.problem.unwrap_or_default())),
                 total_attempts: st.total_attempts()?, trials: st.trial_count()?, datasets, attest, health,
+                runs: st.list_runs(None)?, ticks: st.tick_count(None)?, backend: st.backend().to_string(),
             })
         })();
         match r {
@@ -387,6 +439,7 @@ impl Dashboard {
         col.child(div().flex_1())
             .child(div().text_xs().text_color(bcol).child(badge))
             .child(div().text_xs().text_color(c_muted()).child(format!("workspace: {}", self.home.abs().display())))
+            .child(div().text_xs().text_color(c_muted()).child(format!("database: {}", self.snap.backend)))
             .child(div().text_xs().text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) })
                 .child(if ok { format!("审计链完整 ✓ {n} entries (HMAC + anchor)") } else { format!("审计链异常 ✗ {prob}") }))
     }
@@ -618,9 +671,12 @@ impl Dashboard {
                         pct(&r["development_cost_2x"], "total_return"), pct(&r["buy_and_hold"], "total_return"))))
                     .child(div().text_xs().text_color(c_muted()).child(format!("{} · trades {} · blocked limit-up {} / limit-down {} / suspended {} · costs paid ¥{:.0} · probe: {} containers, {}",
                         r["execution"].as_str().unwrap_or(""), r["trades"], r["blocked"]["limit_up"], r["blocked"]["limit_down"], r["blocked"]["suspended"], r["costs_paid"].as_f64().unwrap_or(0.0),
-                        r["lookahead_probe"]["containers"], if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "LOOK-AHEAD" }))))
+                        r["lookahead_probe"]["containers"], if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "LOOK-AHEAD" })))
+                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(c_muted()).child(l))))
                 .when(j.status == "succeeded" && j.kind == "vault", |x| x.child(div().text_xs().text_color(rgb(0xa371f7)).child(format!("vault {}..{} · net return {} · Sharpe {} · {}",
-                    m["start"].as_str().unwrap_or(""), m["end"].as_str().unwrap_or(""), pct(&m, "total_return"), num(&m, "sharpe"), if r["passed"].as_bool() == Some(true) { "PASSED" } else { "FAILED" }))))
+                    m["start"].as_str().unwrap_or(""), m["end"].as_str().unwrap_or(""), pct(&m, "total_return"), num(&m, "sharpe"), if r["passed"].as_bool() == Some(true) { "PASSED" } else { "FAILED" })))
+                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(c_muted()).child(l)))
+                    .when_some(qifi_line(&r).filter(|_| r["passed"] == true), |x, l| x.child(div().text_xs().text_color(rgb(0x7ee2a8)).child(l))))
                 .when(j.error.is_some(), |x| x.child(div().text_xs().font_family("monospace").text_color(rgb(0xffb4a8)).child(j.error.clone().unwrap_or_default())))
                 .child(div().text_xs().text_color(c_muted()).child(format!("logs: {}/variants/NN/{{stdout,stderr}}.log", j.job_dir))));
         }
@@ -758,6 +814,167 @@ impl Dashboard {
         d
     }
 
+    fn research(&self, cx: &mut Context<Self>) -> Div {
+        let mut list = div().id("runs").w(px(380.)).h_full().overflow_y_scroll().border_r_1().border_color(c_border()).flex().flex_col();
+        if self.snap.runs.is_empty() {
+            list = list.child(div().p_3().text_xs().text_color(c_muted()).child("no sweep/portfolio runs yet — `cmsq sweep` / `cmsq portfolio`"));
+        }
+        let sel = self.run_sel.clone().or_else(|| self.snap.runs.first().map(|r| r.id.clone()));
+        for r in &self.snap.runs {
+            let id = r.id.clone();
+            let on = sel.as_deref() == Some(&r.id);
+            let title = self.snap.strategies.iter().find(|s| Some(&s.id) == r.strategy_id.as_ref()).map(|s| s.title.clone()).unwrap_or_default();
+            let what = match r.kind.as_str() {
+                "sweep" => format!("{} · {} points · grid {}", r.spec["symbol"].as_str().unwrap_or(""), r.spec["points"], r.spec["grid"]),
+                _ => format!("{} · {}", r.spec["symbols"].as_array().map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("+")).unwrap_or_default(), r.spec["alloc"]),
+            };
+            list = list.child(div().id(SharedString::from(format!("run-{}", r.id))).p_3().border_b_1().border_color(c_border()).cursor_pointer()
+                .when(on, |d| d.bg(rgb(0x1d2733))).hover(|d| d.bg(rgb(0x1a222c)))
+                .on_click(cx.listener(move |this, _, _, cx| { this.run_sel = Some(id.clone()); cx.notify(); }))
+                .child(div().flex().gap_2().items_center()
+                    .child(chip(r.kind.clone(), if r.kind == "sweep" { c_accent() } else { rgb(0xa371f7).into() }))
+                    .child(chip(r.status.clone(), if r.status == "succeeded" { rgb(0x3fb950).into() } else { rgb(0xf85149).into() }))
+                    .child(div().text_xs().text_color(c_muted()).child(format!("{} · {}", &r.id[..8], local(&r.created_at)))))
+                .child(div().mt_1().text_sm().text_color(c_text()).child(title))
+                .child(div().text_xs().text_color(c_muted()).child(what)));
+        }
+        let detail = match self.snap.runs.iter().find(|r| Some(&r.id) == sel.as_ref()) {
+            None => div(),
+            Some(r) => self.run_detail(r),
+        };
+        div().size_full().flex().child(list).child(div().id("run-detail").flex_1().h_full().overflow_y_scroll().p_4().child(detail))
+    }
+
+    fn run_detail(&self, r: &cmsq_core::store::ResearchRun) -> Div {
+        let res = r.result.clone().unwrap_or_default();
+        let mut d = div().flex().flex_col().gap_2();
+        if r.kind == "sweep" {
+            let best = &res["best"];
+            d = d.child(section(&format!("参数扫描 Sweep {} · {}", &r.id[..8], r.spec["symbol"].as_str().unwrap_or(""))))
+                .child(div().text_xs().text_color(c_muted()).child("每个扫描点都是一次独立试验，计入全库 DSR 试验账本；最优点按最终账本 N 重新计算 DSR。Every point is a trial in the library ledger; the best point is re-deflated against the final N."))
+                .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).text_sm().child(format!(
+                    "best {}  params {}  →  {}   Sharpe {}  return {}   DSR(final ledger) {} over N={}",
+                    best["job"].as_str().map(|j| &j[..8.min(j.len())]).unwrap_or("-"), best["params"], res["status"].as_str().unwrap_or("-"),
+                    num(&best["development"], "sharpe"), pct(&best["development"], "total_return"),
+                    best["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into()), best["dsr"]["trials"])));
+            if let Some(rs) = res["reasons"].as_array() {
+                for x in rs {
+                    d = d.child(div().text_xs().text_color(rgb(0xf0883e)).child(format!("✗ {}", x.as_str().unwrap_or(""))));
+                }
+            }
+            let mut t = div().flex().flex_col().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border())
+                .child(div().flex().text_xs().text_color(c_muted()).gap_2()
+                    .child(div().w(px(40.)).child("#")).child(div().w(px(260.)).child("params")).child(div().w(px(90.)).child("status"))
+                    .child(div().w(px(80.)).child("Sharpe")).child(div().w(px(100.)).child("return")).child(div().w(px(110.)).child("DSR@record")).child(div().child("note")));
+            let best_job = best["job"].as_str();
+            for p in res["points"].as_array().cloned().unwrap_or_default() {
+                let is_best = p["job"].as_str().is_some() && p["job"].as_str() == best_job;
+                t = t.child(div().flex().text_xs().gap_2().py_0p5().when(is_best, |x| x.bg(rgb(0x1d3324)))
+                    .child(div().w(px(40.)).text_color(c_muted()).child(p["point"].to_string()))
+                    .child(div().w(px(260.)).font_family("monospace").child(p["params"].to_string()))
+                    .child(div().w(px(90.)).text_color(if p["status"] == "succeeded" { c_text() } else { rgb(0xf85149).into() }).child(p["status"].as_str().unwrap_or("").to_string()))
+                    .child(div().w(px(80.)).child(num(&p, "sharpe")))
+                    .child(div().w(px(100.)).child(pct(&p, "total_return")))
+                    .child(div().w(px(110.)).child(p["dsr_at_record"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into())))
+                    .child(div().text_color(rgb(0xf85149)).child(if p["lookahead"].as_bool() == Some(true) { "LOOK-AHEAD" } else { "" }))
+                    .when(is_best, |x| x.child(div().text_color(rgb(0x3fb950)).child("★ best"))));
+            }
+            d = d.child(t);
+        } else {
+            let pm = &res["portfolio"];
+            d = d.child(section(&format!("组合回测 Portfolio {} · {}", &r.id[..8], res["alloc"])))
+                .child(div().text_xs().text_color(c_muted()).child(format!("一个账户共享现金，先卖后买；只用各标的共同的开发期日期 {} .. {}（{} bars），金库数据从不使用。组合不可晋升（P1 门禁仅供参考）。",
+                    res["window"]["start"].as_str().unwrap_or(""), res["window"]["end"].as_str().unwrap_or(""), res["window"]["bars"])))
+                .child(div().flex().gap_3()
+                    .child(card("组合收益 Return", pct(pm, "total_return"), format!("Sharpe {} · MaxDD {}", num(pm, "sharpe"), pct(pm, "max_drawdown")), c_text()))
+                    .child(card("2× 成本 Cost ×2", pct(&res["portfolio_cost_2x"], "total_return"), format!("Sharpe {}", num(&res["portfolio_cost_2x"], "sharpe")), rgb(0xd29922).into()))
+                    .child(card("等权持有 EW buy&hold", pct(&res["equal_weight_buy_and_hold"], "total_return"), format!("Sharpe {}", num(&res["equal_weight_buy_and_hold"], "sharpe")), c_muted()))
+                    .child(card("DSR", res["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into()), format!("N={} library trials · trades {}", res["dsr"]["trials"], res["trades"]),
+                        if res["gate"]["passed"].as_bool() == Some(true) { rgb(0x3fb950).into() } else { rgb(0xf0883e).into() })));
+            // metrics start after the warm-up bars (allocation look-back); chart the same window
+            let warm = res["window"]["warmup_bars"].as_u64().unwrap_or(0) as usize;
+            let pts: Vec<(String, f64)> = read_equity(&r_dir(&self.home, &r.id)).into_iter().skip(warm.saturating_sub(1)).collect();
+            d = d.child(section("组合净值 Portfolio equity (host-scored, A-share costs)"))
+                .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).child(equity_chart(&pts, None, 160.)));
+            let mut legs = div().flex().flex_col().gap_1().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border());
+            for l in res["legs"].as_array().cloned().unwrap_or_default() {
+                legs = legs.child(div().flex().gap_3().text_xs()
+                    .child(div().w(px(130.)).text_color(c_accent()).child(l["symbol"].as_str().unwrap_or("").to_string()))
+                    .child(div().w(px(160.)).child(format!("Sharpe {}", num(&l["development"], "sharpe"))))
+                    .child(div().w(px(160.)).child(format!("return {}", pct(&l["development"], "total_return"))))
+                    .child(div().text_color(c_muted()).child(format!("job {}", l["job"].as_str().map(|j| &j[..8.min(j.len())]).unwrap_or("")))));
+            }
+            d = d.child(section("各腿 Legs (each leg is its own sandbox job with the full look-ahead probe)")).child(legs)
+                .child(div().text_xs().text_color(c_muted()).child(format!("leg return correlation: {}", res["leg_return_correlation"].as_array().map(|rows| rows.iter()
+                    .map(|r| r.as_array().map(|v| v.iter().map(|x| format!("{:+.2}", x.as_f64().unwrap_or(f64::NAN))).collect::<Vec<_>>().join(" ")).unwrap_or_default())
+                    .collect::<Vec<_>>().join("  |  ")).unwrap_or_default())));
+            for x in res["gate"]["reasons"].as_array().cloned().unwrap_or_default() {
+                d = d.child(div().text_xs().text_color(rgb(0xf0883e)).child(format!("✗ {}", x.as_str().unwrap_or(""))));
+            }
+        }
+        d
+    }
+
+    fn futures_view(&self) -> Stateful<Div> {
+        let mut d = div().id("fut").size_full().overflow_y_scroll().p_4().flex().flex_col().gap_2()
+            .child(section("中国期货 China futures (P2) — 主力连续、合约乘数、保证金、最小变动价位、涨跌停、夜盘、逐合约手续费"));
+        let futs: Vec<&market::DataMeta> = self.snap.datasets.iter().filter(|m| m.symbol.starts_with("FUT_")).collect();
+        if futs.is_empty() {
+            d = d.child(div().text_xs().text_color(c_muted()).child("no futures dataset yet — `cmsq data fetch FUT_RB`"));
+        }
+        for m in futs {
+            let sp = &m.extra["spec"];
+            let rolls = m.extra["rolls"].as_array().cloned().unwrap_or_default();
+            let val = &m.extra["validation"];
+            let mut box_ = div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).flex().flex_col().gap_1()
+                .child(div().flex().gap_2().items_center()
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(m.symbol.clone()))
+                    .child(chip(format!("{} {}", sp["exchange"].as_str().unwrap_or(""), sp["product"].as_str().unwrap_or("")), c_accent()))
+                    .child(chip(format!("validation: {}", val["status"].as_str().unwrap_or("none")), if val["status"] == "ok" { rgb(0x3fb950).into() } else { rgb(0xd29922).into() }))
+                    .child(div().text_xs().text_color(c_muted()).child(format!("{} bars · {} · source {}", m.bars, m.label, m.source))))
+                .child(div().text_xs().child(format!("multiplier {} · tick {} · margin {:.0}% · limit ±{:.0}% · fee {} · night {}",
+                    sp["multiplier"], sp["tick"], sp["margin_rate"].as_f64().unwrap_or(0.0) * 100.0, sp["limit_pct"].as_f64().unwrap_or(0.0) * 100.0, sp["fee"],
+                    sp["night"].as_array().map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("–")).unwrap_or("none".into()))))
+                .child(div().text_xs().text_color(c_muted()).child(val["note"].as_str().unwrap_or("").to_string()))
+                .child(div().text_xs().text_color(c_muted()).child(format!("main-contract rolls: {} (open-interest lead confirmed over 3 closes, effective next day, never rolls back; both legs pay fees + slippage)", rolls.len())));
+            let mut rl = div().flex().flex_wrap().gap_2();
+            for r in rolls.iter().rev().take(16) {
+                rl = rl.child(chip(format!("{} {}→{} ×{:.3}", r["date"].as_str().unwrap_or(""), r["from"].as_str().unwrap_or(""), r["to"].as_str().unwrap_or(""), r["factor"].as_f64().unwrap_or(1.0)), c_muted()));
+            }
+            box_ = box_.child(rl);
+            let jobs: Vec<&JobRecord> = self.snap.jobs.iter().filter(|j| j.symbol == m.symbol && j.result.is_some()).take(8).collect();
+            for j in jobs {
+                let r = j.result.as_ref().unwrap();
+                let title = self.snap.strategies.iter().find(|s| s.id == j.strategy_id).map(|s| s.title.clone()).unwrap_or_default();
+                box_ = box_.child(div().flex().gap_3().text_xs()
+                    .child(div().w(px(70.)).text_color(c_muted()).child(j.id[..8].to_string()))
+                    .child(div().w(px(300.)).child(title))
+                    .child(div().w(px(130.)).child(format!("ret {}", pct(&r["development"], "total_return"))))
+                    .child(div().w(px(110.)).child(format!("Sharpe {}", num(&r["development"], "sharpe"))))
+                    .child(div().w(px(120.)).child(format!("MaxDD {}", pct(&r["development"], "max_drawdown"))))
+                    .child(div().text_color(c_muted()).child(r["execution"].as_str().or(r["futures"]["execution"].as_str()).unwrap_or("").chars().take(90).collect::<String>())));
+            }
+            d = d.child(box_);
+        }
+        // P3 market data
+        d = d.child(section("CTP 行情 Market data (P3, observe-only — no trading API compiled in)"));
+        let md = latest_md_run(&self.home);
+        let mut mdbox = div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).flex().flex_col().gap_1()
+            .child(div().text_xs().child(format!("ticks stored: {} (TimescaleDB hypertable `ticks` on PostgreSQL)", self.snap.ticks)));
+        let sessions: Vec<&AuditEntry> = self.snap.audit.iter().filter(|a| a.action == "md_session").take(4).collect();
+        for a in sessions {
+            mdbox = mdbox.child(div().text_xs().text_color(c_muted()).child(format!("{} · feed {} · front {} · ticks {} · bars {} · rejected {}", local(&a.ts), a.details["feed"].as_str().unwrap_or(""),
+                a.details["front"].as_str().unwrap_or(""), a.details["ticks"], a.details["bars"], a.details["rejected"])));
+        }
+        if let Some((path, rows)) = md {
+            mdbox = mdbox.child(div().text_xs().text_color(c_muted()).mt_1().child(format!("latest 1-minute bars ({path})")));
+            for r in rows.iter().take(12) {
+                mdbox = mdbox.child(div().text_xs().font_family("monospace").child(r.clone()));
+            }
+        }
+        d.child(mdbox)
+    }
+
     fn audit(&self) -> Stateful<Div> {
         let mut d = div().id("audit").p_4().flex().flex_col().gap_1().overflow_y_scroll().size_full();
         for a in &self.snap.audit {
@@ -782,6 +999,8 @@ impl Render for Dashboard {
             Tab::Data => self.data_view().into_any_element(),
             Tab::Jobs => self.jobs().into_any_element(),
             Tab::Signals => self.signals().into_any_element(),
+            Tab::Research => self.research(cx).into_any_element(),
+            Tab::Futures => self.futures_view().into_any_element(),
             Tab::Audit => self.audit().into_any_element(),
         };
         div().size_full().flex().bg(c_bg()).text_color(c_text()).font_family("Noto Sans CJK SC")
@@ -813,6 +1032,20 @@ fn main() {
         };
         gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Dashboard::new(home.clone(), window, cx))).expect("open window");
     });
+}
+
+fn r_dir(home: &Home, id: &str) -> String {
+    home.root.join("runs").join(id).display().to_string()
+}
+
+/// (path, csv lines) of the newest `runs/md_*/bars_1m.csv`
+fn latest_md_run(home: &Home) -> Option<(String, Vec<String>)> {
+    let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(home.root.join("runs")).ok()?.flatten().map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("md_"))).collect();
+    v.sort();
+    let p = v.pop()?.join("bars_1m.csv");
+    let text = std::fs::read_to_string(&p).ok()?;
+    Some((p.display().to_string(), text.lines().map(String::from).collect()))
 }
 
 /// Reasons that mean a result is not an honest measurement and must never be shown as "best".
@@ -847,5 +1080,18 @@ mod tests {
         let mut w = v.clone(); w.push(c(StrategyStatus::GatePassed, None, 0.9));
         assert_eq!(pick_best(&w).unwrap().0, 5);
         assert_eq!(pick_best(&v[..3]), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn trade_stats_and_qifi_lines() {
+        let r: serde_json::Value = serde_json::from_str(r#"{"trade_stats": {"round_trips": 4, "win_rate": 0.5, "pl_ratio": 1.25, "profit_factor": 1.1, "avg_bars_held": 3.5, "max_bars_held": 7},
+            "close_today": {"lots": 2.0, "fees": 12.0},
+            "account": {"trading_day": "2024-01-05", "balance": 1050000, "start_equity": 1000000, "margin": 200000, "final_units": -3.0, "final_price": 4000.0, "exchange": "SHFE", "fills": [1, 2]}}"#).unwrap();
+        let empty = serde_json::Value::Object(Default::default());
+        let l = trade_stats_line(&r).unwrap();
+        assert!(l.contains("not gated") && l.contains("win rate 50%") && l.contains("P/L ratio 1.25") && l.contains("close-today 2 lots"), "{l}");
+        let q = qifi_line(&r).unwrap();
+        assert!(q.contains("short 3 lots") && q.contains("observe-only"), "{q}");
+        assert!(trade_stats_line(&empty).is_none() && qifi_line(&empty).is_none());
     }
 }

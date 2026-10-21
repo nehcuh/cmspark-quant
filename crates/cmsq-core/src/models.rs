@@ -120,6 +120,9 @@ pub struct JobRecord {
     /// "dev" (development-window evaluation) or "vault" (final holdout at promote)
     #[serde(default)]
     pub kind: String,
+    /// hostname of the owning process (several hosts may share one PostgreSQL)
+    #[serde(default)]
+    pub owner_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

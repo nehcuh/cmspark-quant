@@ -63,7 +63,7 @@ async fn crash_recovery_reaps_stuck_backtests() {
         let id = add(&o, "posts", "ma_crossover").await.unwrap();
         // simulate a crash mid-backtest: status Backtesting + a running job owned by a dead pid
         o.store.set_status(&id, StrategyStatus::Backtesting, None).unwrap();
-        o.store.conn.execute("INSERT INTO jobs(id,strategy_id,backend,image,symbol,data_source,status,started_at,job_dir,owner_pid,kind) VALUES('j1',?1,'docker','x','S','s','running','2026-01-01T00:00:00Z','/tmp',2147483646,'dev')", [&id]).unwrap();
+        o.store.raw_exec("INSERT INTO jobs(id,strategy_id,backend,image,symbol,data_source,status,started_at,job_dir,owner_pid,kind) VALUES('j1',?1,'docker','x','S','s','running','2026-01-01T00:00:00Z','/tmp',2147483646,'dev')", cmsq_core::p![id.as_str()]).unwrap();
         id
     };
     let o = Orchestrator::open(home).unwrap();
@@ -125,15 +125,24 @@ async fn docker_pipeline_gate_then_vault_promote() {
     let res = job.result.as_ref().unwrap();
     assert_eq!(res["computed_by"], "cmsq-core scorer (host, trusted)");
     assert!(res["lookahead_probe"]["containers"].as_u64().unwrap() >= 7);
-    assert!(job.runner_identity.as_deref().unwrap().contains("cmsq.runner.version=2.1.0"));
+    assert!(job.runner_identity.as_deref().unwrap().contains("cmsq.runner.version=2.2.1"));
     // typed confirmation: id prefix alone is not enough
     let e = o.promote(&id, "test", &id[..8], &d).await.unwrap_err();
     assert!(matches!(e.downcast_ref::<CoreError>(), Some(CoreError::ConfirmationMismatch { .. })));
     let s = o.promote(&id, "test", &format!("PROMOTE {}", &id[..8]), &d).await.unwrap();
     assert!(matches!(s.status, StrategyStatus::Promoted | StrategyStatus::Rejected), "{:?}", s.status);
     assert!(o.store.vault_touch(&id).unwrap().is_some());
+    let res = &o.store.list_jobs(Some(&id)).unwrap()[0];
+    assert!(res.result.as_ref().unwrap()["trade_stats"]["display_only"] == true);
     if s.status == StrategyStatus::Promoted {
         assert_eq!(o.store.list_signals().unwrap().len(), 1);
+        // optional QIFI export of the observe-only paper account
+        let (p, q) = o.export_qifi(&id, None).unwrap();
+        assert!(p.exists() && q["cmsq"]["observe_only"] == true && q["orders"] == serde_json::json!({}));
+        assert_eq!(q["cmsq"]["signals"].as_array().unwrap().len(), 1);
+        assert!(o.store.audit_entries(Some(&id), 200).unwrap().iter().any(|e| e.action == "qifi_export"));
+    } else {
+        assert!(o.export_qifi(&id, None).is_err(), "only Promoted strategies export");
     }
     // vault is one-shot
     assert!(o.promote(&id, "test", &format!("PROMOTE {}", &id[..8]), &d).await.is_err());
@@ -232,4 +241,35 @@ async fn docker_reviewer_attacks_never_pass() {
         assert!(want.split('|').any(|w| w == got), "{a}: {got}");
     }
     assert!(o.store.verify_audit().unwrap().ok);
+}
+
+#[tokio::test]
+async fn qifi_export_of_promoted_paper_account() {
+    use cmsq_core::market::Bar;
+    let (_d, o) = setup().await;
+    let id = add(&o, "posts", "ma_crossover").await.unwrap();
+    assert!(o.export_qifi(&id, None).is_err(), "not promoted yet");
+    let spec = cmsq_core::futures::spec_for("FUT_RB").unwrap();
+    let bars: Vec<Bar> = (0..10).map(|i| Bar { date: format!("2024-01-{:02}", i + 2), open: 4000.0 + i as f64, high: 4010.0, low: 3990.0, close: 4001.0 + i as f64, volume: 1e5, adj_factor: Some(1.0) }).collect();
+    let pos: Vec<f64> = (0..10).map(|i| if i < 6 { 1.0 } else { -0.5 }).collect();
+    let sim = cmsq_core::futures::simulate(&spec, &bars, &pos, &Default::default(), &Default::default());
+    let acct = cmsq_core::qifi::account_inputs("FUT_RB", Some(&spec), &sim, &bars, 5);
+    let job = cmsq_core::JobRecord { id: uuid::Uuid::new_v4().to_string(), strategy_id: id.clone(), backend: "docker".into(), image: "x".into(), symbol: "FUT_RB".into(),
+        data_source: "t".into(), status: "running".into(), exit_code: None, started_at: chrono::Utc::now(), finished_at: None, duration_ms: None, job_dir: "/tmp".into(),
+        error: None, result: None, owner_pid: None, runner_identity: None, kind: "vault".into(), owner_host: None };
+    o.store.insert_job(&job).unwrap();
+    o.store.finish_job(&job.id, "succeeded", Some(0), 1, None, Some(&serde_json::json!({"passed": true, "account": acct}))).unwrap();
+    o.store.insert_signal(&cmsq_core::Signal { strategy_id: id.clone(), job_id: job.id.clone(), symbol: "FUT_RB".into(), date: "2024-01-11".into(), target_position: -0.5, created_at: chrono::Utc::now() }).unwrap();
+    o.store.set_status(&id, StrategyStatus::Promoted, None).unwrap();
+    let out = _d.path().join("q.json");
+    let (p, q) = o.export_qifi(&id, Some(&out)).unwrap();
+    assert_eq!(p, out);
+    let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+    assert_eq!(disk, q);
+    assert!(q["positions"]["SHFE.RB"]["volume_short"].as_f64().unwrap() > 0.0, "{q:#}");
+    assert!(q["trades"].as_object().unwrap().values().any(|t| t["offset"] == "CLOSE"), "flip inside the vault window closes the long");
+    assert_eq!(q["orders"], serde_json::json!({}));
+    assert_eq!(q["cmsq"]["signals"][0]["target_position"], -0.5);
+    let a = o.store.audit_entries(Some(&id), 50).unwrap().into_iter().find(|e| e.action == "qifi_export").unwrap();
+    assert_eq!(a.details["sha256"].as_str().unwrap().len(), 64);
 }

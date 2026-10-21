@@ -33,7 +33,7 @@ CMspark 抓取结果 drop (JSON) ─► 摄入/归档 ─► 结构化抽取 ─
 # Docker 组配置（一次性）：当前用户必须能访问 daemon
 sudo usermod -aG docker $USER   # 然后重新登录；或在当前 shell 用：sg docker -c "<命令>"
 docker info >/dev/null && echo ok
-scripts/build_runner.sh          # 构建 cmsq-runner:2.1.0（仅构建时联网），镜像 digest 记录到 ~/.config/cmsq/runner_image_id
+scripts/build_runner.sh          # 构建 cmsq-runner:2.2.1（仅构建时联网），镜像 digest 记录到 ~/.config/cmsq/runner_image_id
 cargo test --workspace           # 无需 Docker 的测试；需 Docker 的测试为 #[ignore]
 scripts/test_docker.sh           # 运行全部 Docker/bwrap 测试；缺依赖时**失败**而不是跳过
 scripts/e2e.sh                   # 全新工作区跑完整闭环；任一结果不符预期即非零退出（缺 Docker 即失败，除非 --allow-dev）
@@ -61,7 +61,7 @@ cmsq list | show <id> | jobs | jobs reap | trials | signals | audit verify | aud
   容器以 `/out` 目录属主 uid 运行（非 root，镜像默认 `USER 10001`），`NetworkMode=none`、只读 rootfs、CapDrop=ALL、
   no-new-privileges、pids/内存/CPU 限制、超时强杀、输出上限；从不挂载 docker.sock。
 * **宿主机可信（Rust，`cmsq-core::scorer`）**：成交、成本、指标、前视探针、DSR、walk-forward、门禁全部在宿主机计算。
-  门禁只读取容器的运行状态与 runner 镜像身份（标签 `cmsq.runner.version=2.1.0` **且** 镜像 digest 与 build_runner 记录一致），从不读取策略可控字段。
+  门禁只读取容器的运行状态与 runner 镜像身份（标签 `cmsq.runner.version=2.2.1` **且** 镜像 digest 与 build_runner 记录一致），从不读取策略可控字段。
 * **前视探针**：每个作业按种子随机抽取 5 个截断点（35%–98%）+ 固定尾部截断（n−1、n−2、n−4）+ 块自助重采样，约 16 个变体，
   每个在**全新容器**中、随机顺序运行；种子与截断点记入审计。容器看到的是从 2000-01-03 起重编号的**假日期**、
   libfaketime 冻结的时钟（2000-01-01）、被屏蔽的 /proc/uptime 等；静态检查覆盖 `i+k` 索引、负 `np.roll`、`iloc` 未来访问。

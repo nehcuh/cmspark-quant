@@ -41,6 +41,11 @@ pub trait MarketDataSource: Send + Sync {
     fn name(&self) -> &'static str;
     /// Fetch up to `count` most-recent daily bars, oldest first.
     async fn daily_bars(&self, symbol: &str, count: usize) -> Result<(Vec<Bar>, DataMeta)>;
+    /// Futures cross-validation: raw daily closes of specific contracts over
+    /// `(contract, first_date, last_date)` segments, as bars dated by trading day.
+    async fn contract_closes(&self, _segments: &[(String, String, String)]) -> Result<Vec<Bar>> {
+        anyhow::bail!("{} cannot serve per-contract futures data", self.name())
+    }
 }
 
 /// Offline fallback: bundled SYNTHETIC sample series (see scripts/gen_sample_data.py).

@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-forum",
+    "url": "https://example.invalid/quant-forum/vnpy_double_ma",
+    "author": "样例作者G",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T09:12:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-vnpy_double_ma"
+  },
+  "content": {
+    "title": "vn.py 双均线 CTA 策略（螺纹钢主力）",
+    "format": "markdown",
+    "body": "我在 vn.py 里写的双均线 CTA，用在螺纹钢主力合约日线上，多空双向。\n假设：商品期货存在趋势；日线级别；主力合约换月。\n\n```python\nfrom vnpy_ctastrategy import CtaTemplate, BarData, BarGenerator, ArrayManager\n\n\nclass DoubleMaStrategy(CtaTemplate):\n    author = \"sample\"\n\n    fast_window = 10\n    slow_window = 40\n    fixed_size = 1\n\n    parameters = [\"fast_window\", \"slow_window\", \"fixed_size\"]\n    variables = [\"fast_ma0\", \"slow_ma0\"]\n\n    def on_init(self):\n        self.bg = BarGenerator(self.on_bar)\n        self.am = ArrayManager(60)\n        self.load_bar(10)\n\n    def on_bar(self, bar: BarData):\n        self.cancel_all()\n        am = self.am\n        am.update_bar(bar)\n        if not am.inited:\n            return\n        self.fast_ma0 = am.sma(self.fast_window)\n        self.slow_ma0 = am.sma(self.slow_window)\n        if self.fast_ma0 > self.slow_ma0:\n            if self.pos == 0:\n                self.buy(bar.close_price, self.fixed_size)\n            elif self.pos < 0:\n                self.cover(bar.close_price, abs(self.pos))\n                self.buy(bar.close_price, self.fixed_size)\n        else:\n            if self.pos == 0:\n                self.short(bar.close_price, self.fixed_size)\n            elif self.pos > 0:\n                self.sell(bar.close_price, abs(self.pos))\n                self.short(bar.close_price, self.fixed_size)\n        self.put_event()\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

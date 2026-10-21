@@ -151,7 +151,12 @@ impl Tushare {
     }
 
     pub async fn trade_cal(&self, start: &str, end: &str) -> Result<Vec<(String, bool)>> {
-        let (f, items) = self.query("trade_cal", json!({"exchange": "SSE", "start_date": start.replace('-', ""), "end_date": end.replace('-', "")}), "cal_date,is_open").await?;
+        self.trade_cal_for("SSE", start, end).await
+    }
+
+    /// `exchange`: SSE, SZSE, CFFEX, SHFE, CZCE, DCE, INE, GFEX (tushare codes).
+    pub async fn trade_cal_for(&self, exchange: &str, start: &str, end: &str) -> Result<Vec<(String, bool)>> {
+        let (f, items) = self.query("trade_cal", json!({"exchange": exchange, "start_date": start.replace('-', ""), "end_date": end.replace('-', "")}), "cal_date,is_open").await?;
         let (ci, oi) = (idx(&f, "cal_date")?, idx(&f, "is_open")?);
         let mut v: Vec<(String, bool)> = items.iter().filter_map(|r| Some((ymd(r[ci].as_str()?), r[oi].as_i64().or_else(|| r[oi].as_str()?.parse().ok())? == 1))).collect();
         v.sort();
@@ -176,6 +181,63 @@ impl Tushare {
     }
 }
 
+impl Tushare {
+    /// Main-contract continuous series for `FUT_<PRODUCT>` from fut_basic +
+    /// fut_daily of every contract alive in the window, rolled by
+    /// [`crate::futures::build_main_series`] (OI lead confirmed 3 closes).
+    pub async fn futures_main(&self, symbol: &str, count: usize) -> Result<(Vec<Bar>, DataMeta)> {
+        use crate::futures::{build_main_series, spec_for, FutBar};
+        let spec = spec_for(symbol).with_context(|| format!("unknown futures product in {symbol} (known: {:?})", crate::futures::products()))?;
+        let today = chrono::Local::now().date_naive();
+        let start = (today - chrono::Duration::days(((count.min(20_000) as f64) * 1.5) as i64 + 60)).format("%Y%m%d").to_string();
+        let end = today.format("%Y%m%d").to_string();
+        let (bf, basic) = self.query("fut_basic", json!({"exchange": spec.exchange, "fut_type": "1"}), "ts_code,symbol,fut_code,multiplier,list_date,delist_date").await?;
+        let (ti, fi, li, di, mi) = (idx(&bf, "ts_code")?, idx(&bf, "fut_code")?, idx(&bf, "list_date")?, idx(&bf, "delist_date")?, idx(&bf, "multiplier")?);
+        let num = |v: &Value| v.as_f64().or_else(|| v.as_str()?.parse().ok());
+        let mut contracts: Vec<(String, String, String)> = basic.iter().filter(|r| r[fi].as_str().is_some_and(|f| f.eq_ignore_ascii_case(&spec.product)))
+            .filter_map(|r| Some((r[ti].as_str()?.to_string(), r[li].as_str().unwrap_or("").to_string(), r[di].as_str().unwrap_or("99991231").to_string())))
+            .filter(|(_, l, d)| d.as_str() >= start.as_str() && l.as_str() <= end.as_str()).collect();
+        anyhow::ensure!(!contracts.is_empty(), "fut_basic lists no {} contracts in the window", spec.product);
+        let mult_seen: Vec<f64> = basic.iter().filter(|r| r[fi].as_str().is_some_and(|f| f.eq_ignore_ascii_case(&spec.product))).filter_map(|r| num(&r[mi])).collect();
+        contracts.sort();
+        let mut all = vec![];
+        for (ts, _, _) in &contracts {
+            let (f, items) = self.paged("fut_daily", ts, &start, &end, "ts_code,trade_date,open,high,low,close,settle,vol,oi").await?;
+            let (d, o, h, l, c, st, v, oi) = (idx(&f, "trade_date")?, idx(&f, "open")?, idx(&f, "high")?, idx(&f, "low")?, idx(&f, "close")?, idx(&f, "settle")?, idx(&f, "vol")?, idx(&f, "oi")?);
+            for r in &items {
+                let (Some(dt), Some(cl)) = (r[d].as_str(), num(&r[c])) else { continue };
+                let op = num(&r[o]).unwrap_or(cl);
+                all.push(FutBar { contract: ts.split('.').next().unwrap_or(ts).to_string(), date: ymd(dt), open: if op > 0.0 { op } else { cl },
+                    high: num(&r[h]).unwrap_or(cl), low: num(&r[l]).unwrap_or(cl), close: cl, settle: num(&r[st]), volume: num(&r[v]).unwrap_or(0.0), oi: num(&r[oi]).unwrap_or(0.0) });
+            }
+        }
+        let (mut bars, rolls, held) = build_main_series(&all, 3);
+        anyhow::ensure!(bars.len() > 10, "too few main-contract bars for {symbol}");
+        let mut held = held;
+        if bars.len() > count {
+            let cut = bars.len() - count;
+            bars.drain(..cut);
+            held.drain(..cut);
+        }
+        // contiguous held-contract segments (used for per-contract cross-validation)
+        let mut segs: Vec<(String, String, String)> = vec![];
+        for (b, c) in bars.iter().zip(&held) {
+            match segs.last_mut() {
+                Some(s) if &s.0 == c => s.2 = b.date.clone(),
+                _ => segs.push((c.clone(), b.date.clone(), b.date.clone())),
+            }
+        }
+        let rolls: Vec<_> = rolls.into_iter().filter(|r| r.date >= bars[0].date).collect();
+        Ok((bars.clone(), DataMeta {
+            symbol: symbol.to_uppercase(), source: "tushare".into(), label: format!("REAL CN FUTURES DAILY main-contract {} (tushare fut_daily)", spec.product),
+            fetched_at: chrono::Utc::now().to_rfc3339(), start: bars[0].date.clone(), end: bars.last().unwrap().date.clone(), bars: bars.len(),
+            adjustment: "adj_factor = main-contract roll ratio (raw prices of the held contract; ratio continuity on roll days)".into(), server: Some(ENDPOINT.into()),
+            extra: json!({"market": "cn_futures", "spec": spec, "rolls": rolls, "segments": segs, "contracts_fetched": contracts.len(),
+                "fut_basic_multiplier": mult_seen.first(), "roll_rule": "largest OI among later contracts, confirmed 3 consecutive closes, effective next trading day; never rolls back"}),
+        }))
+    }
+}
+
 fn idx(f: &[String], k: &str) -> Result<usize> {
     f.iter().position(|x| x == k).with_context(|| format!("tushare response missing field {k}"))
 }
@@ -190,6 +252,9 @@ impl MarketDataSource for Tushare {
         "tushare"
     }
     async fn daily_bars(&self, symbol: &str, count: usize) -> Result<(Vec<Bar>, DataMeta)> {
+        if crate::futures::is_futures(symbol) {
+            return self.futures_main(symbol, count).await;
+        }
         let ts = ts_code(symbol)?;
         let today = chrono::Local::now().date_naive();
         let span = ((count.min(20_000) as f64) * 1.5) as i64 + 30;
