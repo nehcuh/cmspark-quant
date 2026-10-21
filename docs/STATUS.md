@@ -11,7 +11,7 @@
 cargo --version                      # 必须是 1.99.1（~/.cargo/bin 放在 PATH 前面）
 sudo usermod -aG docker $USER        # 或在当前 shell 里用 sg docker -c "<命令>"
 scripts/db_up.sh                     # 启动独立部署的 PostgreSQL+TimescaleDB（docker compose），口令写入 ~/.config/cmsq/db.env
-scripts/build_runner.sh              # 构建 cmsq-runner:2.2.0（含 vn.py shim），并记录镜像 digest
+scripts/build_runner.sh              # 构建 cmsq-runner:2.2.1（含 vn.py shim），并记录镜像 digest
 scripts/test_pg.sh                   # PostgreSQL 并发/权限/篡改测试
 cargo test --workspace
 scripts/test_docker.sh               # Docker/bwrap 测试与全部攻击回归
@@ -84,7 +84,7 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * `cmsq portfolio`：单账户共享现金、先卖后买；分配方式为等权 / 逆波动率（无前视）/ 固定权重；只用共同开发期。
   组合门禁只作参考，组合不可晋升。`cmsq backtest --symbols A,B --workers N` 并发跑多标的。
 ### P2 vn.py 兼容层与期货规则
-* 沙箱内提供 `CtaTemplate`/`ArrayManager`/`BarGenerator` shim（runner 2.2.0），vn.py 风格策略不改代码即可运行，仍然只输出仓位。
+* 沙箱内提供 `CtaTemplate`/`ArrayManager`/`BarGenerator` shim（runner 2.2.1），vn.py 风格策略不改代码即可运行，仍然只输出仓位。
 * 期货：`FUT_<品种>` 主力连续（按持仓量换月，连续 3 日确认，次日生效）、合约乘数、保证金上限、最小变动价位、涨跌停、
   夜盘交易日归属、逐合约手续费、换月两腿成本；空头仓位 [-1,1]。akshare 逐合约交叉校验，覆盖不足 90% 时记为 partial。
 ### P3 CTP 行情（只观察）

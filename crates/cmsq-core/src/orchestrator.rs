@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub use crate::scorer::CostModel;
 
-pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.0";
+pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.1";
 pub const RUNNER_CMD: [&str; 4] = ["python3", "-I", "-B", "/runner/signal_runner.py"];
 
 /// Progress sink (dashboard log stream / CLI stderr). Called from the job thread.

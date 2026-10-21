@@ -7,9 +7,11 @@ only move the strategy's virtual `pos`, and after every bar the runner records
 its own fills, costs, contract rules and look-ahead probe.
 
 Approximations (documented in docs/DROP_FORMAT.md):
-  * every order (limit or stop) is assumed filled at the bar it was sent on;
-    the host executes the resulting target at the NEXT bar's open, so there is
-    no same-bar fill advantage;
+  * limit/stop orders rest until the next bar and are crossed against its
+    high/low the way vn.py's BacktestingEngine does; the resulting `pos` is the
+    target, which the host then executes at the following bar's open (one bar
+    later than vn.py would fill — conservative, never look-ahead);
+  * intraday BarGenerator windows (minute/hour) pass daily bars straight through;
   * target = clip(pos / fixed_size, position_min, 1) where fixed_size is the
     strategy's `fixed_size` attribute (default 1);
   * only daily bars are fed; BarGenerator passes bars straight through
@@ -129,6 +131,7 @@ class CtaTemplate:
         self.trading = False
         self.pos = 0
         self._oid = 0
+        self._orders = {}
         self.variables = ["inited", "trading", "pos"] + [v for v in type(self).variables if v not in ("inited", "trading", "pos")]
         for k in type(self).parameters:
             if k in setting:
@@ -159,41 +162,59 @@ class CtaTemplate:
     def on_stop_order(self, stop_order):
         pass
 
-    # order API: virtual fills only
-    def _fill(self, direction, offset, price, volume):
+    # order API: orders are held and crossed against the NEXT bar, like vn.py's
+    # BacktestingEngine (limit: low<=px for buys / high>=px for sells, filled at
+    # min/max(px, open); stop: triggered by high>=px / low<=px, filled at
+    # max/min(px, open)). Fills only move the virtual `pos`; nothing leaves the sandbox.
+    def send_order(self, direction, offset, price, volume, stop=False, lock=False, net=False):
         if not self.trading:
             return []
-        volume = abs(float(volume))
-        if direction == Direction.LONG:
-            self.pos += volume
-        else:
-            self.pos -= volume
         self._oid += 1
-        oid = "SIM.%d" % self._oid
-        t = TradeData(orderid=oid, tradeid=oid, direction=direction, offset=offset, price=float(price), volume=volume)
-        self.on_trade(t)
+        oid = ("STOP.%d" if stop else "SIM.%d") % self._oid
+        self._orders[oid] = (bool(stop), direction, offset, float(price), abs(float(volume)))
+        if stop:
+            self.on_stop_order(StopOrder(vt_symbol=self.vt_symbol, direction=direction, offset=offset, price=float(price),
+                                         volume=abs(float(volume)), stop_orderid=oid, strategy_name=self.strategy_name))
+        else:
+            self.on_order(OrderData(orderid=oid, direction=direction, offset=offset, price=float(price), volume=abs(float(volume))))
         return [oid]
 
     def buy(self, price, volume, stop=False, lock=False, net=False):
-        return self._fill(Direction.LONG, Offset.OPEN, price, volume)
+        return self.send_order(Direction.LONG, Offset.OPEN, price, volume, stop, lock, net)
 
     def sell(self, price, volume, stop=False, lock=False, net=False):
-        return self._fill(Direction.SHORT, Offset.CLOSE, price, min(abs(volume), max(self.pos, 0)))
+        return self.send_order(Direction.SHORT, Offset.CLOSE, price, volume, stop, lock, net)
 
     def short(self, price, volume, stop=False, lock=False, net=False):
-        return self._fill(Direction.SHORT, Offset.OPEN, price, volume)
+        return self.send_order(Direction.SHORT, Offset.OPEN, price, volume, stop, lock, net)
 
     def cover(self, price, volume, stop=False, lock=False, net=False):
-        return self._fill(Direction.LONG, Offset.CLOSE, price, min(abs(volume), max(-self.pos, 0)))
+        return self.send_order(Direction.LONG, Offset.CLOSE, price, volume, stop, lock, net)
 
-    def send_order(self, direction, offset, price, volume, stop=False, lock=False, net=False):
-        return self._fill(direction, offset, price, volume)
+    def _cross(self, bar):
+        """Match resting orders against `bar` (limit orders first, then stops)."""
+        for want_stop in (False, True):
+            for oid, (stop, d, off, px, vol) in list(self._orders.items()):
+                if stop != want_stop or oid not in self._orders:
+                    continue
+                long = d == Direction.LONG
+                if not stop:
+                    hit = bar.low_price <= px if long else bar.high_price >= px
+                    fill = min(px, bar.open_price) if long else max(px, bar.open_price)
+                else:
+                    hit = bar.high_price >= px if long else bar.low_price <= px
+                    fill = max(px, bar.open_price) if long else min(px, bar.open_price)
+                if not hit:
+                    continue
+                del self._orders[oid]
+                self.pos += vol if long else -vol
+                self.on_trade(TradeData(orderid=oid, tradeid=oid, direction=d, offset=off, price=float(fill), volume=vol))
 
     def cancel_order(self, vt_orderid):
-        pass
+        self._orders.pop(vt_orderid, None)
 
     def cancel_all(self):
-        pass
+        self._orders.clear()
 
     def load_bar(self, days, interval=Interval.MINUTE, callback=None, use_database=False):
         pass
@@ -251,6 +272,10 @@ class BarGenerator:
         self.on_bar = on_bar
         self.window = window or 1
         self.on_window_bar = on_window_bar
+        # only daily bars reach the sandbox: an intraday window (e.g. 15-minute bars)
+        # has no meaning there, so each daily bar is passed through as one window bar
+        if interval in (Interval.MINUTE, Interval.HOUR):
+            self.window = 1
         self._buf = []
 
     def update_tick(self, tick):
@@ -332,20 +357,33 @@ class ArrayManager:
         out = np.array([np.std(c[max(0, i - n + 1):i + 1]) * nbdev for i in range(len(c))])
         return self._ret(out, array)
 
+    @staticmethod
+    def _wilder(x, n):
+        """TA-Lib style Wilder smoothing: seed with the mean of the first n values."""
+        out = np.full(len(x), np.nan)
+        if len(x) < n:
+            return out
+        out[n - 1] = np.mean(x[:n])
+        for i in range(n, len(x)):
+            out[i] = (out[i - 1] * (n - 1) + x[i]) / n
+        return out
+
     def atr(self, n, array=False):
+        """TA-Lib ATR (Wilder), as vn.py's ArrayManager uses."""
         h, l, c = self.high_array, self.low_array, self.close_array
-        pc = np.concatenate([[c[0]], c[:-1]])
-        tr = np.maximum(h - l, np.maximum(abs(h - pc), abs(l - pc)))
-        out = np.array([np.mean(tr[max(0, i - n + 1):i + 1]) for i in range(len(tr))])
+        pc = np.concatenate([[np.nan], c[:-1]])
+        tr = np.nanmax(np.vstack([h - l, abs(h - pc), abs(l - pc)]), axis=0)[1:]
+        out = np.concatenate([[np.nan], self._wilder(tr, n)])
         return self._ret(out, array)
 
     def rsi(self, n, array=False):
-        c = self.close_array
-        d = np.diff(c, prepend=c[0])
-        up, dn = np.where(d > 0, d, 0.0), np.where(d < 0, -d, 0.0)
-        au = np.array([np.mean(up[max(0, i - n + 1):i + 1]) for i in range(len(c))])
-        ad = np.array([np.mean(dn[max(0, i - n + 1):i + 1]) for i in range(len(c))])
-        out = np.where(ad == 0, 100.0, 100 - 100 / (1 + au / np.where(ad == 0, 1, ad)))
+        """TA-Lib RSI (Wilder)."""
+        d = np.diff(self.close_array)
+        au = self._wilder(np.where(d > 0, d, 0.0), n)
+        ad = self._wilder(np.where(d < 0, -d, 0.0), n)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = np.where(ad == 0, 100.0, 100 - 100 / (1 + au / ad))
+        out = np.concatenate([[np.nan], r])
         return self._ret(out, array)
 
     def macd(self, fast, slow, signal, array=False):
@@ -419,6 +457,7 @@ def run_cta(mod, df, params, lo):
     for d, r in df.iterrows():
         bar = BarData(datetime=d.to_pydatetime(), open_price=r["open"], high_price=r["high"], low_price=r["low"],
                       close_price=r["close"], volume=r["volume"], open_interest=float(r.get("open_interest", 0.0) or 0.0))
+        s._cross(bar)
         s.on_bar(bar)
         out.append(max(lo, min(1.0, float(s.pos) / size)))
     s.on_stop()

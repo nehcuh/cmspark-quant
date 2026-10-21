@@ -54,13 +54,24 @@ Interval/Exchange). Parameters come from the class's `parameters = [...]` list a
 the class-level defaults; sweeps override them by name.
 
 Semantics — the shim never places an order:
-* `buy/sell/short/cover/send_order` only move the strategy's virtual `pos`
-  (sell/cover are capped at the open position); `on_trade` is called back.
+* `buy/sell/short/cover/send_order` create resting limit or stop orders (`on_order` /
+  `on_stop_order` called back); `cancel_order` / `cancel_all` remove them. On the next
+  bar they are crossed the way vn.py's BacktestingEngine does (limit before stop; limit
+  buy fills if low ≤ px at min(px, open); stop buy triggers if high ≥ px at max(px, open);
+  mirrored for sells), which moves the virtual `pos` and calls `on_trade`.
 * After every bar the runner records `clip(pos / fixed_size, position_min, 1)` as the
-  target position; the trusted host executes it at the next bar's open with its own
-  costs and contract rules. Limit/stop prices are ignored (no same-bar fill edge).
-* `load_bar`, `put_event`, `write_log`, `send_email`, `cancel_*` are no-ops.
-* Daily bars only; `BarGenerator(window=N)` aggregates N bars.
+  target; the trusted host executes it at the next bar's open with its own costs and
+  contract rules — one bar later than vn.py fills (conservative, never look-ahead).
+* ArrayManager ATR/RSI use TA-Lib-style Wilder smoothing; other indicators are numpy
+  re-implementations (no TA-Lib in the image).
+* `load_bar`, `put_event`, `write_log`, `send_email`, `sync_data` are no-ops; `on_tick`
+  is never called (daily bars only). Intraday `BarGenerator` windows (minute/hour) pass
+  daily bars through; DAILY/WEEKLY windows aggregate N bars.
+* Verified: the official examples DoubleMa, AtrRsi, BollChannel, KingKeltner, TurtleSignal
+  and DualThrust run unmodified (`scripts/test_vnpy_shim.py`, and in Docker on FUT_RB).
+  Known differences: pyramiding beyond `fixed_size` lots is clipped to ±1; time-of-day
+  logic (DualThrust's exit time) is meaningless on daily bars; no `pricetick` rounding of
+  order prices; no TA-Lib, so values can differ slightly from vn.py.
 
 `job.json` now carries `position_min`: 0 for A-shares, -1 for futures (`FUT_*`), so
 short targets survive only on futures jobs; the host re-validates the range.
