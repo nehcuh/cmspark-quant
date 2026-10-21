@@ -26,6 +26,9 @@ pub struct ExchangeCalendar {
     pub exchange: String,
     /// None = weekday fallback (no snapshot)
     pub cal: Option<Calendar>,
+    /// Set when a snapshot file exists but is malformed: callers must warn,
+    /// audit it, and refuse in a real workspace.
+    pub invalid: Option<String>,
 }
 
 fn ymd(d: NaiveDate) -> String {
@@ -37,6 +40,7 @@ impl ExchangeCalendar {
         Self {
             exchange: exchange.into(),
             cal: None,
+            invalid: None,
         }
     }
     pub fn path(data_dir: &Path, exchange: &str) -> std::path::PathBuf {
@@ -44,9 +48,21 @@ impl ExchangeCalendar {
     }
     /// Snapshot if present, weekday fallback otherwise.
     pub fn load(data_dir: &Path, exchange: &str) -> Self {
-        Self {
-            exchange: exchange.into(),
-            cal: Calendar::load(&Self::path(data_dir, exchange)).ok(),
+        let p = Self::path(data_dir, exchange);
+        if !p.exists() {
+            return Self::weekdays(exchange);
+        }
+        match Calendar::load(&p) {
+            Ok(c) => Self {
+                exchange: exchange.into(),
+                cal: Some(c),
+                invalid: None,
+            },
+            Err(e) => Self {
+                exchange: exchange.into(),
+                cal: None,
+                invalid: Some(format!("{e:#}")),
+            },
         }
     }
     pub fn source(&self) -> String {
@@ -55,11 +71,33 @@ impl ExchangeCalendar {
                 "tushare trade_cal {} snapshot {}..{}",
                 self.exchange, c.first, c.last
             ),
+            None if self.invalid.is_some() => format!(
+                "INVALID _calendar_{}.txt ({}); weekday fallback",
+                self.exchange,
+                self.invalid.as_deref().unwrap_or("")
+            ),
             None => format!(
                 "weekday fallback (no _calendar_{}.txt; run `cmsq data calendar --exchange {}`)",
                 self.exchange, self.exchange
             ),
         }
+    }
+    /// Malformed snapshots across all exchanges: (exchange, reason).
+    /// Real workspaces refuse; DEMO / tests may proceed with a warning.
+    pub fn ensure_valid(&self, real_workspace: bool) -> anyhow::Result<()> {
+        if let Some(e) = &self.invalid {
+            anyhow::ensure!(
+                !real_workspace,
+                "calendar _calendar_{}.txt is malformed ({e}); refusing in a real workspace — re-run `cmsq data calendar --exchange {}`",
+                self.exchange,
+                self.exchange
+            );
+            eprintln!(
+                "  ⚠ calendar _calendar_{}.txt is malformed ({e}); using weekday fallback",
+                self.exchange
+            );
+        }
+        Ok(())
     }
     /// Outside the snapshot range we fall back to weekdays rather than guess.
     pub fn is_open(&self, d: NaiveDate) -> bool {
@@ -136,6 +174,12 @@ impl FuturesCalendars {
                 .collect(),
         }
     }
+    pub fn invalid(&self) -> Vec<(String, String)> {
+        self.by_exchange
+            .values()
+            .filter_map(|c| c.invalid.clone().map(|e| (c.exchange.clone(), e)))
+            .collect()
+    }
     pub fn get(&self, exchange: &str) -> ExchangeCalendar {
         self.by_exchange
             .get(exchange)
@@ -180,6 +224,7 @@ mod tests {
         ExchangeCalendar {
             exchange: "SHFE".into(),
             cal: Some(Calendar::from_days(days)),
+            invalid: None,
         }
     }
 
@@ -230,5 +275,34 @@ mod tests {
     fn outside_snapshot_range_falls_back_to_weekdays() {
         let c = shfe_2024_oct();
         assert!(c.is_open(d("2025-01-06")) && !c.is_open(d("2025-01-04")));
+    }
+
+    #[test]
+    fn malformed_snapshot_is_flagged_not_silently_weekdays() {
+        let t = tempfile::tempdir().unwrap();
+        let w =
+            |body: &str| std::fs::write(ExchangeCalendar::path(t.path(), "SHFE"), body).unwrap();
+        // missing file: plain fallback, not invalid
+        let c = ExchangeCalendar::load(t.path(), "SHFE");
+        assert!(c.cal.is_none() && c.invalid.is_none());
+        assert!(c.ensure_valid(true).is_ok());
+        for bad in [
+            "# SHFE test (open days only)\n2026-09-29\n", // no range
+            "2026-09-29\n2026-09-30\n",                   // no header
+            "# SHFE trade calendar 2026-09-29..2026-10-12 x\n2026-9-30\n", // bad date
+            "# SHFE trade calendar 2026-09-29..2026-10-12 x\n2026-11-02\n", // out of range
+            "# SHFE trade calendar 2026-10-12..2026-09-29 x\n2026-10-01\n", // reversed
+        ] {
+            w(bad);
+            let c = ExchangeCalendar::load(t.path(), "SHFE");
+            assert!(c.cal.is_none() && c.invalid.is_some(), "{bad:?}");
+            assert!(c.source().contains("INVALID"));
+            assert!(c.ensure_valid(true).is_err(), "real workspace must refuse");
+            assert!(c.ensure_valid(false).is_ok(), "demo warns only");
+            assert_eq!(FuturesCalendars::load(t.path()).invalid().len(), 1);
+        }
+        w("# SHFE trade calendar 2026-09-29..2026-10-12 (open days only)\n2026-09-29\n2026-09-30\n");
+        let c = ExchangeCalendar::load(t.path(), "SHFE");
+        assert!(c.cal.is_some() && c.invalid.is_none());
     }
 }

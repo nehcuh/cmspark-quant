@@ -335,6 +335,21 @@ pub fn run_md_blocking(
     let source = format!("ctp:{}", feed.name());
     let mut agg = Aggregator::new(&cfg.instruments);
     agg.calendars = crate::calendars::FuturesCalendars::load(&o.home.data_dir());
+    for c in agg.calendars.by_exchange.values() {
+        if let Some(e) = &c.invalid {
+            o.store
+                .audit(
+                    "md",
+                    "calendar_invalid",
+                    None,
+                    serde_json::json!({"exchange": c.exchange, "error": e}),
+                    false,
+                )
+                .map_err(|x| inv(format!("{x:#}")))?;
+        }
+        c.ensure_valid(!o.home.is_demo())
+            .map_err(|x| inv(format!("{x:#}")))?;
+    }
     let mut buf: Vec<Tick> = Vec::new();
     let mut stored = 0usize;
     let mut status = Vec::new();
@@ -533,6 +548,7 @@ mod tests {
             crate::calendars::ExchangeCalendar {
                 exchange: "SHFE".into(),
                 cal: Some(crate::replay::Calendar::from_days(days)),
+                invalid: None,
             },
         );
         let tick = |day: &str, t: &str, v: f64| RawTick {

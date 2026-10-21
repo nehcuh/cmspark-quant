@@ -462,10 +462,38 @@ impl Orchestrator {
         }
         // futures: the exchange's own calendar (falls back to SSE, which matches on all but rare days)
         let ex_cal = crate::futures::spec_for(&meta.symbol).and_then(|s| {
-            crate::calendars::ExchangeCalendar::load(&self.home.data_dir(), &s.exchange).cal
+            let c = crate::calendars::ExchangeCalendar::load(&self.home.data_dir(), &s.exchange);
+            if let Some(e) = &c.invalid {
+                eprintln!(
+                    "  ⚠ malformed _calendar_{}.txt ({e}); not used for gap fill",
+                    s.exchange
+                );
+                let _ = self.store.audit(
+                    "data",
+                    "calendar_invalid",
+                    None,
+                    serde_json::json!({"exchange": s.exchange, "error": e}),
+                    false,
+                );
+            }
+            c.cal
         });
-        let Some(cal) = ex_cal.or_else(|| {
-            crate::replay::Calendar::load(&self.home.data_dir().join("_calendar_SSE.txt")).ok()
+        let sse = self.home.data_dir().join("_calendar_SSE.txt");
+        let Some(cal) = ex_cal.or_else(|| match crate::replay::Calendar::load(&sse) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                if sse.exists() {
+                    eprintln!("  ⚠ malformed _calendar_SSE.txt ({e:#}); gap fill skipped");
+                    let _ = self.store.audit(
+                        "data",
+                        "calendar_invalid",
+                        None,
+                        serde_json::json!({"exchange": "SSE", "error": format!("{e:#}")}),
+                        false,
+                    );
+                }
+                None
+            }
         }) else {
             return bars;
         };
