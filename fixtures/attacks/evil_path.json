@@ -1,0 +1,1 @@
+{"spec": "cmspark.scrape.v1", "sample": true, "source": {"site": "../../etc", "url": "javascript:alert(1)", "author": "a"}, "scraped_at": "x", "scraper": {"agent": "c", "version": "x", "task_id": "../../../../tmp/pwn"}, "content": {"title": "T", "format": "markdown", "body": "b"}, "labels": []}

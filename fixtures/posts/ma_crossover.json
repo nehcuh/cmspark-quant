@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-forum",
+    "url": "https://example.invalid/quant-forum/ma_crossover",
+    "author": "样例作者A",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T09:12:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-ma_crossover"
+  },
+  "content": {
+    "title": "双均线金叉死叉，简单但有效？",
+    "format": "markdown",
+    "body": "思路：快线上穿慢线买入，下穿卖出。我在大盘股上试过，参数 fast=10, slow=30 效果不错。\n假设：趋势会延续一段时间；日线级别。没有考虑手续费。\n\n```python\nimport pandas as pd\n\ndef generate_signals(df, fast=10, slow=30):\n    f = df[\"close\"].rolling(fast).mean()\n    s = df[\"close\"].rolling(slow).mean()\n    return (f > s).astype(float)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

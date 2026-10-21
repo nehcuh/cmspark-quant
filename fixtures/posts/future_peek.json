@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-forum",
+    "url": "https://example.invalid/quant-forum/future_peek",
+    "author": "样例作者D",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T16:30:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-future_peek"
+  },
+  "content": {
+    "title": "收益率惊人的“明日涨跌”策略（年化 300%！）",
+    "format": "markdown",
+    "body": "用明天的收盘价判断今天是否买入，回测年化 300%，胜率 90%。\n\n```python\ndef generate_signals(df):\n    # BUG: looks into the future\n    return (df[\"close\"].shift(-1) > df[\"close\"]).astype(float)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

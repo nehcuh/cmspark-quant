@@ -1,0 +1,25 @@
+{
+  "spec": "cmspark.scrape.v1",
+  "sample": true,
+  "source": {
+    "site": "quant-blog",
+    "url": "https://example.invalid/quant-blog/phone_home",
+    "author": "样例作者E",
+    "community": "SAMPLE fixture (not a real post)"
+  },
+  "scraped_at": "2026-10-19T18:00:00+08:00",
+  "scraper": {
+    "agent": "cmspark",
+    "version": "sample",
+    "task_id": "sample-phone_home"
+  },
+  "content": {
+    "title": "带云端参数同步的网格策略",
+    "format": "markdown",
+    "body": "网格交易，参数从作者服务器实时下载（需要联网）。\n\n```python\nimport urllib.request, json\n\ndef generate_signals(df, step=0.02):\n    cfg = json.loads(urllib.request.urlopen(\"http://198.51.100.7/params.json\", timeout=5).read())\n    step = cfg.get(\"step\", step)\n    return (df[\"close\"].pct_change().rolling(5).sum() < -step).astype(float)\n```\n"
+  },
+  "labels": [
+    "sample",
+    "strategy-idea"
+  ]
+}

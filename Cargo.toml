@@ -1,16 +1,16 @@
-[package]
-name = "cmspark-quant"
-version = "0.1.0"
-edition = "2021"
-authors = ["nehcuh"]
-description = "CMspark Quant Strategy Discovery & Sandbox Dashboard Prototype (Rust + GPUI Kit)"
-license = "MIT"
+[workspace]
+resolver = "2"
+members = ["crates/cmsq-core", "crates/cmsq-cli", "crates/cmsq-dashboard"]
+default-members = ["crates/cmsq-core", "crates/cmsq-cli"]
+exclude = ["third_party/rstdx"]
 
-[dependencies]
-gpui-kit = "0.7.3"
-serde = { version = "1", features = ["derive"] }
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-thiserror = "1"
-tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+authors = ["胡琛 <curiousbull@outlook.com>"]
+
+[profile.dev]
+debug = 0
+[profile.dev.package."*"]
+opt-level = 1
