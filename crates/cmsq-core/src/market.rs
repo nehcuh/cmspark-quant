@@ -130,6 +130,20 @@ pub fn parse_csv(csv: &str) -> Result<Vec<Bar>> {
             "non-finite / non-positive price on line {}",
             i + 2
         );
+        // impossible OHLC (e.g. low above close) is rejected before anything is
+        // signed (review #11 data-quality finding); 1e-6 relative rounding slack
+        let eps = b.high.abs() * 1e-6;
+        anyhow::ensure!(
+            b.low <= b.high + eps
+                && b.low <= b.open.min(b.close) + eps
+                && b.high + eps >= b.open.max(b.close),
+            "impossible OHLC on line {} (open {} high {} low {} close {})",
+            i + 2,
+            b.open,
+            b.high,
+            b.low,
+            b.close
+        );
         anyhow::ensure!(
             b.adj_factor.is_none_or(|a| a.is_finite() && a > 0.0),
             "bad adj_factor on line {}",
