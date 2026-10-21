@@ -35,13 +35,21 @@ pub struct CostModel {
 
 impl Default for CostModel {
     fn default() -> Self {
-        Self { commission: 0.00025, min_commission: 5.0, slippage: 0.0005, multiplier: 1.0 }
+        Self {
+            commission: 0.00025,
+            min_commission: 5.0,
+            slippage: 0.0005,
+            multiplier: 1.0,
+        }
     }
 }
 
 impl CostModel {
     pub fn stressed(&self, m: f64) -> Self {
-        Self { multiplier: self.multiplier * m, ..*self }
+        Self {
+            multiplier: self.multiplier * m,
+            ..*self
+        }
     }
 }
 
@@ -89,14 +97,22 @@ pub struct Rules {
 
 impl Rules {
     pub fn is_st(&self, date: &str) -> bool {
-        self.st.iter().any(|(a, b)| date >= a.as_str() && date <= b.as_str())
+        self.st
+            .iter()
+            .any(|(a, b)| date >= a.as_str() && date <= b.as_str())
     }
 }
 
 fn board(symbol: &str) -> (&'static str, String) {
     let s = symbol.to_uppercase();
-    let code = s.trim_start_matches(|c: char| c.is_ascii_alphabetic()).to_string();
-    let b = if s.starts_with("BJ") || code.starts_with("92") || code.starts_with('8') || code.starts_with("43") {
+    let code = s
+        .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+        .to_string();
+    let b = if s.starts_with("BJ")
+        || code.starts_with("92")
+        || code.starts_with('8')
+        || code.starts_with("43")
+    {
         "bj"
     } else if code.starts_with("688") || code.starts_with("689") {
         "star"
@@ -120,7 +136,12 @@ pub fn limit_pct(symbol: &str, date: &str) -> f64 {
 
 /// Limit with ST and IPO rules; `None` = no price limit that day.
 /// `listing_day` is the 0-based trading-day index since listing when known.
-pub fn limit_for(symbol: &str, date: &str, rules: &Rules, listing_day: Option<usize>) -> Option<f64> {
+pub fn limit_for(
+    symbol: &str,
+    date: &str,
+    rules: &Rules,
+    listing_day: Option<usize>,
+) -> Option<f64> {
     let (b, _) = board(symbol);
     if let (Some(k), Some(ld)) = (listing_day, rules.list_date.as_deref()) {
         let registration = match b {
@@ -196,13 +217,30 @@ pub struct Fill {
 /// the day's traded value; the estimate is the 10th percentile across fills
 /// (90% of fills fit). `mult` = contract multiplier (1 for shares); A-share
 /// fill quantities are on the adjusted scale, so notional uses `adj_price`.
-pub fn capacity(bars: &[Bar], sim: &SimResult, mult: f64, lo: usize, hi: usize, participation: f64) -> Option<f64> {
-    let mut caps: Vec<f64> = sim.fills.iter().filter(|f| f.t >= lo.max(1) && f.t < hi && !f.kind.starts_with("roll")).filter_map(|f| {
-        let eq = *sim.equity.get(f.t - 1)?;
-        let notional = if mult == 1.0 { (f.qty * f.adj_price).abs() } else { (f.qty * f.price * mult).abs() };
-        let day_value = bars.get(f.t)?.volume * bars[f.t].close * mult;
-        (notional > 0.0 && eq > 0.0 && day_value > 0.0).then(|| participation * day_value / (notional / eq))
-    }).collect();
+pub fn capacity(
+    bars: &[Bar],
+    sim: &SimResult,
+    mult: f64,
+    lo: usize,
+    hi: usize,
+    participation: f64,
+) -> Option<f64> {
+    let mut caps: Vec<f64> = sim
+        .fills
+        .iter()
+        .filter(|f| f.t >= lo.max(1) && f.t < hi && !f.kind.starts_with("roll"))
+        .filter_map(|f| {
+            let eq = *sim.equity.get(f.t - 1)?;
+            let notional = if mult == 1.0 {
+                (f.qty * f.adj_price).abs()
+            } else {
+                (f.qty * f.price * mult).abs()
+            };
+            let day_value = bars.get(f.t)?.volume * bars[f.t].close * mult;
+            (notional > 0.0 && eq > 0.0 && day_value > 0.0)
+                .then(|| participation * day_value / (notional / eq))
+        })
+        .collect();
     if caps.is_empty() {
         return None;
     }
@@ -219,16 +257,31 @@ pub fn simulate(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel) -> S
 
 /// `simulate` with ST / IPO rules. Prices in `bars` are RAW; lots, fees and limits
 /// use raw prices, the adj_factor only carries wealth across corporate actions.
-pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel, rules: &Rules) -> SimResult {
+pub fn simulate_with(
+    symbol: &str,
+    bars: &[Bar],
+    pos: &[f64],
+    costs: &CostModel,
+    rules: &Rules,
+) -> SimResult {
     assert_eq!(bars.len(), pos.len());
     let first_listed = rules.list_date.as_deref().and_then(|ld| {
         let i = bars.iter().position(|b| b.date.as_str() >= ld)?;
         // only meaningful if the series actually starts at the listing
-        (i == 0 && chrono::NaiveDate::parse_from_str(&bars[0].date, "%Y-%m-%d").ok()?
-            .signed_duration_since(chrono::NaiveDate::parse_from_str(ld, "%Y-%m-%d").ok()?).num_days() <= 7).then_some(0usize)
+        (i == 0
+            && chrono::NaiveDate::parse_from_str(&bars[0].date, "%Y-%m-%d")
+                .ok()?
+                .signed_duration_since(chrono::NaiveDate::parse_from_str(ld, "%Y-%m-%d").ok()?)
+                .num_days()
+                <= 7)
+            .then_some(0usize)
     });
     let n = bars.len();
-    let mut r = SimResult { equity: vec![INITIAL_CAPITAL; n], exposure: vec![0.0; n], ..Default::default() };
+    let mut r = SimResult {
+        equity: vec![INITIAL_CAPITAL; n],
+        exposure: vec![0.0; n],
+        ..Default::default()
+    };
     if n == 0 {
         return r;
     }
@@ -254,7 +307,10 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
             _ => pb.close,
         };
         let (up, down) = match lim {
-            Some(l) => (round2(prev_close * (1.0 + l)), round2(prev_close * (1.0 - l))),
+            Some(l) => (
+                round2(prev_close * (1.0 + l)),
+                round2(prev_close * (1.0 - l)),
+            ),
             None => (f64::INFINITY, 0.0),
         };
         let equity_open = cash + shares * b.open;
@@ -270,7 +326,10 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
                     let px = b.open * (1.0 + costs.slippage * m);
                     let buy_duty = stamp_duty_sides(&b.date).0 * m;
                     let mut lots = (delta / (100.0 * px)).floor();
-                    while lots > 0.0 && lots * 100.0 * px * (1.0 + buy_duty) + commission(lots * 100.0 * px) > cash {
+                    while lots > 0.0
+                        && lots * 100.0 * px * (1.0 + buy_duty) + commission(lots * 100.0 * px)
+                            > cash
+                    {
                         lots -= 1.0;
                     }
                     if lots > 0.0 {
@@ -280,7 +339,15 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
                         shares += lots * 100.0;
                         r.costs_paid += c + lots * 100.0 * (px - b.open);
                         let f = b.adj_factor.unwrap_or(1.0);
-                        r.fills.push(Fill { t, date: b.date.clone(), qty: lots * 100.0 / f, price: px, adj_price: px * f, cost: c + lots * 100.0 * (px - b.open), kind: "buy".into() });
+                        r.fills.push(Fill {
+                            t,
+                            date: b.date.clone(),
+                            qty: lots * 100.0 / f,
+                            price: px,
+                            adj_price: px * f,
+                            cost: c + lots * 100.0 * (px - b.open),
+                            kind: "buy".into(),
+                        });
                         r.trades += 1;
                     }
                 }
@@ -289,12 +356,27 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
             } else {
                 let px = b.open * (1.0 - costs.slippage * m);
                 let sell_all = target <= 1e-9;
-                let qty = if sell_all { shares } else { ((-delta) / (100.0 * b.open)).round().min((shares / 100.0).floor()) * 100.0 };
+                let qty = if sell_all {
+                    shares
+                } else {
+                    ((-delta) / (100.0 * b.open))
+                        .round()
+                        .min((shares / 100.0).floor())
+                        * 100.0
+                };
                 if qty > 0.0 {
                     let v = qty * px;
                     let c = commission(v) + v * stamp_duty(&b.date) * m;
                     let f = b.adj_factor.unwrap_or(1.0);
-                    r.fills.push(Fill { t, date: b.date.clone(), qty: -qty / f, price: px, adj_price: px * f, cost: c + qty * (b.open - px), kind: "sell".into() });
+                    r.fills.push(Fill {
+                        t,
+                        date: b.date.clone(),
+                        qty: -qty / f,
+                        price: px,
+                        adj_price: px * f,
+                        cost: c + qty * (b.open - px),
+                        kind: "sell".into(),
+                    });
                     cash += v - c;
                     shares -= qty;
                     if shares < 1e-9 {
@@ -325,9 +407,13 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
 pub enum Alloc {
     Equal,
     /// weight ∝ 1 / trailing stdev of close-to-close returns over `lookback` bars
-    InverseVol { lookback: usize },
+    InverseVol {
+        lookback: usize,
+    },
     /// fixed weights (normalised so they sum to ≤ 1)
-    Fixed { weights: Vec<f64> },
+    Fixed {
+        weights: Vec<f64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -362,21 +448,30 @@ pub fn allocation(legs: &[Leg], alloc: &Alloc) -> Vec<Vec<f64>> {
             Alloc::Equal => vec![1.0 / k as f64; k],
             Alloc::Fixed { weights } => {
                 let s: f64 = weights.iter().map(|x| x.max(0.0)).sum();
-                (0..k).map(|i| weights.get(i).copied().unwrap_or(0.0).max(0.0) / s.max(1.0)).collect()
+                (0..k)
+                    .map(|i| weights.get(i).copied().unwrap_or(0.0).max(0.0) / s.max(1.0))
+                    .collect()
             }
             Alloc::InverseVol { lookback } => {
                 let lb = (*lookback).max(5);
-                let vols: Vec<Option<f64>> = legs.iter().map(|l| {
-                    let from = t.saturating_sub(lb);
-                    let r: Vec<f64> = (from + 1..=t).filter(|&j| l.bars[j].volume > 0.0 && l.bars[j - 1].volume > 0.0)
-                        .map(|j| adj_close(&l.bars[j]) / adj_close(&l.bars[j - 1]) - 1.0).collect();
-                    if r.len() < lb / 2 {
-                        return None;
-                    }
-                    let m = r.iter().sum::<f64>() / r.len() as f64;
-                    let v = (r.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (r.len() as f64 - 1.0)).sqrt();
-                    (v > 1e-9).then_some(v)
-                }).collect();
+                let vols: Vec<Option<f64>> = legs
+                    .iter()
+                    .map(|l| {
+                        let from = t.saturating_sub(lb);
+                        let r: Vec<f64> = (from + 1..=t)
+                            .filter(|&j| l.bars[j].volume > 0.0 && l.bars[j - 1].volume > 0.0)
+                            .map(|j| adj_close(&l.bars[j]) / adj_close(&l.bars[j - 1]) - 1.0)
+                            .collect();
+                        if r.len() < lb / 2 {
+                            return None;
+                        }
+                        let m = r.iter().sum::<f64>() / r.len() as f64;
+                        let v = (r.iter().map(|x| (x - m).powi(2)).sum::<f64>()
+                            / (r.len() as f64 - 1.0))
+                            .sqrt();
+                        (v > 1e-9).then_some(v)
+                    })
+                    .collect();
                 if vols.iter().all(|v| v.is_some()) {
                     let inv: Vec<f64> = vols.iter().map(|v| 1.0 / v.unwrap()).collect();
                     let s: f64 = inv.iter().sum();
@@ -399,9 +494,16 @@ pub fn allocation(legs: &[Leg], alloc: &Alloc) -> Vec<Vec<f64>> {
 pub fn simulate_portfolio(legs: &[Leg], alloc: &Alloc, costs: &CostModel) -> PortfolioSim {
     let k = legs.len();
     let n = legs.first().map(|l| l.bars.len()).unwrap_or(0);
-    assert!(legs.iter().all(|l| l.bars.len() == n && l.pos.len() == n), "legs must be aligned");
+    assert!(
+        legs.iter().all(|l| l.bars.len() == n && l.pos.len() == n),
+        "legs must be aligned"
+    );
     let weights = allocation(legs, alloc);
-    let mut r = SimResult { equity: vec![INITIAL_CAPITAL; n], exposure: vec![0.0; n], ..Default::default() };
+    let mut r = SimResult {
+        equity: vec![INITIAL_CAPITAL; n],
+        exposure: vec![0.0; n],
+        ..Default::default()
+    };
     if n == 0 {
         return PortfolioSim { sim: r, weights };
     }
@@ -423,11 +525,19 @@ pub fn simulate_portfolio(legs: &[Leg], alloc: &Alloc, costs: &CostModel) -> Por
                 _ => pb.close,
             };
             if let Some(l) = limit_for(&legs[i].symbol, &b.date, &legs[i].rules, None) {
-                bands[i] = (round2(prev_close * (1.0 + l)), round2(prev_close * (1.0 - l)));
+                bands[i] = (
+                    round2(prev_close * (1.0 + l)),
+                    round2(prev_close * (1.0 - l)),
+                );
             }
         }
-        let equity_open: f64 = cash + (0..k).map(|i| shares[i] * legs[i].bars[t].open).sum::<f64>();
-        let deltas: Vec<f64> = (0..k).map(|i| weights[i][t - 1] * equity_open - shares[i] * legs[i].bars[t].open).collect();
+        let equity_open: f64 = cash
+            + (0..k)
+                .map(|i| shares[i] * legs[i].bars[t].open)
+                .sum::<f64>();
+        let deltas: Vec<f64> = (0..k)
+            .map(|i| weights[i][t - 1] * equity_open - shares[i] * legs[i].bars[t].open)
+            .collect();
         // sells first (they fund the buys)
         for i in 0..k {
             let b = &legs[i].bars[t];
@@ -445,7 +555,14 @@ pub fn simulate_portfolio(legs: &[Leg], alloc: &Alloc, costs: &CostModel) -> Por
             }
             let px = b.open * (1.0 - costs.slippage * m);
             let sell_all = weights[i][t - 1] <= 1e-9;
-            let qty = if sell_all { shares[i] } else { ((-deltas[i]) / (100.0 * b.open)).round().min((shares[i] / 100.0).floor()) * 100.0 };
+            let qty = if sell_all {
+                shares[i]
+            } else {
+                ((-deltas[i]) / (100.0 * b.open))
+                    .round()
+                    .min((shares[i] / 100.0).floor())
+                    * 100.0
+            };
             if qty > 0.0 {
                 let v = qty * px;
                 let c = commission(v) + v * stamp_duty(&b.date) * m;
@@ -475,7 +592,9 @@ pub fn simulate_portfolio(legs: &[Leg], alloc: &Alloc, costs: &CostModel) -> Por
             let px = b.open * (1.0 + costs.slippage * m);
             let buy_duty = stamp_duty_sides(&b.date).0 * m;
             let mut lots = (deltas[i] / (100.0 * px)).floor();
-            while lots > 0.0 && lots * 100.0 * px * (1.0 + buy_duty) + commission(lots * 100.0 * px) > cash {
+            while lots > 0.0
+                && lots * 100.0 * px * (1.0 + buy_duty) + commission(lots * 100.0 * px) > cash
+            {
                 lots -= 1.0;
             }
             if lots > 0.0 {
@@ -497,7 +616,17 @@ pub fn simulate_portfolio(legs: &[Leg], alloc: &Alloc, costs: &CostModel) -> Por
 
 /// Correlation matrix of the legs' gross strategy returns pos[t-1]·r[t].
 pub fn leg_correlation(legs: &[Leg]) -> Vec<Vec<f64>> {
-    let rets: Vec<Vec<f64>> = legs.iter().map(|l| (1..l.bars.len()).map(|t| l.pos[t - 1].clamp(0.0, 1.0) * (adj_close(&l.bars[t]) / adj_close(&l.bars[t - 1]) - 1.0)).collect()).collect();
+    let rets: Vec<Vec<f64>> = legs
+        .iter()
+        .map(|l| {
+            (1..l.bars.len())
+                .map(|t| {
+                    l.pos[t - 1].clamp(0.0, 1.0)
+                        * (adj_close(&l.bars[t]) / adj_close(&l.bars[t - 1]) - 1.0)
+                })
+                .collect()
+        })
+        .collect();
     let c = |a: &[f64], b: &[f64]| {
         let n = a.len().min(b.len()) as f64;
         let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
@@ -507,9 +636,19 @@ pub fn leg_correlation(legs: &[Leg]) -> Vec<Vec<f64>> {
             aa += (x - ma).powi(2);
             bb += (y - mb).powi(2);
         }
-        if aa < 1e-18 || bb < 1e-18 { 0.0 } else { ab / (aa * bb).sqrt() }
+        if aa < 1e-18 || bb < 1e-18 {
+            0.0
+        } else {
+            ab / (aa * bb).sqrt()
+        }
     };
-    rets.iter().map(|a| rets.iter().map(|b| (c(a, b) * 1000.0).round() / 1000.0).collect()).collect()
+    rets.iter()
+        .map(|a| {
+            rets.iter()
+                .map(|b| (c(a, b) * 1000.0).round() / 1000.0)
+                .collect()
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -535,9 +674,14 @@ pub fn metrics(bars: &[Bar], sim: &SimResult, from: usize, to: usize) -> Metrics
     let from = from.max(1);
     let to = to.min(sim.equity.len());
     if to <= from + 1 {
-        return Metrics { bars: to.saturating_sub(from), ..Default::default() };
+        return Metrics {
+            bars: to.saturating_sub(from),
+            ..Default::default()
+        };
     }
-    let rets: Vec<f64> = (from..to).map(|t| sim.equity[t] / sim.equity[t - 1] - 1.0).collect();
+    let rets: Vec<f64> = (from..to)
+        .map(|t| sim.equity[t] / sim.equity[t - 1] - 1.0)
+        .collect();
     let n = rets.len() as f64;
     let mean = rets.iter().sum::<f64>() / n;
     let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
@@ -558,7 +702,11 @@ pub fn metrics(bars: &[Bar], sim: &SimResult, from: usize, to: usize) -> Metrics
         start: bars[from].date.clone(),
         end: bars[to - 1].date.clone(),
         total_return: total,
-        annual_return: if total > -1.0 { (1.0 + total).powf(252.0 / n) - 1.0 } else { -1.0 },
+        annual_return: if total > -1.0 {
+            (1.0 + total).powf(252.0 / n) - 1.0
+        } else {
+            -1.0
+        },
         sharpe: sr_d * 252f64.sqrt(),
         sharpe_daily: sr_d,
         skew: if m2 > 1e-18 { m3 / m2.powf(1.5) } else { 0.0 },
@@ -580,32 +728,70 @@ fn erfc(x: f64) -> f64 {
     // Numerical Recipes erfcc (fractional error < 1.2e-7)
     let z = x.abs();
     let t = 1.0 / (1.0 + 0.5 * z);
-    let ans = t * (-z * z - 1.26551223
-        + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807
-        + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))))
-        .exp();
-    if x >= 0.0 { ans } else { 2.0 - ans }
+    let ans = t
+        * (-z * z - 1.26551223
+            + t * (1.00002368
+                + t * (0.37409196
+                    + t * (0.09678418
+                        + t * (-0.18628806
+                            + t * (0.27886807
+                                + t * (-1.13520398
+                                    + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))))
+            .exp();
+    if x >= 0.0 {
+        ans
+    } else {
+        2.0 - ans
+    }
 }
 
 /// Inverse standard normal CDF (Acklam's algorithm, rel. error ~1e-9).
 #[allow(clippy::excessive_precision)]
 pub fn norm_ppf(p: f64) -> f64 {
     assert!(p > 0.0 && p < 1.0);
-    const A: [f64; 6] = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
-    const B: [f64; 5] = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01];
-    const C: [f64; 6] = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
-    const D: [f64; 4] = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00];
+    const A: [f64; 6] = [
+        -3.969683028665376e+01,
+        2.209460984245205e+02,
+        -2.759285104469687e+02,
+        1.383577518672690e+02,
+        -3.066479806614716e+01,
+        2.506628277459239e+00,
+    ];
+    const B: [f64; 5] = [
+        -5.447609879822406e+01,
+        1.615858368580409e+02,
+        -1.556989798598866e+02,
+        6.680131188771972e+01,
+        -1.328068155288572e+01,
+    ];
+    const C: [f64; 6] = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e+00,
+        -2.549732539343734e+00,
+        4.374664141464968e+00,
+        2.938163982698783e+00,
+    ];
+    const D: [f64; 4] = [
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e+00,
+        3.754408661907416e+00,
+    ];
     let pl = 0.02425;
     if p < pl {
         let q = (-2.0 * p.ln()).sqrt();
-        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     } else if p <= 1.0 - pl {
         let q = p - 0.5;
         let r = q * q;
-        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
     } else {
         let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     }
 }
 
@@ -645,13 +831,23 @@ pub const IMPLAUSIBLE_SR_DAILY: f64 = 0.20;
 /// (1.4826·MAD)² once there are ≥5 trials (outliers cannot inflate it), else the
 /// sample variance of the remaining pool. Returns (variance, kept, excluded).
 pub fn robust_sr_variance(srs: &[f64]) -> (f64, usize, usize) {
-    let mut v: Vec<f64> = srs.iter().copied().filter(|x| x.is_finite() && x.abs() <= IMPLAUSIBLE_SR_DAILY).collect();
+    let mut v: Vec<f64> = srs
+        .iter()
+        .copied()
+        .filter(|x| x.is_finite() && x.abs() <= IMPLAUSIBLE_SR_DAILY)
+        .collect();
     let excluded = srs.len() - v.len();
     if v.len() < 2 {
         return (0.0, v.len(), excluded);
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let med = |x: &[f64]| if x.len() % 2 == 1 { x[x.len() / 2] } else { (x[x.len() / 2 - 1] + x[x.len() / 2]) / 2.0 };
+    let med = |x: &[f64]| {
+        if x.len() % 2 == 1 {
+            x[x.len() / 2]
+        } else {
+            (x[x.len() / 2 - 1] + x[x.len() / 2]) / 2.0
+        }
+    };
     if v.len() >= 5 {
         let m = med(&v);
         let mut dev: Vec<f64> = v.iter().map(|x| (x - m).abs()).collect();
@@ -660,7 +856,11 @@ pub fn robust_sr_variance(srs: &[f64]) -> (f64, usize, usize) {
         return (sd * sd, v.len(), excluded);
     }
     let mu = v.iter().sum::<f64>() / v.len() as f64;
-    (v.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0), v.len(), excluded)
+    (
+        v.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0),
+        v.len(),
+        excluded,
+    )
 }
 
 /// DSR given the cross-trial SR variance and the effective number of trials.
@@ -674,12 +874,22 @@ pub fn deflated_sharpe_v(m: &Metrics, sr_var: f64, n_trials: usize) -> Dsr {
         0.0
     } else {
         let nn = n as f64;
-        var.sqrt() * ((1.0 - GAMMA) * norm_ppf(1.0 - 1.0 / nn) + GAMMA * norm_ppf(1.0 - 1.0 / (nn * std::f64::consts::E)))
+        var.sqrt()
+            * ((1.0 - GAMMA) * norm_ppf(1.0 - 1.0 / nn)
+                + GAMMA * norm_ppf(1.0 - 1.0 / (nn * std::f64::consts::E)))
     };
     let sr = m.sharpe_daily;
-    let denom = (1.0 - m.skew * sr + (m.kurtosis - 1.0) / 4.0 * sr * sr).max(1e-12).sqrt();
+    let denom = (1.0 - m.skew * sr + (m.kurtosis - 1.0) / 4.0 * sr * sr)
+        .max(1e-12)
+        .sqrt();
     let dsr = norm_cdf((sr - sr0) * (t - 1.0).sqrt() / denom);
-    Dsr { trials: n, sr_variance: var, sr0_daily: sr0, sr_daily: sr, dsr }
+    Dsr {
+        trials: n,
+        sr_variance: var,
+        sr0_daily: sr0,
+        sr_daily: sr,
+        dsr,
+    }
 }
 
 #[cfg(test)]
@@ -687,26 +897,66 @@ mod tests {
     use super::*;
 
     fn bar(d: &str, o: f64, c: f64, v: f64) -> Bar {
-        Bar { date: d.into(), open: o, high: o.max(c), low: o.min(c), close: c, volume: v, adj_factor: None }
+        Bar {
+            date: d.into(),
+            open: o,
+            high: o.max(c),
+            low: o.min(c),
+            close: c,
+            volume: v,
+            adj_factor: None,
+        }
     }
 
     #[test]
     fn fills_at_next_open_not_same_close() {
         // signal on day 0 close; gap up on day 1 open must be paid
-        let bars = vec![bar("2020-01-02", 10.0, 10.0, 1e6), bar("2020-01-03", 10.5, 10.5, 1e6), bar("2020-01-06", 10.5, 10.5, 1e6)];
-        let s = simulate("SH600000", &bars, &[1.0, 1.0, 1.0], &CostModel { commission: 0.0, min_commission: 0.0, slippage: 0.0, multiplier: 1.0 });
+        let bars = vec![
+            bar("2020-01-02", 10.0, 10.0, 1e6),
+            bar("2020-01-03", 10.5, 10.5, 1e6),
+            bar("2020-01-06", 10.5, 10.5, 1e6),
+        ];
+        let s = simulate(
+            "SH600000",
+            &bars,
+            &[1.0, 1.0, 1.0],
+            &CostModel {
+                commission: 0.0,
+                min_commission: 0.0,
+                slippage: 0.0,
+                multiplier: 1.0,
+            },
+        );
         // bought at 10.5 (open day1), not at 10.0 -> no gain from the gap
-        assert!((s.equity[2] / INITIAL_CAPITAL - 1.0).abs() < 1e-3, "{:?}", s.equity);
+        assert!(
+            (s.equity[2] / INITIAL_CAPITAL - 1.0).abs() < 1e-3,
+            "{:?}",
+            s.equity
+        );
     }
 
     #[test]
     fn limit_up_open_blocks_buy_and_limit_down_blocks_sell() {
-        let bars = vec![bar("2020-01-02", 10.0, 10.0, 1e6), bar("2020-01-03", 11.0, 11.0, 1e6), bar("2020-01-06", 9.9, 9.9, 1e6)];
+        let bars = vec![
+            bar("2020-01-02", 10.0, 10.0, 1e6),
+            bar("2020-01-03", 11.0, 11.0, 1e6),
+            bar("2020-01-06", 9.9, 9.9, 1e6),
+        ];
         let s = simulate("SH600000", &bars, &[1.0, 1.0, 1.0], &CostModel::default());
         assert_eq!(s.blocked_limit_up, 1);
         assert_eq!(s.trades, 1); // bought on day 2 instead
-        let bars = vec![bar("2020-01-02", 10.0, 10.0, 1e6), bar("2020-01-03", 10.0, 10.0, 1e6), bar("2020-01-06", 9.0, 9.0, 1e6), bar("2020-01-07", 9.0, 9.0, 1e6)];
-        let s = simulate("SH600000", &bars, &[1.0, 0.0, 0.0, 0.0], &CostModel::default());
+        let bars = vec![
+            bar("2020-01-02", 10.0, 10.0, 1e6),
+            bar("2020-01-03", 10.0, 10.0, 1e6),
+            bar("2020-01-06", 9.0, 9.0, 1e6),
+            bar("2020-01-07", 9.0, 9.0, 1e6),
+        ];
+        let s = simulate(
+            "SH600000",
+            &bars,
+            &[1.0, 0.0, 0.0, 0.0],
+            &CostModel::default(),
+        );
         assert_eq!(s.blocked_limit_down, 1);
         assert_eq!(s.trades, 2);
     }
@@ -720,21 +970,40 @@ mod tests {
         assert_eq!(limit_pct("BJ430047", "2023-01-04"), 0.30);
         assert_eq!(limit_pct("BJ920002", "2024-11-04"), 0.30);
         assert_eq!(limit_pct("SH900901", "2024-11-04"), 0.10);
-        let st = Rules { st: vec![("2020-01-01".into(), "2025-12-31".into())], list_date: None };
+        let st = Rules {
+            st: vec![("2020-01-01".into(), "2025-12-31".into())],
+            list_date: None,
+        };
         assert_eq!(limit_for("SZ000001", "2021-01-04", &st, None), Some(0.05));
         assert_eq!(limit_for("SZ000001", "2025-07-07", &st, None), Some(0.10));
         assert_eq!(limit_for("SZ300001", "2021-01-04", &st, None), Some(0.20));
-        let ipo = Rules { st: vec![], list_date: Some("2023-06-01".into()) };
+        let ipo = Rules {
+            st: vec![],
+            list_date: Some("2023-06-01".into()),
+        };
         assert_eq!(limit_for("SH603001", "2023-06-05", &ipo, Some(4)), None);
-        assert_eq!(limit_for("SH603001", "2023-06-08", &ipo, Some(5)), Some(0.10));
-        let old = Rules { st: vec![], list_date: Some("2015-06-01".into()) };
+        assert_eq!(
+            limit_for("SH603001", "2023-06-08", &ipo, Some(5)),
+            Some(0.10)
+        );
+        let old = Rules {
+            st: vec![],
+            list_date: Some("2015-06-01".into()),
+        };
         assert_eq!(limit_for("SH603002", "2015-06-01", &old, Some(0)), None);
-        assert_eq!(limit_for("SH603002", "2015-06-02", &old, Some(1)), Some(0.10));
+        assert_eq!(
+            limit_for("SH603002", "2015-06-02", &old, Some(1)),
+            Some(0.10)
+        );
     }
 
     #[test]
     fn suspension_blocks_trade() {
-        let bars = vec![bar("2020-01-02", 10.0, 10.0, 1e6), bar("2020-01-03", 10.0, 10.0, 0.0), bar("2020-01-06", 10.0, 10.0, 1e6)];
+        let bars = vec![
+            bar("2020-01-02", 10.0, 10.0, 1e6),
+            bar("2020-01-03", 10.0, 10.0, 0.0),
+            bar("2020-01-06", 10.0, 10.0, 1e6),
+        ];
         let s = simulate("SH600000", &bars, &[1.0, 1.0, 1.0], &CostModel::default());
         assert_eq!(s.blocked_suspended, 1);
         assert_eq!(s.trades, 1);
@@ -750,14 +1019,30 @@ mod tests {
         assert_eq!(stamp_duty_sides("2003-01-02"), (0.002, 0.002));
         assert_eq!(stamp_duty("2023-08-28"), 0.0005);
         // tiny account: 1 lot of ¥10 shares => ¥1000 trade, commission must be ¥5 not ¥0.25
-        let bars = vec![bar("2023-08-24", 10.0, 10.0, 1e6), bar("2023-08-25", 10.0, 10.0, 1e6), bar("2023-08-28", 10.0, 10.0, 1e6), bar("2023-08-29", 10.0, 10.0, 1e6)];
-        let c = CostModel { slippage: 0.0, ..Default::default() };
+        let bars = vec![
+            bar("2023-08-24", 10.0, 10.0, 1e6),
+            bar("2023-08-25", 10.0, 10.0, 1e6),
+            bar("2023-08-28", 10.0, 10.0, 1e6),
+            bar("2023-08-29", 10.0, 10.0, 1e6),
+        ];
+        let c = CostModel {
+            slippage: 0.0,
+            ..Default::default()
+        };
         let s = simulate("SH600000", &bars, &[1.0, 0.0, 0.0, 0.0], &c);
         // 1000 lots would need ¥1,000,250 incl. commission -> 999 lots (99,900 sh) on 08-25,
         // sold on 08-28: commission 249.75 each side + stamp duty 0.05% (new rate) = 499.5
         let expected = INITIAL_CAPITAL - 249.75 - 249.75 - 499.5;
-        assert!((s.equity[3] - expected).abs() < 1.0, "{} vs {}", s.equity[3], expected);
-        let small = CostModel { slippage: 0.0, ..Default::default() };
+        assert!(
+            (s.equity[3] - expected).abs() < 1.0,
+            "{} vs {}",
+            s.equity[3],
+            expected
+        );
+        let small = CostModel {
+            slippage: 0.0,
+            ..Default::default()
+        };
         let v = 1000.0;
         assert_eq!((v * small.commission).max(small.min_commission), 5.0);
     }
@@ -765,11 +1050,20 @@ mod tests {
     #[test]
     fn adj_factor_keeps_wealth_on_adjusted_path() {
         // 10 -> ex-dividend raw drop to 9 with factor 1 -> 10/9: adjusted price flat
-        let mut b = vec![bar("2020-01-02", 10.0, 10.0, 1e6), bar("2020-01-03", 10.0, 10.0, 1e6), bar("2020-01-06", 9.0, 9.0, 1e6)];
+        let mut b = vec![
+            bar("2020-01-02", 10.0, 10.0, 1e6),
+            bar("2020-01-03", 10.0, 10.0, 1e6),
+            bar("2020-01-06", 9.0, 9.0, 1e6),
+        ];
         b[0].adj_factor = Some(1.0);
         b[1].adj_factor = Some(1.0);
         b[2].adj_factor = Some(10.0 / 9.0);
-        let c = CostModel { commission: 0.0, min_commission: 0.0, slippage: 0.0, multiplier: 1.0 };
+        let c = CostModel {
+            commission: 0.0,
+            min_commission: 0.0,
+            slippage: 0.0,
+            multiplier: 1.0,
+        };
         let s = simulate("SH600000", &b, &[1.0, 1.0, 1.0], &c);
         assert!((s.equity[2] - s.equity[1]).abs() < 1.0, "{:?}", s.equity);
         // the ex-date open at 9.0 is NOT a limit-down (prev close is adjusted to 9.0)
@@ -786,16 +1080,30 @@ mod tests {
 
     #[test]
     fn dsr_falls_as_trials_grow() {
-        let m = Metrics { bars: 750, sharpe_daily: 0.08, skew: 0.0, kurtosis: 3.0, ..Default::default() };
+        let m = Metrics {
+            bars: 750,
+            sharpe_daily: 0.08,
+            skew: 0.0,
+            kurtosis: 3.0,
+            ..Default::default()
+        };
         let one = deflated_sharpe(&m, &[0.08]);
-        let many: Vec<f64> = (0..100).map(|i| (i as f64 - 50.0) / 1000.0).chain([0.08]).collect();
+        let many: Vec<f64> = (0..100)
+            .map(|i| (i as f64 - 50.0) / 1000.0)
+            .chain([0.08])
+            .collect();
         let lots = deflated_sharpe(&m, &many);
         assert!(one.dsr > 0.95, "{one:?}");
         assert!(lots.dsr < one.dsr && lots.sr0_daily > 0.0, "{lots:?}");
     }
     #[test]
     fn dsr_cheater_excluded_from_variance_but_counted() {
-        let m = Metrics { bars: 1500, sharpe_daily: 0.08, kurtosis: 3.0, ..Default::default() };
+        let m = Metrics {
+            bars: 1500,
+            sharpe_daily: 0.08,
+            kurtosis: 3.0,
+            ..Default::default()
+        };
         let honest = [0.01, 0.03, 0.02, 0.04];
         let with_cheat = [0.01, 0.03, 0.02, 0.04, 0.41];
         let a = deflated_sharpe(&m, &with_cheat);
@@ -813,17 +1121,40 @@ mod tests {
         assert_eq!(ex, 1);
         assert_eq!(kept, 10);
         assert!(v1 < 4.0 * v0, "{v0} {v1}");
-        let m = Metrics { bars: 800, sharpe_daily: 0.08, kurtosis: 3.0, ..Default::default() };
+        let m = Metrics {
+            bars: 800,
+            sharpe_daily: 0.08,
+            kurtosis: 3.0,
+            ..Default::default()
+        };
         // trial floor: N=1 is still deflated as if 20 trials were run
         assert!(deflated_sharpe_v(&m, 0.0, 20).sr0_daily > deflated_sharpe_v(&m, 0.0, 1).sr0_daily);
     }
 
     fn legs2() -> Vec<Leg> {
         let mk = |sym: &str, f: fn(usize) -> f64| {
-            let bars: Vec<Bar> = (0..120).map(|i| { let c = f(i); bar(&format!("2021-{:02}-{:02}", 1 + i / 28, 1 + i % 28), c, c, 1e6) }).collect();
-            Leg { symbol: sym.into(), pos: vec![1.0; bars.len()], bars, rules: Rules::default() }
+            let bars: Vec<Bar> = (0..120)
+                .map(|i| {
+                    let c = f(i);
+                    bar(
+                        &format!("2021-{:02}-{:02}", 1 + i / 28, 1 + i % 28),
+                        c,
+                        c,
+                        1e6,
+                    )
+                })
+                .collect();
+            Leg {
+                symbol: sym.into(),
+                pos: vec![1.0; bars.len()],
+                bars,
+                rules: Rules::default(),
+            }
         };
-        vec![mk("SH600000", |i| 10.0 + 0.02 * i as f64), mk("SZ000001", |i| 20.0 + if i % 2 == 0 { 0.6 } else { -0.6 })]
+        vec![
+            mk("SH600000", |i| 10.0 + 0.02 * i as f64),
+            mk("SZ000001", |i| 20.0 + if i % 2 == 0 { 0.6 } else { -0.6 }),
+        ]
     }
 
     #[test]
@@ -831,23 +1162,42 @@ mod tests {
         let legs = legs2();
         let p = simulate_portfolio(&legs, &Alloc::Equal, &CostModel::default());
         assert!(p.sim.trades >= 2);
-        assert!(p.sim.exposure.iter().all(|x| *x <= 1.0 + 1e-9), "never more than 100% invested");
+        assert!(
+            p.sim.exposure.iter().all(|x| *x <= 1.0 + 1e-9),
+            "never more than 100% invested"
+        );
         assert!(p.sim.exposure[5] > 0.95, "{:?}", &p.sim.exposure[..6]);
         // fixed weights summing to 0.5 keep half in cash
-        let half = simulate_portfolio(&legs, &Alloc::Fixed { weights: vec![0.25, 0.25] }, &CostModel::default());
-        assert!((half.sim.exposure[10] - 0.5).abs() < 0.05, "{}", half.sim.exposure[10]);
+        let half = simulate_portfolio(
+            &legs,
+            &Alloc::Fixed {
+                weights: vec![0.25, 0.25],
+            },
+            &CostModel::default(),
+        );
+        assert!(
+            (half.sim.exposure[10] - 0.5).abs() < 0.05,
+            "{}",
+            half.sim.exposure[10]
+        );
     }
 
     #[test]
     fn inverse_vol_tilts_to_the_calm_leg_without_lookahead() {
         let legs = legs2();
         let w = allocation(&legs, &Alloc::InverseVol { lookback: 20 });
-        assert!((w[0][3] - 0.5).abs() < 1e-9, "not enough history yet -> equal");
+        assert!(
+            (w[0][3] - 0.5).abs() < 1e-9,
+            "not enough history yet -> equal"
+        );
         assert!(w[0][60] > w[1][60], "{} {}", w[0][60], w[1][60]);
         // changing a FUTURE bar must not change today's weight
         let mut l2 = legs.clone();
         l2[1].bars[61].close *= 3.0;
-        assert_eq!(allocation(&l2, &Alloc::InverseVol { lookback: 20 })[0][60], w[0][60]);
+        assert_eq!(
+            allocation(&l2, &Alloc::InverseVol { lookback: 20 })[0][60],
+            w[0][60]
+        );
     }
 
     #[test]
@@ -861,15 +1211,43 @@ mod tests {
 
     #[test]
     fn capacity_is_p10_of_fill_sizes_vs_daily_value() {
-        let bars: Vec<Bar> = (0..5).map(|i| Bar { date: format!("2024-01-0{}", i + 1), open: 10.0, high: 10.0, low: 10.0, close: 10.0, volume: 1e6, adj_factor: Some(1.0) }).collect();
-        let mut sim = SimResult { equity: vec![1e6; 5], ..Default::default() };
+        let bars: Vec<Bar> = (0..5)
+            .map(|i| Bar {
+                date: format!("2024-01-0{}", i + 1),
+                open: 10.0,
+                high: 10.0,
+                low: 10.0,
+                close: 10.0,
+                volume: 1e6,
+                adj_factor: Some(1.0),
+            })
+            .collect();
+        let mut sim = SimResult {
+            equity: vec![1e6; 5],
+            ..Default::default()
+        };
         // full-equity fill on a ¥10m-volume day: 5% * 1e7 / 1.0 = 5e5
-        sim.fills.push(Fill { t: 1, date: "d".into(), qty: 1e5, price: 10.0, adj_price: 10.0, cost: 0.0, kind: "buy".into() });
+        sim.fills.push(Fill {
+            t: 1,
+            date: "d".into(),
+            qty: 1e5,
+            price: 10.0,
+            adj_price: 10.0,
+            cost: 0.0,
+            kind: "buy".into(),
+        });
         assert_eq!(capacity(&bars, &sim, 1.0, 0, 5, 0.05), Some(5e5));
         // a 10%-of-equity fill is 10x roomier; p10 of two fills is the smaller
-        sim.fills.push(Fill { t: 2, qty: 1e4, ..sim.fills[0].clone() });
+        sim.fills.push(Fill {
+            t: 2,
+            qty: 1e4,
+            ..sim.fills[0].clone()
+        });
         assert_eq!(capacity(&bars, &sim, 1.0, 0, 5, 0.05), Some(5e5));
         assert_eq!(capacity(&bars, &sim, 1.0, 2, 5, 0.05), Some(5e6), "window");
-        assert_eq!(capacity(&bars, &SimResult::default(), 1.0, 0, 5, 0.05), None);
+        assert_eq!(
+            capacity(&bars, &SimResult::default(), 1.0, 0, 5, 0.05),
+            None
+        );
     }
 }

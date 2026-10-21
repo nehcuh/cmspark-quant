@@ -9,7 +9,10 @@ pub enum CoreError {
     #[error("strategy not found: {0}")]
     NotFound(String),
     #[error("invalid transition {from} -> {to}")]
-    InvalidTransition { from: StrategyStatus, to: StrategyStatus },
+    InvalidTransition {
+        from: StrategyStatus,
+        to: StrategyStatus,
+    },
     #[error("confirmation mismatch: type exactly {expected:?}")]
     ConfirmationMismatch { expected: String },
     #[error("cannot promote {id}: status is {status}, promotion requires GatePassed")]

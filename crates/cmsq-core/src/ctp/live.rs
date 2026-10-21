@@ -1,12 +1,19 @@
 //! Live CTP market data via ctp2rs `MdApi` (feature `ctp`). Market data only.
 use super::md::{inv, FeedEvent, MdConfig, MdFeed, RawTick};
 use anyhow::Result;
-use ctp2rs::v1alpha1::{CThostFtdcDepthMarketDataField, CThostFtdcReqUserLoginField, CThostFtdcRspInfoField, CThostFtdcRspUserLoginField, CThostFtdcSpecificInstrumentField, MdApi, MdSpi};
+use ctp2rs::v1alpha1::{
+    CThostFtdcDepthMarketDataField, CThostFtdcReqUserLoginField, CThostFtdcRspInfoField,
+    CThostFtdcRspUserLoginField, CThostFtdcSpecificInstrumentField, MdApi, MdSpi,
+};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
 fn cstr(b: &[std::os::raw::c_char]) -> String {
-    let bytes: Vec<u8> = b.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+    let bytes: Vec<u8> = b
+        .iter()
+        .take_while(|c| **c != 0)
+        .map(|c| *c as u8)
+        .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -27,12 +34,29 @@ impl MdSpi for Spi {
     fn on_front_disconnected(&mut self, n_reason: i32) {
         let _ = self.0.send(Ev::Disconnected(n_reason));
     }
-    fn on_rsp_user_login(&mut self, _l: Option<&CThostFtdcRspUserLoginField>, info: Option<&CThostFtdcRspInfoField>, _id: i32, _last: bool) {
-        let (c, m) = info.map(|i| (i.ErrorID, cstr(&i.ErrorMsg))).unwrap_or((0, String::new()));
+    fn on_rsp_user_login(
+        &mut self,
+        _l: Option<&CThostFtdcRspUserLoginField>,
+        info: Option<&CThostFtdcRspInfoField>,
+        _id: i32,
+        _last: bool,
+    ) {
+        let (c, m) = info
+            .map(|i| (i.ErrorID, cstr(&i.ErrorMsg)))
+            .unwrap_or((0, String::new()));
         let _ = self.0.send(Ev::Login(c, m));
     }
-    fn on_rsp_sub_market_data(&mut self, ins: Option<&CThostFtdcSpecificInstrumentField>, info: Option<&CThostFtdcRspInfoField>, _id: i32, _last: bool) {
-        let _ = self.0.send(Ev::Sub(ins.map(|i| cstr(&i.InstrumentID)).unwrap_or_default(), info.map(|i| i.ErrorID).unwrap_or(0)));
+    fn on_rsp_sub_market_data(
+        &mut self,
+        ins: Option<&CThostFtdcSpecificInstrumentField>,
+        info: Option<&CThostFtdcRspInfoField>,
+        _id: i32,
+        _last: bool,
+    ) {
+        let _ = self.0.send(Ev::Sub(
+            ins.map(|i| cstr(&i.InstrumentID)).unwrap_or_default(),
+            info.map(|i| i.ErrorID).unwrap_or(0),
+        ));
     }
     fn on_rtn_depth_market_data(&mut self, d: Option<&CThostFtdcDepthMarketDataField>) {
         if let Some(d) = d {
@@ -68,11 +92,19 @@ unsafe impl Send for CtpMdFeed {}
 
 impl CtpMdFeed {
     pub fn from_env() -> Result<Self> {
-        let lib = std::env::var("CMSQ_CTP_MD_LIB").map_err(|_| inv("set CMSQ_CTP_MD_LIB to the CTP/openctp market-data library (thostmduserapi_se.so)"))?;
+        let lib = std::env::var("CMSQ_CTP_MD_LIB").map_err(|_| {
+            inv("set CMSQ_CTP_MD_LIB to the CTP/openctp market-data library (thostmduserapi_se.so)")
+        })?;
         if !std::path::Path::new(&lib).is_file() {
             return Err(inv(format!("CMSQ_CTP_MD_LIB={lib} is not a file")));
         }
-        Ok(Self { lib, api: None, rx: None, cfg: None, req: 0 })
+        Ok(Self {
+            lib,
+            api: None,
+            rx: None,
+            cfg: None,
+            req: 0,
+        })
     }
 }
 
@@ -86,8 +118,14 @@ impl MdFeed for CtpMdFeed {
         let lib = self.lib.clone();
         let flow_s = flow.display().to_string();
         // ctp2rs panics if the library cannot be loaded; turn that into an error.
-        let api = std::panic::catch_unwind(move || MdApi::create_api(&lib, &flow_s, false, false, false))
-            .map_err(|_| inv(format!("could not load CTP market-data library {}", self.lib)))?;
+        let api =
+            std::panic::catch_unwind(move || MdApi::create_api(&lib, &flow_s, false, false, false))
+                .map_err(|_| {
+                    inv(format!(
+                        "could not load CTP market-data library {}",
+                        self.lib
+                    ))
+                })?;
         let (tx, rx) = channel();
         // leaked on purpose: must outlive the api's callback threads
         api.register_spi(Box::into_raw(Box::new(Spi(tx))));
@@ -112,10 +150,20 @@ impl MdFeed for CtpMdFeed {
             }
             Ev::Login(0, _) => {
                 let rc = api.subscribe_market_data(&cfg.instruments);
-                FeedEvent::Status(format!("logged in; subscribed {:?} (rc={rc})", cfg.instruments))
+                FeedEvent::Status(format!(
+                    "logged in; subscribed {:?} (rc={rc})",
+                    cfg.instruments
+                ))
             }
             Ev::Login(c, m) => FeedEvent::Status(format!("login failed: {c} {m}")),
-            Ev::Sub(i, c) => FeedEvent::Status(format!("subscribe {i}: {}", if c == 0 { "ok".into() } else { format!("error {c}") })),
+            Ev::Sub(i, c) => FeedEvent::Status(format!(
+                "subscribe {i}: {}",
+                if c == 0 {
+                    "ok".into()
+                } else {
+                    format!("error {c}")
+                }
+            )),
             Ev::Disconnected(r) => FeedEvent::Status(format!("front disconnected (reason {r:#x})")),
         })
     }

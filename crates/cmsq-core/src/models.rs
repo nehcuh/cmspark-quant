@@ -39,7 +39,9 @@ impl StrategyStatus {
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|x| x.as_str().eq_ignore_ascii_case(s))
+        Self::ALL
+            .into_iter()
+            .find(|x| x.as_str().eq_ignore_ascii_case(s))
     }
 }
 

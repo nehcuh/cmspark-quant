@@ -1,0 +1,42 @@
+name: ci
+on:
+  push: { branches: [master] }
+  pull_request:
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt -p cmsq-core -p cmsq-cli --check
+      - name: clippy
+        run: cargo clippy -p cmsq-core -p cmsq-cli --all-targets -- -D warnings
+      - name: tests
+        run: cargo test -p cmsq-core -p cmsq-cli
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: vn.py shim
+        run: pip install numpy pandas && python3 scripts/test_vnpy_shim.py
+  e2e-sqlite:
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install numpy pandas
+      - name: runner image
+        run: scripts/build_runner.sh
+      - name: sandbox tests
+        run: scripts/test_docker.sh
+      - name: e2e (sqlite)
+        env: { CMSQ_DB: sqlite }
+        run: scripts/e2e.sh

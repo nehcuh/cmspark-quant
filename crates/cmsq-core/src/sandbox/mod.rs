@@ -32,7 +32,13 @@ pub struct SandboxLimits {
 
 impl Default for SandboxLimits {
     fn default() -> Self {
-        Self { cpu_cores: 1.0, memory_mb: 512, pids: 128, timeout_secs: 120, network_allowlist: vec![] }
+        Self {
+            cpu_cores: 1.0,
+            memory_mb: 512,
+            pids: 128,
+            timeout_secs: 120,
+            network_allowlist: vec![],
+        }
     }
 }
 
@@ -89,29 +95,56 @@ pub const OUTPUT_CAP: usize = 1024 * 1024;
 /// network, the docker socket, writable data, or relative/odd mount paths).
 pub fn validate(req: &SandboxRequest) -> Result<(), SandboxError> {
     if !req.limits.network_allowlist.is_empty() {
-        return Err(SandboxError::InvalidRequest("network allowlists are not supported in P0; network is always denied".into()));
+        return Err(SandboxError::InvalidRequest(
+            "network allowlists are not supported in P0; network is always denied".into(),
+        ));
     }
-    if req.limits.memory_mb < 64 || req.limits.timeout_secs == 0 || req.limits.cpu_cores <= 0.0 || req.limits.pids <= 0 {
-        return Err(SandboxError::InvalidRequest("resource limits must be set".into()));
+    if req.limits.memory_mb < 64
+        || req.limits.timeout_secs == 0
+        || req.limits.cpu_cores <= 0.0
+        || req.limits.pids <= 0
+    {
+        return Err(SandboxError::InvalidRequest(
+            "resource limits must be set".into(),
+        ));
     }
     let mut writable = 0;
     for m in &req.mounts {
         let hs = m.host.to_string_lossy();
-        if !m.host.is_absolute() || hs.contains("..") || !m.container.starts_with('/') || m.container.contains("..") {
-            return Err(SandboxError::InvalidRequest(format!("mount paths must be absolute and normalised: {hs}")));
+        if !m.host.is_absolute()
+            || hs.contains("..")
+            || !m.container.starts_with('/')
+            || m.container.contains("..")
+        {
+            return Err(SandboxError::InvalidRequest(format!(
+                "mount paths must be absolute and normalised: {hs}"
+            )));
         }
-        if hs.contains("docker.sock") || hs.ends_with("/run") || hs == "/" || hs.starts_with("/var/run") || hs.starts_with("/proc") || hs.starts_with("/sys") || hs.starts_with("/dev") {
-            return Err(SandboxError::InvalidRequest(format!("forbidden host mount: {hs}")));
+        if hs.contains("docker.sock")
+            || hs.ends_with("/run")
+            || hs == "/"
+            || hs.starts_with("/var/run")
+            || hs.starts_with("/proc")
+            || hs.starts_with("/sys")
+            || hs.starts_with("/dev")
+        {
+            return Err(SandboxError::InvalidRequest(format!(
+                "forbidden host mount: {hs}"
+            )));
         }
         if !m.read_only {
             writable += 1;
             if m.container != "/out" {
-                return Err(SandboxError::InvalidRequest("only /out may be writable".into()));
+                return Err(SandboxError::InvalidRequest(
+                    "only /out may be writable".into(),
+                ));
             }
         }
     }
     if writable > 1 {
-        return Err(SandboxError::InvalidRequest("at most one writable mount".into()));
+        return Err(SandboxError::InvalidRequest(
+            "at most one writable mount".into(),
+        ));
     }
     Ok(())
 }
@@ -120,10 +153,25 @@ pub fn validate(req: &SandboxRequest) -> Result<(), SandboxError> {
 mod tests {
     use super::*;
     fn req() -> SandboxRequest {
-        SandboxRequest { id: "t".into(), image: "x".into(), command: vec!["true".into()], env: vec![],
-            mounts: vec![Mount { host: "/tmp/d".into(), container: "/data".into(), read_only: true },
-                         Mount { host: "/tmp/o".into(), container: "/out".into(), read_only: false }],
-            limits: SandboxLimits::default() }
+        SandboxRequest {
+            id: "t".into(),
+            image: "x".into(),
+            command: vec!["true".into()],
+            env: vec![],
+            mounts: vec![
+                Mount {
+                    host: "/tmp/d".into(),
+                    container: "/data".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: "/tmp/o".into(),
+                    container: "/out".into(),
+                    read_only: false,
+                },
+            ],
+            limits: SandboxLimits::default(),
+        }
     }
     #[test]
     fn default_request_ok() {
@@ -132,7 +180,11 @@ mod tests {
     #[test]
     fn rejects_socket_network_and_writable_data() {
         let mut r = req();
-        r.mounts.push(Mount { host: "/var/run/docker.sock".into(), container: "/s".into(), read_only: true });
+        r.mounts.push(Mount {
+            host: "/var/run/docker.sock".into(),
+            container: "/s".into(),
+            read_only: true,
+        });
         assert!(validate(&r).is_err());
         let mut r = req();
         r.limits.network_allowlist = vec!["example.com".into()];

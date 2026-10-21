@@ -43,7 +43,14 @@ mod tests {
 
     #[test]
     fn happy_path_is_valid() {
-        let path = [Ingested, Extracted, Backtesting, Evaluated, GatePassed, Promoted];
+        let path = [
+            Ingested,
+            Extracted,
+            Backtesting,
+            Evaluated,
+            GatePassed,
+            Promoted,
+        ];
         for w in path.windows(2) {
             assert!(is_valid_transition(w[0], w[1]), "{:?}", w);
         }
@@ -53,12 +60,21 @@ mod tests {
     fn cannot_skip_backtest_gate_or_promote_from_rejected() {
         assert!(!is_valid_transition(Extracted, Promoted));
         assert!(!is_valid_transition(Ingested, Evaluated));
-        assert!(!is_valid_transition(Evaluated, Promoted), "must pass the gate first");
+        assert!(
+            !is_valid_transition(Evaluated, Promoted),
+            "must pass the gate first"
+        );
         assert!(!is_valid_transition(Rejected, Promoted));
         assert!(!is_valid_transition(Failed, Promoted));
         assert!(!is_valid_transition(Promoted, Backtesting));
         let e = check(Backtesting, Promoted).unwrap_err();
-        assert_eq!(e.downcast_ref::<CoreError>(), Some(&CoreError::InvalidTransition { from: Backtesting, to: Promoted }));
+        assert_eq!(
+            e.downcast_ref::<CoreError>(),
+            Some(&CoreError::InvalidTransition {
+                from: Backtesting,
+                to: Promoted
+            })
+        );
     }
 
     #[test]

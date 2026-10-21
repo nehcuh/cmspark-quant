@@ -24,7 +24,10 @@ impl Rng {
     pub fn from_uuid() -> Self {
         let u = uuid::Uuid::new_v4();
         let b = u.as_bytes();
-        Self::new(u64::from_le_bytes(b[..8].try_into().unwrap()) ^ u64::from_le_bytes(b[8..].try_into().unwrap()))
+        Self::new(
+            u64::from_le_bytes(b[..8].try_into().unwrap())
+                ^ u64::from_le_bytes(b[8..].try_into().unwrap()),
+        )
     }
     pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
@@ -61,7 +64,15 @@ pub fn container_view(bars: &[Bar]) -> Vec<Bar> {
     bars.iter()
         .map(|b| {
             let f = b.adj_factor.unwrap_or(1.0);
-            Bar { date: b.date.clone(), open: b.open * f, high: b.high * f, low: b.low * f, close: b.close * f, volume: b.volume, adj_factor: None }
+            Bar {
+                date: b.date.clone(),
+                open: b.open * f,
+                high: b.high * f,
+                low: b.low * f,
+                close: b.close * f,
+                volume: b.volume,
+                adj_factor: None,
+            }
         })
         .collect()
 }
@@ -87,7 +98,15 @@ fn resample_future(view: &[Bar], k: usize, rng: &mut Rng, max_move: f64) -> Vec<
         let r = |x: f64| (x / pb.close).clamp(1.0 - max_move, 1.0 + max_move);
         let (o, c) = (pc * r(b.open), pc * r(b.close));
         let (h, l) = (pc * r(b.high), pc * r(b.low));
-        out.push(Bar { date: view[t].date.clone(), open: o, high: h.max(o).max(c), low: l.min(o).min(c), close: c, volume: b.volume, adj_factor: None });
+        out.push(Bar {
+            date: view[t].date.clone(),
+            open: o,
+            high: h.max(o).max(c),
+            low: l.min(o).min(c),
+            close: c,
+            volume: b.volume,
+            adj_factor: None,
+        });
     }
     out
 }
@@ -109,12 +128,23 @@ pub struct ProbeConfig {
 
 impl Default for ProbeConfig {
     fn default() -> Self {
-        Self { random_cuts: 5, lo: 0.35, hi: 0.98, tail: vec![1, 2, 4], resamples: 1 }
+        Self {
+            random_cuts: 5,
+            lo: 0.35,
+            hi: 0.98,
+            tail: vec![1, 2, 4],
+            resamples: 1,
+        }
     }
 }
 
 /// Choose cut indices inside [from, n). Returns (random cuts, tail cuts), deduplicated.
-pub fn choose_cuts(n: usize, from: usize, cfg: &ProbeConfig, rng: &mut Rng) -> (Vec<usize>, Vec<usize>) {
+pub fn choose_cuts(
+    n: usize,
+    from: usize,
+    cfg: &ProbeConfig,
+    rng: &mut Rng,
+) -> (Vec<usize>, Vec<usize>) {
     let lo = (((n as f64) * cfg.lo) as usize).max(from).max(10);
     let hi = (((n as f64) * cfg.hi) as usize).min(n.saturating_sub(1));
     let mut random = vec![];
@@ -130,7 +160,13 @@ pub fn choose_cuts(n: usize, from: usize, cfg: &ProbeConfig, rng: &mut Rng) -> (
         }
     }
     random.sort();
-    let mut tail: Vec<usize> = cfg.tail.iter().filter(|&&t| t < n && n - t >= from.max(10)).map(|t| n - t).filter(|k| !random.contains(k)).collect();
+    let mut tail: Vec<usize> = cfg
+        .tail
+        .iter()
+        .filter(|&&t| t < n && n - t >= from.max(10))
+        .map(|t| n - t)
+        .filter(|k| !random.contains(k))
+        .collect();
     tail.sort();
     tail.dedup();
     (random, tail)
@@ -161,22 +197,41 @@ fn anonymize(bars: &mut [Bar], fake: &[String]) {
 /// Build the shuffled variant plan. `view` is the container view of the
 /// evaluation series. `trunc_cuts` get a truncation; `resample_cuts` also get
 /// `resamples` bootstrap futures. Every variant carries fake dates.
-pub fn plan(view: &[Bar], trunc_cuts: &[usize], resample_cuts: &[usize], resamples: usize, max_move: f64, rng: &mut Rng) -> Vec<Variant> {
+pub fn plan(
+    view: &[Bar],
+    trunc_cuts: &[usize],
+    resample_cuts: &[usize],
+    resamples: usize,
+    max_move: f64,
+    rng: &mut Rng,
+) -> Vec<Variant> {
     let n = view.len();
     let fake = fake_dates(n);
-    let mut v = vec![Variant { name: "full".into(), cut: n, bars: view.to_vec() }];
+    let mut v = vec![Variant {
+        name: "full".into(),
+        cut: n,
+        bars: view.to_vec(),
+    }];
     for &k in trunc_cuts {
         if k < 10 || k >= n {
             continue;
         }
-        v.push(Variant { name: format!("trunc@{k}"), cut: k, bars: view[..k].to_vec() });
+        v.push(Variant {
+            name: format!("trunc@{k}"),
+            cut: k,
+            bars: view[..k].to_vec(),
+        });
     }
     for &k in resample_cuts {
         if k < 10 || k >= n {
             continue;
         }
         for i in 0..resamples {
-            v.push(Variant { name: format!("resample@{k}#{i}"), cut: k, bars: resample_future(view, k, rng, max_move) });
+            v.push(Variant {
+                name: format!("resample@{k}#{i}"),
+                cut: k,
+                bars: resample_future(view, k, rng, max_move),
+            });
         }
     }
     for x in v.iter_mut() {
@@ -195,13 +250,22 @@ pub struct ProbeReport {
     pub mismatches: Vec<serde_json::Value>,
 }
 
-pub fn compare(full: &[f64], variant: &Variant, pos: &[f64], dates: &[String]) -> Option<serde_json::Value> {
+pub fn compare(
+    full: &[f64],
+    variant: &Variant,
+    pos: &[f64],
+    dates: &[String],
+) -> Option<serde_json::Value> {
     let k = variant.cut.min(full.len()).min(pos.len());
-    let diff: Vec<usize> = (0..k).filter(|&i| (full[i] - pos[i]).abs() > 1e-9).collect();
+    let diff: Vec<usize> = (0..k)
+        .filter(|&i| (full[i] - pos[i]).abs() > 1e-9)
+        .collect();
     if diff.is_empty() {
         None
     } else {
-        Some(serde_json::json!({"variant": variant.name, "bars_differ": diff.len(), "first_bar": diff[0], "first": dates.get(diff[0]), "cut_bar": k, "cut_date": dates.get(k.saturating_sub(1))}))
+        Some(
+            serde_json::json!({"variant": variant.name, "bars_differ": diff.len(), "first_bar": diff[0], "first": dates.get(diff[0]), "cut_bar": k, "cut_date": dates.get(k.saturating_sub(1))}),
+        )
     }
 }
 
@@ -218,18 +282,33 @@ pub fn parse_positions_range(text: &str, dates: &[String], lo: f64) -> Result<Ve
     }
     let mut out = Vec::with_capacity(dates.len());
     for (i, line) in lines.enumerate() {
-        let (d, p) = line.split_once(',').ok_or_else(|| format!("positions.csv line {}: malformed", i + 2))?;
+        let (d, p) = line
+            .split_once(',')
+            .ok_or_else(|| format!("positions.csv line {}: malformed", i + 2))?;
         if i >= dates.len() || d != dates[i] {
-            return Err(format!("positions.csv line {}: date {:?} does not match input bar", i + 2, d.chars().take(20).collect::<String>()));
+            return Err(format!(
+                "positions.csv line {}: date {:?} does not match input bar",
+                i + 2,
+                d.chars().take(20).collect::<String>()
+            ));
         }
-        let x: f64 = p.parse().map_err(|_| format!("positions.csv line {}: not a number", i + 2))?;
+        let x: f64 = p
+            .parse()
+            .map_err(|_| format!("positions.csv line {}: not a number", i + 2))?;
         if !x.is_finite() || !(lo..=1.0).contains(&x) {
-            return Err(format!("positions.csv line {}: position {x} outside [{lo},1]", i + 2));
+            return Err(format!(
+                "positions.csv line {}: position {x} outside [{lo},1]",
+                i + 2
+            ));
         }
         out.push(x);
     }
     if out.len() != dates.len() {
-        return Err(format!("positions.csv has {} rows, expected {}", out.len(), dates.len()));
+        return Err(format!(
+            "positions.csv has {} rows, expected {}",
+            out.len(),
+            dates.len()
+        ));
     }
     Ok(out)
 }
@@ -238,26 +317,60 @@ pub fn parse_positions_range(text: &str, dates: &[String], lo: f64) -> Result<Ve
 mod tests {
     use super::*;
     fn bars(n: usize) -> Vec<Bar> {
-        (0..n).map(|i| {
-            let c = 10.0 + (i as f64 * 0.3).sin();
-            Bar { date: format!("2020-{:02}-{:02}", 1 + i / 28, 1 + i % 28), open: c, high: c * 1.01, low: c * 0.99, close: c, volume: 1e6, adj_factor: None }
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let c = 10.0 + (i as f64 * 0.3).sin();
+                Bar {
+                    date: format!("2020-{:02}-{:02}", 1 + i / 28, 1 + i % 28),
+                    open: c,
+                    high: c * 1.01,
+                    low: c * 0.99,
+                    close: c,
+                    volume: 1e6,
+                    adj_factor: None,
+                }
+            })
+            .collect()
     }
     #[test]
     fn plan_is_shuffled_and_resamples_respect_limits() {
         let b = bars(200);
-        let p1 = plan(&b, &[100, 140, 180], &[100, 140, 180], 2, 0.095, &mut Rng::new(1));
-        let p2 = plan(&b, &[100, 140, 180], &[100, 140, 180], 2, 0.095, &mut Rng::new(2));
+        let p1 = plan(
+            &b,
+            &[100, 140, 180],
+            &[100, 140, 180],
+            2,
+            0.095,
+            &mut Rng::new(1),
+        );
+        let p2 = plan(
+            &b,
+            &[100, 140, 180],
+            &[100, 140, 180],
+            2,
+            0.095,
+            &mut Rng::new(2),
+        );
         assert_eq!(p1.len(), 10);
         let fake = fake_dates(200);
-        assert!(p1.iter().all(|v| v.bars.iter().zip(&fake).all(|(x, d)| &x.date == d)), "containers only see fake dates");
+        assert!(
+            p1.iter()
+                .all(|v| v.bars.iter().zip(&fake).all(|(x, d)| &x.date == d)),
+            "containers only see fake dates"
+        );
         assert!(p1.iter().all(|v| v.bars[0].date == "2000-01-03"));
-        assert_ne!(p1.iter().map(|v| &v.name).collect::<Vec<_>>(), p2.iter().map(|v| &v.name).collect::<Vec<_>>());
+        assert_ne!(
+            p1.iter().map(|v| &v.name).collect::<Vec<_>>(),
+            p2.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
         for v in &p1 {
             if v.name.starts_with("resample") {
                 assert_eq!(v.bars.len(), b.len());
                 assert_eq!(v.bars.last().unwrap().date, fake[199]);
-                assert!(v.bars[..v.cut].iter().zip(&b[..v.cut]).all(|(x, y)| x.close == y.close));
+                assert!(v.bars[..v.cut]
+                    .iter()
+                    .zip(&b[..v.cut])
+                    .all(|(x, y)| x.close == y.close));
                 for w in v.bars.windows(2) {
                     assert!((w[1].close / w[0].close - 1.0).abs() <= 0.0951);
                 }
@@ -267,7 +380,10 @@ mod tests {
     #[test]
     fn positions_validation() {
         let d = vec!["2020-01-01".to_string(), "2020-01-02".to_string()];
-        assert_eq!(parse_positions("date,position\n2020-01-01,0\n2020-01-02,1\n", &d).unwrap(), vec![0.0, 1.0]);
+        assert_eq!(
+            parse_positions("date,position\n2020-01-01,0\n2020-01-02,1\n", &d).unwrap(),
+            vec![0.0, 1.0]
+        );
         assert!(parse_positions("date,position\n2020-01-01,0\n", &d).is_err());
         assert!(parse_positions("date,position\n2020-01-01,0\n2020-01-03,1\n", &d).is_err());
         assert!(parse_positions("date,position\n2020-01-01,NaN\n2020-01-02,1\n", &d).is_err());
