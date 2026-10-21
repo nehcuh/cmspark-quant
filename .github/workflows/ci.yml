@@ -14,11 +14,11 @@ jobs:
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@v2
       - name: fmt
-        run: cargo fmt -p cmsq-core -p cmsq-cli --check
+        run: cargo fmt -p cmsq-core -p cmsq-cli -p cmsq-paper --check
       - name: clippy
-        run: cargo clippy -p cmsq-core -p cmsq-cli --all-targets -- -D warnings
+        run: cargo clippy -p cmsq-core -p cmsq-cli -p cmsq-paper --all-targets -- -D warnings
       - name: tests
-        run: cargo test -p cmsq-core -p cmsq-cli
+        run: cargo test -p cmsq-core -p cmsq-cli -p cmsq-paper
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: vn.py shim

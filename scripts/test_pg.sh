@@ -8,3 +8,4 @@ export CMSQ_TEST_DB_ENV=$CMSQ_SECRETS_DIR/db.env
 cargo test -q -p cmsq-core --test store_concurrency -- --include-ignored
 cargo test -q -p cmsq-core --test pipeline pg_ -- --include-ignored
 cargo test -q -p cmsq-core --test independent_audit pg_ -- --include-ignored
+cargo test -q -p cmsq-paper --test session pg_ -- --include-ignored
