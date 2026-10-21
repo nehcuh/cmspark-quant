@@ -94,6 +94,16 @@ enum Cmd {
         workers: usize,
         #[arg(long, value_enum, default_value = "docker")]
         backend: Backend,
+        /// genetic-algorithm search over the grid's value lists instead of the full
+        /// product (every evaluated point is still a DSR trial)
+        #[arg(long)]
+        ga: bool,
+        #[arg(long, default_value_t = 8)]
+        population: usize,
+        #[arg(long, default_value_t = 4)]
+        generations: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
     },
     /// P1: multi-symbol portfolio backtest (one account, shared cash) on common development dates
     Portfolio {
@@ -881,16 +891,36 @@ async fn main() -> Result<()> {
             grid,
             workers,
             backend,
+            ga,
+            population,
+            generations,
+            seed,
         } => {
             let exec = executor(backend).await?;
             let g: serde_json::Value =
                 serde_json::from_str(&grid).context("--grid must be a JSON object")?;
             let g = g.as_object().context("--grid must be a JSON object")?;
+            let mode = if ga {
+                anyhow::ensure!(
+                    population >= 2
+                        && population * generations <= cmsq_core::orchestrator::MAX_GA_EVALUATIONS,
+                    "GA budget population×generations must be ≤ {} (population ≥ 2)",
+                    cmsq_core::orchestrator::MAX_GA_EVALUATIONS
+                );
+                cmsq_core::orchestrator::SearchMode::Ga {
+                    population,
+                    generations,
+                    seed,
+                }
+            } else {
+                cmsq_core::orchestrator::SearchMode::Grid
+            };
             let r = o
-                .sweep(&id, &symbol.to_uppercase(), g, exec.as_ref(), workers)
+                .search(&id, &symbol.to_uppercase(), g, exec.as_ref(), workers, mode)
                 .await?;
             let mut lines = vec![format!(
-                "sweep {} on {}: {} points, workers {workers}",
+                "{} {} on {}: {} points evaluated (each a DSR trial), workers {workers}",
+                if ga { "GA search" } else { "sweep" },
                 &r.run_id[..8],
                 symbol.to_uppercase(),
                 r.points.len()
