@@ -1,0 +1,14 @@
+   Compiling cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+    Finished `test` profile [unoptimized] target(s) in 0.42s
+     Running tests/store_concurrency.rs (/workspace/baseline/target/debug/deps/store_concurrency-05c6f209bec5ba4c)
+
+running 6 tests
+test pg_status_cas_has_one_winner ... ok
+test pg_owner_tamper_is_detected_by_chain ... ok
+test pg_app_role_cannot_rewrite_or_unprotect_evidence ... ok
+test pg_vault_cannot_be_double_spent ... ok
+test pg_trial_ledger_n_is_distinct_and_monotone ... ok
+test pg_audit_concurrent_appends_stay_linear ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.24s
+

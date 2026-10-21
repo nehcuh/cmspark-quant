@@ -486,9 +486,13 @@ async fn recovery_only_reaps_dead_owners() {
     c.wait().unwrap();
     let dead = format!("{}|{pid}|x", cmsq_core::store::hostname());
     assert_eq!(cmsq_core::store::lease_alive(&dead), Some(false));
-    // PID reuse: our own PID with a different start time is dead too
+    // Only Linux exposes process start time; elsewhere the conservative lease
+    // contract retains a live PID rather than risking a false recovery.
     let reused = format!("{}|{}|0", cmsq_core::store::hostname(), std::process::id());
+    #[cfg(target_os = "linux")]
     assert_eq!(cmsq_core::store::lease_alive(&reused), Some(false));
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(cmsq_core::store::lease_alive(&reused), Some(true));
     o.store.set_run_owner_for_test(&id, Some(&dead)).unwrap();
     assert_eq!(o.reap_stale_jobs().unwrap(), vec![id.clone()]);
     assert_eq!(
@@ -576,9 +580,9 @@ mod roll_ledger {
             NOFEE,
         );
         assert_eq!(sim.roll_unpriced, 1);
-        // within the limit: the held old leg's -3% is booked, the new leg's +5% is not
+        // Both legs executable: old -3% is booked, new +2% before entry is not.
         let (sim, mult) = run(
-            &fixture((97.0, 97.0), (210.0, 210.0), 200.0, 1e6),
+            &fixture((97.0, 97.0), (204.0, 204.0), 200.0, 1e6),
             1.0,
             NOFEE,
         );

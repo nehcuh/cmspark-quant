@@ -1,0 +1,31 @@
+   Compiling cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+warning: unused imports: `NewTrial` and `TrialRow`
+ --> crates/cmsq-core/tests/reviewer_window_probe.rs:6:24
+  |
+6 | use cmsq_core::store::{NewTrial, TrialRow};
+  |                        ^^^^^^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cmsq-core` (test "reviewer_window_probe") generated 1 warning (run `cargo fix --test "reviewer_window_probe" -p cmsq-core` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.63s
+     Running tests/reviewer_window_probe.rs (/workspace/baseline/target/debug/deps/reviewer_window_probe-97579bb542d45262)
+
+running 1 test
+A=2015-10-26..2019-01-02, B=2016-04-22..2019-07-03, both bars=781, trial info={"configurations":1,"counting_rule":"N = distinct (idea, params, symbol, snapshot, scoring bars, run kind, group); exact reruns dedupe; no correlation discount (conservative)","excluded_implausible":0,"excluded_lookahead":0,"idea_clusters":1,"library_trials":2,"n_effective":20,"n_floor":20,"selections":1,"variance_pool":2}
+
+thread 'different_windows_with_same_bar_count_are_not_deduped' (63961671) panicked at crates/cmsq-core/tests/reviewer_window_probe.rs:116:5:
+assertion `left == right` failed: different date windows are different research selections
+  left: Number(1)
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test different_windows_with_same_bar_count_are_not_deduped ... FAILED
+
+failures:
+
+failures:
+    different_windows_with_same_bar_count_are_not_deduped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `-p cmsq-core --test reviewer_window_probe`

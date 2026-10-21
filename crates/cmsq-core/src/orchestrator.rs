@@ -2174,7 +2174,7 @@ impl Orchestrator {
         Self::write_equity(&jd.join("equity.csv"), &bars, &full, &sim, &sim2)?;
         let mut reasons = vec![];
         if sim.roll_unpriced > 0 {
-            reasons.push(format!("futures roll ledger: {} roll(s) held through without an executable old-leg price (approximation is display-only)", sim.roll_unpriced));
+            reasons.push(format!("futures roll ledger: {} roll(s) held through without executable old/new legs (approximation is display-only)", sim.roll_unpriced));
         }
         if rep.detected {
             reasons.push(format!(

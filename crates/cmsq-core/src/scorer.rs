@@ -170,7 +170,7 @@ fn round2(x: f64) -> f64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SimResult {
-    /// futures: rolls held through without an executable old-leg price (display-only result)
+    /// futures: rolls without executable old/new legs (display-only result)
     pub roll_unpriced: usize,
     /// equity at each bar's close (len == bars.len())
     pub equity: Vec<f64>,
