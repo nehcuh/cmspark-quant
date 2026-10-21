@@ -1178,6 +1178,7 @@ impl Orchestrator {
             })
             .collect();
         let bhm = scorer::metrics(dev, &bh, warm, dev_end);
+        let regimes = scorer::regime_slices(&bh.equity, &sim.equity, warm, dev_end);
         Self::write_equity(&jd.join("equity.csv"), dev, &full, &sim, &sim2)?;
 
         // ---- library-wide trial ledger + DSR (insert and snapshot are one locked transaction) ----
@@ -1244,7 +1245,7 @@ impl Orchestrator {
             "data_provenance": meta, "data_attestation": att, "rules": rules, "dataset_sha256": dataset_sha, "data_adjusted": adjusted, "data_cross_validation": {"ok": validated.0, "detail": validated.1},
             "split": {"development": {"start": dev[0].date, "end": dev[dev_end - 1].date, "bars": dev_end, "warmup_bars": warm},
                       "vault": {"start": bars[dev_end].date, "end": bars.last().unwrap().date, "bars": bars.len() - dev_end, "note": "never shown to the strategy before promote"}},
-            "development": dm, "development_cost_2x": dm2, "walk_forward_folds": folds, "buy_and_hold": bhm,
+            "development": dm, "development_cost_2x": dm2, "walk_forward_folds": folds, "regimes": regimes, "buy_and_hold": bhm,
             "trades": sim.trades, "blocked": {"limit_up": sim.blocked_limit_up, "limit_down": sim.blocked_limit_down, "suspended": sim.blocked_suspended},
             "costs_paid": sim.costs_paid, "close_today": {"lots": sim.close_today_lots, "fees": sim.close_today_fees},
             "trade_stats": crate::tradestats::stats_window(&sim.fills, fut.as_ref().map(|f| f.multiplier).unwrap_or(1.0), warm),
@@ -1289,6 +1290,7 @@ impl Orchestrator {
             synthetic,
             capacity,
             roll_unpriced: sim.roll_unpriced,
+            regimes,
         })))
     }
 
@@ -1350,6 +1352,7 @@ impl Orchestrator {
                 synthetic: sc.synthetic,
                 capacity: sc.capacity,
                 roll_unpriced: sc.roll_unpriced,
+                regimes: &sc.regimes,
             },
             &self.gate,
         )
@@ -1853,6 +1856,7 @@ impl Orchestrator {
             &self.costs,
         );
         let bhm = scorer::metrics(pb, &ew_bh.sim, warm, n);
+        let regimes = scorer::regime_slices(&ew_bh.sim.equity, &ps.sim.equity, warm, n);
         let ikey = crate::extract::idea_key(&code);
         let phash = params_hash(&json!({"params": params, "symbols": symbols, "alloc": alloc}));
         let label = format!("PORTFOLIO:{}", symbols.join("+"));
@@ -1923,6 +1927,7 @@ impl Orchestrator {
                     .collect::<Option<Vec<f64>>>()
                     .and_then(|v| v.into_iter().reduce(f64::min)),
                 roll_unpriced: scored.iter().map(|x| x.roll_unpriced).sum(),
+                regimes: &regimes,
             },
             &self.gate,
         );
@@ -1946,7 +1951,7 @@ impl Orchestrator {
         std::fs::write(eq_path.join("equity.csv"), csv)?;
         let result = json!({"kind": "portfolio", "computed_by": "cmsq-core scorer (host, trusted)", "symbols": symbols, "alloc": alloc, "params": params,
             "window": {"start": dates[0], "end": dates[n - 1], "bars": n, "warmup_bars": warm, "note": "common development dates only; vault bars never used"},
-            "portfolio": pm, "portfolio_cost_2x": pm2, "walk_forward_folds": folds, "equal_weight_buy_and_hold": bhm, "trades": ps.sim.trades, "costs_paid": ps.sim.costs_paid,
+            "portfolio": pm, "portfolio_cost_2x": pm2, "walk_forward_folds": folds, "regimes": regimes, "equal_weight_buy_and_hold": bhm, "trades": ps.sim.trades, "costs_paid": ps.sim.costs_paid,
             "blocked": {"limit_up": ps.sim.blocked_limit_up, "limit_down": ps.sim.blocked_limit_down, "suspended": ps.sim.blocked_suspended},
             "legs": scored.iter().map(|x| json!({"symbol": x.symbol, "job": x.job_id, "development": x.dm, "dsr": x.dsr.dsr})).collect::<Vec<_>>(),
             "leg_return_correlation": scorer::leg_correlation(&legs_in),
@@ -2619,6 +2624,7 @@ pub struct Scored {
     pub synthetic: bool,
     pub capacity: Option<f64>,
     pub roll_unpriced: usize,
+    pub regimes: Vec<scorer::RegimeSlice>,
 }
 
 pub enum RunOutcome {

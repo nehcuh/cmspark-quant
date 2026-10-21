@@ -194,6 +194,32 @@ fn unpriced_roll_is_rejected_by_actual_gate() {
         ..Default::default()
     };
     let folds = vec![m.clone(); 4];
+    let regimes = vec![
+        cmsq_core::scorer::RegimeSlice {
+            regime: "trend_up".into(),
+            bars: 200,
+            total_return: 0.1,
+            market_return: 0.1,
+        },
+        cmsq_core::scorer::RegimeSlice {
+            regime: "range".into(),
+            bars: 200,
+            total_return: 0.05,
+            market_return: 0.0,
+        },
+        cmsq_core::scorer::RegimeSlice {
+            regime: "vol_high".into(),
+            bars: 200,
+            total_return: 0.05,
+            market_return: 0.0,
+        },
+        cmsq_core::scorer::RegimeSlice {
+            regime: "vol_low".into(),
+            bars: 200,
+            total_return: 0.05,
+            market_return: 0.0,
+        },
+    ];
     let mut i = gate::GateInput {
         job_status: "succeeded",
         hardened: true,
@@ -211,6 +237,7 @@ fn unpriced_roll_is_rejected_by_actual_gate() {
         synthetic: false,
         capacity: Some(5e7),
         roll_unpriced: 0,
+        regimes: &regimes,
     };
     assert!(gate::evaluate(&i, &gate::GateConfig::default()).passed);
     i.roll_unpriced = 1;

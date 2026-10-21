@@ -34,6 +34,26 @@ pub struct GateConfig {
     /// = the simulated capital): see [`crate::scorer::capacity`]
     #[serde(default)]
     pub min_capacity: f64,
+    /// regime stability: a regime counts once it has this many bars
+    #[serde(default = "default_regime_min_bars")]
+    pub regime_min_bars: usize,
+    /// regime stability: at most this many qualifying regimes may lose money
+    #[serde(default = "default_regime_max_losing")]
+    pub regime_max_losing: usize,
+    /// regime stability: no qualifying regime may lose more than this
+    #[serde(default = "default_regime_max_loss")]
+    pub regime_max_loss: f64,
+}
+
+fn default_regime_max_loss() -> f64 {
+    -0.10
+}
+
+fn default_regime_min_bars() -> usize {
+    60
+}
+fn default_regime_max_losing() -> usize {
+    1
 }
 
 impl Default for GateConfig {
@@ -57,6 +77,9 @@ impl Default for GateConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::scorer::INITIAL_CAPITAL),
+            regime_min_bars: default_regime_min_bars(),
+            regime_max_losing: default_regime_max_losing(),
+            regime_max_loss: default_regime_max_loss(),
         }
     }
 }
@@ -85,6 +108,8 @@ pub struct GateInput<'a> {
     pub capacity: Option<f64>,
     /// futures: rolls held through without executable old and new legs (issue #10)
     pub roll_unpriced: usize,
+    /// strategy return per market regime ([`crate::scorer::regime_slices`])
+    pub regimes: &'a [crate::scorer::RegimeSlice],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +267,62 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
             cfg.min_positive_folds
         ),
     );
+    {
+        // two partitions of the same bars: trend (up/range/down) and volatility (high/low)
+        let dim = |r: &str| {
+            if r.starts_with("vol_") {
+                "vol"
+            } else {
+                "trend"
+            }
+        };
+        let q: Vec<_> = i
+            .regimes
+            .iter()
+            .filter(|r| r.bars >= cfg.regime_min_bars)
+            .collect();
+        let mut bad = vec![];
+        for d in ["trend", "vol"] {
+            let qd: Vec<_> = q.iter().filter(|r| dim(&r.regime) == d).collect();
+            let losing = qd.iter().filter(|r| r.total_return <= 0.0).count();
+            if qd.len() < 2 {
+                bad.push(format!(
+                    "{d}: fewer than 2 regimes with ≥{} bars",
+                    cfg.regime_min_bars
+                ));
+            } else if losing > cfg.regime_max_losing {
+                bad.push(format!(
+                    "{d}: {losing} of {} regimes lose money (max {})",
+                    qd.len(),
+                    cfg.regime_max_losing
+                ));
+            }
+        }
+        for r in &q {
+            if r.total_return < cfg.regime_max_loss {
+                bad.push(format!(
+                    "{} {:+.1}% (floor {:.0}%)",
+                    r.regime,
+                    r.total_return * 100.0,
+                    cfg.regime_max_loss * 100.0
+                ));
+            }
+        }
+        let summary = q
+            .iter()
+            .map(|r| format!("{} {:+.1}%", r.regime, r.total_return * 100.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        check(
+            "regime_stability",
+            bad.is_empty(),
+            if bad.is_empty() {
+                summary
+            } else {
+                format!("{}; [{summary}]", bad.join("; "))
+            },
+        );
+    }
     check(
         "cost_stress_2x",
         i.dev_cost_2x.total_return > 0.0,
@@ -305,6 +386,15 @@ mod tests {
         probe: ProbeReport,
         risks: Vec<String>,
         bh: Metrics,
+        regimes: Vec<crate::scorer::RegimeSlice>,
+    }
+    fn rg(name: &str, bars: usize, ret: f64) -> crate::scorer::RegimeSlice {
+        crate::scorer::RegimeSlice {
+            regime: name.into(),
+            bars,
+            total_return: ret,
+            market_return: 0.0,
+        }
     }
     fn fx() -> Fx {
         let dev = m(0.3, 1.2);
@@ -322,6 +412,13 @@ mod tests {
             risks: vec![],
             dev,
             bh: m(0.1, 0.3),
+            regimes: vec![
+                rg("trend_up", 200, 0.1),
+                rg("range", 200, 0.05),
+                rg("trend_down", 100, -0.02),
+                rg("vol_high", 250, 0.04),
+                rg("vol_low", 250, 0.08),
+            ],
         }
     }
     fn input(f: &Fx) -> GateInput<'_> {
@@ -342,7 +439,41 @@ mod tests {
             synthetic: false,
             capacity: Some(5e7),
             roll_unpriced: 0,
+            regimes: &f.regimes,
         }
+    }
+    #[test]
+    fn regime_stability_check() {
+        let cfg = GateConfig::default();
+        let fails = |f: &Fx| {
+            let g = evaluate(&input(f), &cfg);
+            !g.passed && g.reasons.iter().any(|r| r.starts_with("regime_stability"))
+        };
+        let f = fx();
+        assert!(
+            evaluate(&input(&f), &cfg).passed,
+            "one losing trend regime is allowed"
+        );
+        // a second losing trend regime fails
+        let mut g = fx();
+        g.regimes[1].total_return = -0.01;
+        assert!(fails(&g));
+        // one losing regime in each partition is fine, a big loss is not
+        let mut g = fx();
+        g.regimes[3].total_return = -0.05;
+        assert!(evaluate(&input(&g), &cfg).passed);
+        g.regimes[3].total_return = -0.15;
+        assert!(fails(&g));
+        // a regime too short to qualify is ignored ...
+        let mut g = fx();
+        g.regimes[1] = rg("range", 59, -0.5);
+        assert!(evaluate(&input(&g), &cfg).passed);
+        // ... but each partition needs two qualifying regimes
+        g.regimes[0].bars = 10;
+        assert!(fails(&g));
+        let mut g = fx();
+        g.regimes.clear();
+        assert!(fails(&g));
     }
     #[test]
     fn synthetic_and_capacity_checks() {

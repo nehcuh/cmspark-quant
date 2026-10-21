@@ -1253,3 +1253,104 @@ mod tests {
         );
     }
 }
+
+/// Strategy result inside one market regime (see [`regime_slices`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RegimeSlice {
+    pub regime: String,
+    pub bars: usize,
+    /// compounded strategy return over the bars in this regime
+    pub total_return: f64,
+    /// compounded market (buy-and-hold) return over the same bars
+    pub market_return: f64,
+}
+
+pub const REGIME_TREND_LOOKBACK: usize = 60;
+pub const REGIME_TREND_BAND: f64 = 0.05;
+pub const REGIME_VOL_LOOKBACK: usize = 20;
+
+/// Split bars `[from, to)` by market regime and report the strategy's return in each.
+///
+/// The regime of bar t is decided from the market series up to t-1 only:
+/// - trend: trailing 60-bar market return > +5% `trend_up`, < -5% `trend_down`, else `range`;
+/// - volatility: trailing 20-bar stdev of market returns above / at-or-below the
+///   window's median of that same trailing statistic (`vol_high` / `vol_low`).
+///
+/// `market` is the buy-and-hold equity on the same bars (so it works for single
+/// symbols, futures and portfolios alike); `strat` is the strategy equity.
+pub fn regime_slices(market: &[f64], strat: &[f64], from: usize, to: usize) -> Vec<RegimeSlice> {
+    let to = to.min(market.len()).min(strat.len());
+    let start = from
+        .max(REGIME_TREND_LOOKBACK + 1)
+        .max(REGIME_VOL_LOOKBACK + 1);
+    if to <= start {
+        return vec![];
+    }
+    let r = |s: &[f64], t: usize| s[t] / s[t - 1] - 1.0;
+    let vol = |t: usize| {
+        let xs: Vec<f64> = (t - REGIME_VOL_LOOKBACK..t).map(|k| r(market, k)).collect();
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (xs.len() - 1) as f64).sqrt()
+    };
+    let vols: Vec<f64> = (start..to).map(vol).collect();
+    let mut sorted = vols.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let median = sorted[sorted.len() / 2];
+    let names = ["trend_up", "range", "trend_down", "vol_high", "vol_low"];
+    let mut acc: Vec<(usize, f64, f64)> = vec![(0, 1.0, 1.0); names.len()];
+    for (i, t) in (start..to).enumerate() {
+        let tr = market[t - 1] / market[t - 1 - REGIME_TREND_LOOKBACK] - 1.0;
+        let trend = if tr > REGIME_TREND_BAND {
+            0
+        } else if tr < -REGIME_TREND_BAND {
+            2
+        } else {
+            1
+        };
+        let v = if vols[i] > median { 3 } else { 4 };
+        for k in [trend, v] {
+            acc[k].0 += 1;
+            acc[k].1 *= 1.0 + r(strat, t);
+            acc[k].2 *= 1.0 + r(market, t);
+        }
+    }
+    names
+        .iter()
+        .zip(acc)
+        .map(|(n, (bars, s, m))| RegimeSlice {
+            regime: n.to_string(),
+            bars,
+            total_return: s - 1.0,
+            market_return: m - 1.0,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod regime_tests {
+    use super::*;
+    #[test]
+    fn regimes_use_only_past_data_and_split_returns() {
+        // market: 100 bars up 1%/bar, then 100 bars down 1%/bar
+        let mut m = vec![1.0];
+        for t in 1..200 {
+            let g = if t < 100 { 1.01 } else { 0.99 };
+            m.push(m[t - 1] * g);
+        }
+        // strategy = long the market only while trend_up is known
+        let s = m.clone();
+        let sl = regime_slices(&m, &s, 0, 200);
+        let up = sl.iter().find(|x| x.regime == "trend_up").unwrap();
+        let dn = sl.iter().find(|x| x.regime == "trend_down").unwrap();
+        assert!(up.bars > 30 && up.total_return > 0.0);
+        assert!(dn.bars > 30 && dn.total_return < 0.0);
+        // regime of bar t never depends on bar t: changing the last bar's price
+        // changes returns but not the bar counts
+        let mut m2 = m.clone();
+        *m2.last_mut().unwrap() *= 1.5;
+        let sl2 = regime_slices(&m2, &m2, 0, 200);
+        let counts = |v: &[RegimeSlice]| v.iter().map(|x| x.bars).collect::<Vec<_>>();
+        assert_eq!(counts(&sl), counts(&sl2));
+        assert!(regime_slices(&m, &s, 0, 50).is_empty());
+    }
+}
