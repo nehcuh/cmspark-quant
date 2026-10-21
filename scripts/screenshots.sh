@@ -6,11 +6,14 @@ cd "$(dirname "$0")/.."
 DASH=${DASH:-target/release/cmsq-dashboard}
 OUT=docs/screenshots
 shot() { # home secrets db tab file [run]
+  if timeout 2 xdotool search --name "CMspark Quant Dashboard" >/dev/null 2>&1; then echo "refusing: another dashboard window is open (would be captured instead)"; return 1; fi
   CMSQ_HOME=$1 CMSQ_SECRETS_DIR=$2 CMSQ_DB=$3 CMSQ_DASH_TAB=$4 CMSQ_DASH_RUN=${6:-} "$DASH" >/tmp/dash.log 2>&1 & local p=$!
   for _ in $(seq 60); do xdotool search --name "CMspark Quant Dashboard" >/dev/null 2>&1 && break; sleep 0.5; done
   sleep 4
-  local w; w=$(xdotool search --name "CMspark Quant Dashboard" | head -1)
+  local w; w=$(timeout 5 xdotool search --name "CMspark Quant Dashboard" | head -1)
+  [ -n "$w" ] || { echo "dashboard window not found (see /tmp/dash.log)"; kill $p; return 1; }
   xdotool windowactivate "$w" 2>/dev/null || true; sleep 1
+  xdotool mousemove --window "$w" 5 630 2>/dev/null || true; sleep 0.5  # park the pointer: no chart tooltip / hover state
   import -window "$w" "$OUT/$5"
   kill $p; wait $p 2>/dev/null || true
   echo "$OUT/$5"
