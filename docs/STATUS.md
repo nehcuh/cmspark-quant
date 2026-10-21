@@ -151,6 +151,15 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * e2e 新增 5b 节，完整跑通 GatePassed → vault → Promoted → QIFI 导出。所用的 SAMPLE_PERSIST 是固定牛熊节奏的
   合成数据，只用来演示流程。
 
+## 13. 本轮（2026-10-21 晚）：信号刷新、DEMO、门槛与沙箱加固（#23–#30）
+* 已晋升策略每日信号刷新（沙箱重跑、前视探针、信号历史、模拟盘跟随）；实盘衰减只告警不降级（用户决定）。
+* DEMO 工作区（合成数据，CLI/仪表盘/文档均标注"不是证据"）。
+* `--from-bars` 按交易所日历处理夜盘节假日；日历快照格式错误时真实工作区拒绝运行、DEMO 警告，均写入 `calendar_invalid` 审计。
+* 门槛新增 `regime_stability`（趋势/波动两组状态，只用过去数据打标签）。
+* 参数扫描的 walk-forward 改为每折重新选参；新增 GA 搜索（`--ga`），每个评估点都计入 DSR 试验账本。
+* Docker 沙箱 seccomp 拒绝直接读墙钟的系统调用；DEV（bwrap）后端 `/out` 字节与文件数上限（看门狗）。
+* PostgreSQL 连接失败不再 panic；交互截图重拍（07 仍为历史截图）。
+
 ## 9. 后续阶段
 * **P1：组合与参数扫描。** 多标的组合回测、参数网格扫描。每个参数点都计入全库 trial 账本和 DSR 的 N，
   并配合 walk-forward 与 vault 纪律，避免把扫描变成过拟合。同时补上 BaoStock 第二校验源，在国内节点验证 rstdx。
