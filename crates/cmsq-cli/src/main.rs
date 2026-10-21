@@ -1921,7 +1921,7 @@ fn bars_to_quotes(file: &std::path::Path, inst: &str) -> Result<Vec<cmsq_paper::
             ln + 1
         );
         let (date, time) = (&dt[..10], &dt[11..16]);
-        let night = time >= "21:00" || time < "03:00";
+        let night = !("03:00".."21:00").contains(&time);
         let td = if night {
             let p = |a: usize, b: usize| date[a..b].parse::<i64>().unwrap_or(0);
             let mut n = days_from_civil(p(0, 4), p(5, 7), p(8, 10));
