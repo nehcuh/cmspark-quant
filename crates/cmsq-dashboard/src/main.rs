@@ -444,6 +444,16 @@ impl Dashboard {
             _poll: Some(poll),
         };
         d.reload();
+        // screenshot hook: preselect a strategy by title substring (UI state only)
+        if let Ok(t) = std::env::var("CMSQ_DASH_SELECT") {
+            if let Some(x) = d.snap.strategies.iter().find(|s| s.title.contains(&t)) {
+                d.selected = Some(x.id.clone());
+                // open (never submit) the typed-confirmation desk
+                if std::env::var("CMSQ_DASH_CONFIRM").is_ok() {
+                    d.pending_promote = Some(x.id.clone());
+                }
+            }
+        }
         if let Ok(k) = std::env::var("CMSQ_DASH_RUN") {
             d.run_sel = d
                 .snap
