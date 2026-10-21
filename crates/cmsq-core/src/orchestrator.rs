@@ -1245,16 +1245,18 @@ impl Orchestrator {
             .map(|t| (t.idea_key.as_str(), t.params_hash.as_str()))
             .collect::<std::collections::BTreeSet<_>>()
             .len();
+        let selections = all.iter().map(|t| t.selection_key()).collect::<std::collections::BTreeSet<_>>().len();
         let clusters = all
             .iter()
             .map(|t| t.idea_key.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        let n_eff = configs.max(self.gate.dsr_min_trials);
+        let n_eff = selections.max(self.gate.dsr_min_trials);
         let dsr = scorer::deflated_sharpe_v(dm, var, n_eff);
         (
             dsr,
-            json!({"library_trials": all.len(), "idea_clusters": clusters, "configurations": configs, "n_effective": n_eff, "n_floor": self.gate.dsr_min_trials,
+            json!({"library_trials": all.len(), "idea_clusters": clusters, "configurations": configs, "selections": selections,
+            "counting_rule": "N = distinct (idea, params, symbol, snapshot, scoring bars, run kind, group); exact reruns dedupe; no correlation discount (conservative)", "n_effective": n_eff, "n_floor": self.gate.dsr_min_trials,
             "variance_pool": kept, "excluded_lookahead": all.len() - pool.len(), "excluded_implausible": implausible}),
         )
     }

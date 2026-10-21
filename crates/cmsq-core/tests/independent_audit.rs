@@ -169,3 +169,46 @@ fn data_class_comes_only_from_signed_source() {
     }
     assert!(!real(&json!({"source":"tushare"}), "SAMPLE_REGIME"));
 }
+
+fn trial(o: &Orchestrator, job: &str, sym: &str, sha: &str, bars: usize, params: &str) {
+    o.store
+        .record_trial(&cmsq_core::store::NewTrial {
+            strategy_id: "same-strategy", job_id: job, idea_key: "same-idea", params_hash: params, symbol: sym, dataset_sha: sha, bars,
+            sharpe_daily: 0.02, positions: &[], lookahead: false, run_kind: "single", group_id: None,
+        })
+        .unwrap();
+}
+
+/// #7: choosing the best of 100 markets counts 100 selections, and the DSR verdict changes.
+#[tokio::test]
+async fn cross_symbol_trials_count_in_dsr_n() {
+    let (_d, o, _) = setup().await;
+    for i in 0..100 {
+        trial(&o, &format!("j{i}"), &format!("SH{:06}", 600000 + i), "snapshot", 500, "same-params");
+    }
+    let all = o.store.trials().unwrap();
+    let metrics = cmsq_core::scorer::Metrics { bars: 500, sharpe_daily: 0.17, kurtosis: 3.0, ..Default::default() };
+    let (dsr, info) = o.dsr_for(&all, &metrics);
+    let n20 = cmsq_core::scorer::deflated_sharpe_v(&metrics, dsr.sr_variance, 20);
+    println!("{info} DSR(N={})={} vs DSR(N=20)={}", dsr.trials, dsr.dsr, n20.dsr);
+    assert_eq!(dsr.trials, 100);
+    assert_eq!(info["selections"], 100);
+    assert!(n20.dsr >= 0.95 && dsr.dsr < 0.95, "crossing-threshold case");
+    assert!(info["counting_rule"].as_str().unwrap().contains("no correlation discount"));
+}
+
+/// #7: exact reruns dedupe; a different window, snapshot or params is a new trial.
+#[tokio::test]
+async fn trial_identity_dedupes_only_exact_reruns() {
+    let (_d, o, _) = setup().await;
+    let n = |o: &Orchestrator| o.dsr_for(&o.store.trials().unwrap(), &Default::default()).1["selections"].as_u64().unwrap();
+    trial(&o, "a", "SH600000", "snap1", 500, "p1");
+    trial(&o, "b", "SH600000", "snap1", 500, "p1");
+    assert_eq!(n(&o), 1, "identical rerun");
+    trial(&o, "c", "SH600000", "snap1", 400, "p1");
+    assert_eq!(n(&o), 2, "window");
+    trial(&o, "d", "SH600000", "snap2", 500, "p1");
+    assert_eq!(n(&o), 3, "snapshot");
+    trial(&o, "e", "SH600000", "snap1", 500, "p2");
+    assert_eq!(n(&o), 4, "params");
+}

@@ -180,6 +180,21 @@ pub struct TrialRow {
     pub lookahead: bool,
     pub run_kind: String,
     pub group_id: Option<String>,
+    /// signed snapshot the run was scored on
+    pub dataset_sha: String,
+    /// evaluation bars (fixes the scoring window on that snapshot)
+    pub bars: i64,
+}
+
+impl TrialRow {
+    /// Research-selection identity for the DSR count (issue #7): code idea,
+    /// canonical params, market, signed snapshot and scoring window, run kind and
+    /// portfolio group. Exact reruns of one identity collapse; any change along a
+    /// selection dimension (symbol, data, window, allocation, params) is a new trial.
+    /// No correlation discount is applied: the count is the conservative upper bound.
+    pub fn selection_key(&self) -> String {
+        format!("{}|{}|{}|{}|{}|{}|{}", self.idea_key, self.params_hash, self.symbol, self.dataset_sha, self.bars, self.run_kind, self.group_id.as_deref().unwrap_or("-"))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -234,7 +249,7 @@ pub fn hostname() -> String {
 const ACOLS: &str = "seq,ts,actor,action,target,details,success,prev_hash,hash";
 const SCOLS: &str = "id,title,source_site,source_url,author,scraped_at,ingested_at,raw_path,content_sha256,sample,status,attempts,last_reason,extracted_json,updated_at";
 const JCOLS: &str = "id,strategy_id,backend,image,symbol,data_source,status,exit_code,started_at,finished_at,duration_ms,job_dir,error,result_json,owner_pid,runner_identity,kind,owner_host";
-const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead,run_kind,group_id";
+const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead,run_kind,group_id,dataset_sha,bars";
 
 fn audit_row(r: &R) -> AuditEntry {
     let d = r.s(5);
@@ -316,6 +331,8 @@ fn trial_row(r: &R) -> TrialRow {
         lookahead: r.b(7),
         run_kind: r.s(8),
         group_id: r.os(9),
+        dataset_sha: r.s(10),
+        bars: r.i(11),
     }
 }
 
