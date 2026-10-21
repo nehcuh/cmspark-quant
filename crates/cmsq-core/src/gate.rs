@@ -45,6 +45,13 @@ pub struct GateConfig {
     pub regime_max_loss: f64,
 }
 
+/// Environment override for a gate threshold; unparsable values are ignored (default kept).
+fn env_or<T: std::str::FromStr>(k: &str, d: T) -> T {
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(d)
+}
 fn default_regime_max_loss() -> f64 {
     -0.10
 }
@@ -77,9 +84,9 @@ impl Default for GateConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::scorer::INITIAL_CAPITAL),
-            regime_min_bars: default_regime_min_bars(),
-            regime_max_losing: default_regime_max_losing(),
-            regime_max_loss: default_regime_max_loss(),
+            regime_min_bars: env_or("CMSQ_GATE_REGIME_MIN_BARS", default_regime_min_bars()),
+            regime_max_losing: env_or("CMSQ_GATE_REGIME_MAX_LOSING", default_regime_max_losing()),
+            regime_max_loss: env_or("CMSQ_GATE_REGIME_MAX_LOSS", default_regime_max_loss()),
         }
     }
 }
@@ -441,6 +448,20 @@ mod tests {
             roll_unpriced: 0,
             regimes: &f.regimes,
         }
+    }
+    #[test]
+    fn regime_thresholds_configurable() {
+        let mut g = fx();
+        g.regimes[1].total_return = -0.01; // second losing trend regime
+        let mut cfg = GateConfig::default();
+        assert!(!evaluate(&input(&g), &cfg).passed);
+        cfg.regime_max_losing = 2;
+        assert!(evaluate(&input(&g), &cfg).passed);
+        cfg.regime_max_loss = -0.005;
+        assert!(!evaluate(&input(&g), &cfg).passed);
+        cfg.regime_max_loss = -0.10;
+        cfg.regime_min_bars = 150; // trend_down (100 bars) no longer qualifies
+        assert!(evaluate(&input(&g), &cfg).passed);
     }
     #[test]
     fn regime_stability_check() {

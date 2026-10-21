@@ -66,7 +66,7 @@ docker compose -f deploy/docker-compose.yml exec signer cmsq signer rotate --dir
 
 只有 ≥60 根 K 线的状态才计入。通过条件：每组至少有 2 个计入的状态；每组最多 1 个状态亏钱；任何计入的状态亏损都不超过 −10%。组合（portfolio）用等权买入持有曲线来划分状态。每次回测的 `result.json` 里有 `regimes` 字段，记录每个状态的 K 线数、策略收益和同期市场收益。
 
-说明：波动的高/低分界用的是整个窗口的中位数，这只影响标签，不进入策略。阈值目前写在代码默认值里（`GateConfig`：60 根、最多 1 个、−10%）。
+说明：波动的高/低分界用的是整个窗口的中位数，这只影响标签，不进入策略。阈值可用环境变量调整：`CMSQ_GATE_REGIME_MIN_BARS`（默认 60）、`CMSQ_GATE_REGIME_MAX_LOSING`（默认 1）、`CMSQ_GATE_REGIME_MAX_LOSS`（默认 -0.10）；实际使用的值随每次门槛结果记录在 `checks.config` 里。
 
 ## 参数扫描的 walk-forward：每折重新选参
 
