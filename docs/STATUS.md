@@ -61,6 +61,7 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 
 ## 5. 已知缺口
 * fork bomb 的 `pids_exhausted` 标签是启发式判断；稀疏偷看只能概率性抓到。
+* DEV（bwrap）后端的 /out 是宿主机目录，字节和文件数预算靠 50 ms 轮询的看门狗执行：超限即杀进程（`QuotaExceeded`），但两次轮询之间仍可能多写入一些文件。Docker 后端由内核（限容 tmpfs）强制执行。
 * 真实数据的价格形态本身仍可能泄露年代。直接读墙钟的系统调用（time、gettimeofday、clock_gettime 的 REALTIME/TAI/BOOTTIME 等）已被 seccomp 拒绝；但直接调用 vDSO、或用原始 stat 系统调用读自己刚写的文件的时间戳，仍能拿到真实时间（有假日期兜底）。
 * HMAC 密钥与程序属于同一 uid，同时拿到密钥并改写锚点的人可以伪造历史。
 * 交叉校验目前只有 tushare↔akshare 一对（本机连不上 baostock 和 TDX），只有 tushare 提供复权因子。

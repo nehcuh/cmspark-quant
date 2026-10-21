@@ -132,16 +132,43 @@ impl SandboxExecutor for ProcessSandboxExecutor {
         }
         let rd = async move { tokio::join!(capped(&mut so), capped(&mut se)) };
         let rd = tokio::spawn(rd);
-        let (outcome, code) =
-            match tokio::time::timeout(Duration::from_secs(req.limits.timeout_secs), child.wait())
-                .await
-            {
-                Ok(st) => (Outcome::Exited, st?.code().unwrap_or(-1) as i64),
-                Err(_) => {
-                    let _ = child.kill().await;
-                    (Outcome::TimedOut, 137)
+        // /out is a host bind here (no size-capped tmpfs as in docker), so a watchdog
+        // enforces the same byte + inode budget: poll, and kill on the first excess
+        let out_dir = req
+            .mounts
+            .iter()
+            .find(|m| m.container == "/out" && !m.read_only)
+            .map(|m| m.host.clone());
+        let (b_cap, i_cap) = (req.limits.out_bytes, req.limits.out_inodes);
+        let over = |d: &Option<std::path::PathBuf>| {
+            d.as_ref().and_then(|d| out_usage(d, b_cap, i_cap).err())
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(req.limits.timeout_secs);
+        let mut quota: Option<String> = None;
+        let (outcome, code) = loop {
+            tokio::select! {
+                st = child.wait() => {
+                    let code = st?.code().unwrap_or(-1) as i64;
+                    // a final check catches a burst between the last poll and exit
+                    if let Some(q) = over(&out_dir) {
+                        quota = Some(q);
+                        break (Outcome::QuotaExceeded, code);
+                    }
+                    break (Outcome::Exited, code);
                 }
-            };
+                _ = tokio::time::sleep_until(deadline) => {
+                    let _ = child.kill().await;
+                    break (Outcome::TimedOut, 137);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if let Some(q) = over(&out_dir) {
+                        let _ = child.kill().await;
+                        quota = Some(q);
+                        break (Outcome::QuotaExceeded, 137);
+                    }
+                }
+            }
+        };
         let (a, b) = rd.await.unwrap_or_default();
         Ok(SandboxResult {
             id: req.id.clone(),
@@ -151,7 +178,62 @@ impl SandboxExecutor for ProcessSandboxExecutor {
             stderr: String::from_utf8_lossy(&b).into(),
             duration_ms: t0.elapsed().as_millis() as u64,
             policy: serde_json::json!({"backend": "process-bwrap", "hardened": false, "network": "unshared (none)", "memory_mb": req.limits.memory_mb,
-                "timeout_secs": req.limits.timeout_secs, "mounts": req.mounts, "warning": "DEV ONLY: weaker isolation than Docker"}),
+                "timeout_secs": req.limits.timeout_secs, "mounts": req.mounts, "warning": "DEV ONLY: weaker isolation than Docker",
+                "out": format!("host bind, watchdog-polled (50 ms) budget bytes={b_cap} files={i_cap}"), "out_quota_exceeded": quota}),
         })
+    }
+}
+
+/// Walk `/out` on the host without following symlinks; `Err` names the first budget
+/// exceeded (entries counted like inodes: files, dirs, symlinks, fifos alike).
+pub fn out_usage(
+    dir: &std::path::Path,
+    max_bytes: u64,
+    max_files: u64,
+) -> Result<(u64, u64), String> {
+    let (mut bytes, mut files) = (0u64, 0u64);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            files += 1;
+            if files > max_files {
+                return Err(format!("/out holds more than {max_files} entries"));
+            }
+            if let Ok(m) = e.path().symlink_metadata() {
+                if m.is_dir() {
+                    stack.push(e.path());
+                } else {
+                    bytes += m.len();
+                    if bytes > max_bytes {
+                        return Err(format!("/out holds more than {max_bytes} bytes"));
+                    }
+                }
+            }
+        }
+    }
+    Ok((bytes, files))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn out_usage_counts_entries_and_bytes_without_following_links() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a"), vec![0u8; 100]).unwrap();
+        std::fs::create_dir(d.path().join("sub")).unwrap();
+        std::fs::write(d.path().join("sub/b"), vec![0u8; 50]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/usr", d.path().join("link")).unwrap();
+        let (b, f) = out_usage(d.path(), 1_000, 10).unwrap();
+        assert_eq!(f, 4);
+        assert!((150..200).contains(&b), "symlink target not followed: {b}");
+        assert!(out_usage(d.path(), 1_000, 3)
+            .unwrap_err()
+            .contains("entries"));
+        assert!(out_usage(d.path(), 120, 10).unwrap_err().contains("bytes"));
     }
 }

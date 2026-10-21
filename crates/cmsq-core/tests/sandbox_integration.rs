@@ -259,3 +259,19 @@ async fn docker_out_budget_is_enforced_while_running() {
         "container removed"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires bubblewrap: scripts/test_docker.sh"]
+async fn process_backend_caps_out_file_count() {
+    assert!(ProcessSandboxExecutor::available(), "bwrap not installed");
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let code = "import time\nfor i in range(200000):\n    open('/out/f%d' % i, 'w').close()\n    if i % 500 == 0: time.sleep(0.01)\n";
+    let r = ProcessSandboxExecutor
+        .execute(&req(code, ro.path(), out.path(), 60))
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, Outcome::QuotaExceeded, "{}", r.stderr);
+    let n = std::fs::read_dir(out.path()).unwrap().count();
+    assert!(n < 20_000, "watchdog stopped the flood early: {n} files");
+    assert!(r.policy["out_quota_exceeded"].as_str().unwrap().contains("entries"));
+}
