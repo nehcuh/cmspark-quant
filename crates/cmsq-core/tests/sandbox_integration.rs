@@ -14,7 +14,7 @@ async fn docker() -> DockerSandboxExecutor {
 fn req(code: &str, ro: &std::path::Path, out: &std::path::Path, timeout: u64) -> SandboxRequest {
     std::fs::write(ro.join("probe.py"), code).unwrap();
     SandboxRequest {
-        id: uuid::Uuid::new_v4().to_string(), image: "cmsq-runner:2.2.1".into(),
+        id: uuid::Uuid::new_v4().to_string(), image: "cmsq-runner:2.2.2".into(),
         command: vec!["python3".into(), "-I".into(), "/data/probe.py".into()], env: vec![],
         mounts: vec![Mount { host: ro.to_path_buf(), container: "/data".into(), read_only: true },
                      Mount { host: out.to_path_buf(), container: "/out".into(), read_only: false }],
@@ -94,8 +94,8 @@ async fn process_backend_isolation() {
 #[ignore = "requires docker: scripts/test_docker.sh"]
 async fn docker_identity_comes_from_image_inspect() {
     let d = docker().await;
-    let id = d.runner_identity("cmsq-runner:2.2.1").await.expect("runner image missing: run scripts/build_runner.sh");
-    assert!(id.starts_with("sha256:") && id.ends_with("|cmsq.runner.version=2.2.1"), "{id}");
+    let id = d.runner_identity("cmsq-runner:2.2.2").await.expect("runner image missing: run scripts/build_runner.sh");
+    assert!(id.starts_with("sha256:") && id.ends_with("|cmsq.runner.version=2.2.2"), "{id}");
 }
 
 #[tokio::test]

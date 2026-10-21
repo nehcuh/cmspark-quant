@@ -48,7 +48,7 @@ def main():
     if hasattr(mod, "generate_signals"):
         out = mod.generate_signals(df.copy(), **params)
     else:
-        out = vnpy_shim.run_cta(mod, df.copy(), params, lo)
+        out = vnpy_shim.run_cta(mod, df.copy(), params, lo, job.get("pricetick"))
     pos = pd.Series(out, index=df.index).astype(float).fillna(0.0).clip(lo, 1.0)
     with open(os.path.join(OUT, "positions.csv"), "w") as f:
         f.write("date,position\n")

@@ -7,7 +7,7 @@ use crate::scorer::{Dsr, Metrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const RUNNER_VERSION: &str = "2.2.1";
+pub const RUNNER_VERSION: &str = "2.2.2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
@@ -26,13 +26,23 @@ pub struct GateConfig {
     pub dsr_min_trials: usize,
     /// strategy Sharpe must exceed buy-and-hold Sharpe on the same window
     pub require_beat_buy_hold: bool,
+    /// synthetic SAMPLE_* data may pass only when explicitly allowed
+    /// (`CMSQ_ALLOW_SYNTHETIC=1`: demos/tests; recorded in every evaluation)
+    #[serde(default)]
+    pub allow_synthetic: bool,
+    /// minimum capacity estimate in CNY (`CMSQ_GATE_MIN_CAPACITY`, default 1,000,000
+    /// = the simulated capital): see [`crate::scorer::capacity`]
+    #[serde(default)]
+    pub min_capacity: f64,
 }
 
 impl Default for GateConfig {
     fn default() -> Self {
         Self { min_bars: 250, min_sharpe: 0.5, min_dsr: 0.95, min_positive_folds: 3, max_drawdown_floor: -0.35, min_exposure: 0.05,
             require_hardened_backend: true, require_adjusted_data: true,
-            dsr_min_trials: std::env::var("CMSQ_DSR_MIN_TRIALS").ok().and_then(|v| v.parse().ok()).unwrap_or(20), require_beat_buy_hold: true }
+            dsr_min_trials: std::env::var("CMSQ_DSR_MIN_TRIALS").ok().and_then(|v| v.parse().ok()).unwrap_or(20), require_beat_buy_hold: true,
+            allow_synthetic: std::env::var("CMSQ_ALLOW_SYNTHETIC").is_ok_and(|v| v == "1"),
+            min_capacity: std::env::var("CMSQ_GATE_MIN_CAPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(crate::scorer::INITIAL_CAPITAL) }
     }
 }
 
@@ -40,7 +50,7 @@ impl Default for GateConfig {
 pub struct GateInput<'a> {
     pub job_status: &'a str,
     pub hardened: bool,
-    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.2.1"
+    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.2.2"
     pub runner_identity: Option<&'a str>,
     pub dev: &'a Metrics,
     pub dev_cost_2x: &'a Metrics,
@@ -54,6 +64,10 @@ pub struct GateInput<'a> {
     /// expected runner image id (recorded by scripts/build_runner.sh); None = not recorded
     pub expected_runner: Option<&'a str>,
     pub high_risks: &'a [String],
+    /// dataset is a bundled synthetic sample
+    pub synthetic: bool,
+    /// capacity estimate (CNY); None = no trades to estimate from
+    pub capacity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +108,10 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
     check("data_adjusted", i.data_adjusted || !cfg.require_adjusted_data,
         if i.data_adjusted { "prices adjusted (or synthetic)".into() } else { "UNADJUSTED prices: ex-dividend gaps distort returns; import adjusted data (adj_factor)".into() });
     check("data_cross_validated", i.data_validated.0, i.data_validated.1.clone());
+    check("real_market_data", !i.synthetic || cfg.allow_synthetic,
+        if !i.synthetic { "real market data".into() } else if cfg.allow_synthetic { "SYNTHETIC sample, allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into() } else { "SYNTHETIC sample data cannot pass the gate".into() });
+    check("capacity", i.capacity.is_some_and(|c| c >= cfg.min_capacity),
+        match i.capacity { Some(c) => format!("capacity ≈ ¥{:.0} at ≤5% of daily traded value on 90% of fills (min ¥{:.0})", c, cfg.min_capacity), None => "no fills to estimate capacity".into() });
     check("min_bars", i.dev.bars >= cfg.min_bars, format!("{} evaluation bars (min {})", i.dev.bars, cfg.min_bars));
     check("net_return_positive", i.dev.total_return > 0.0, format!("net return {:.2}%", i.dev.total_return * 100.0));
     check("sharpe", i.dev.sharpe >= cfg.min_sharpe, format!("Sharpe {:.2} (min {:.2})", i.dev.sharpe, cfg.min_sharpe));
@@ -131,9 +149,25 @@ mod tests {
         Fx { c2: m(0.2, 1.0), folds: vec![m(0.05, 1.0); 4], dsr, probe: ProbeReport { detected: false, variants: 10, containers: 10, ..Default::default() }, risks: vec![], dev, bh: m(0.1, 0.3) }
     }
     fn input(f: &Fx) -> GateInput<'_> {
-        GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.1"), expected_runner: Some("sha256:abc"), buy_hold: &f.bh, dev: &f.dev, dev_cost_2x: &f.c2,
-            folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, data_validated: (true, "sample".into()), high_risks: &f.risks }
+        GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.2"), expected_runner: Some("sha256:abc"), buy_hold: &f.bh, dev: &f.dev, dev_cost_2x: &f.c2,
+            folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, data_validated: (true, "sample".into()), high_risks: &f.risks,
+            synthetic: false, capacity: Some(5e7) }
     }
+    #[test]
+    fn synthetic_and_capacity_checks() {
+        let f = fx();
+        let mut i = input(&f);
+        i.synthetic = true;
+        let cfg = GateConfig { allow_synthetic: false, min_capacity: 1e6, ..GateConfig::default() };
+        assert!(evaluate(&i, &cfg).reasons.iter().any(|r| r.starts_with("real_market_data")));
+        assert!(evaluate(&i, &GateConfig { allow_synthetic: true, ..cfg.clone() }).passed);
+        i.synthetic = false;
+        i.capacity = Some(2e5);
+        assert!(evaluate(&i, &cfg).reasons.iter().any(|r| r.starts_with("capacity")));
+        i.capacity = None;
+        assert!(!evaluate(&i, &cfg).passed);
+    }
+
     #[test]
     fn passes_good() {
         let f = fx();

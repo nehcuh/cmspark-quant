@@ -59,7 +59,9 @@ Semantics — the shim never places an order:
   bar they are crossed the way vn.py's BacktestingEngine does (limit before stop; limit
   buy fills if low ≤ px at min(px, open); stop buy triggers if high ≥ px at max(px, open);
   mirrored for sells), which moves the virtual `pos` and calls `on_trade`.
-* After every bar the runner records `clip(pos / fixed_size, position_min, 1)` as the
+* Order prices are rounded to the contract tick (`job.json` `pricetick`: futures spec tick,
+  0.01 for A-shares) like vn.py's BacktestingEngine; `get_pricetick()` returns it.
+* After every bar the runner records `clip(pos / (fixed_size × max_units), position_min, 1)` as the
   target; the trusted host executes it at the next bar's open with its own costs and
   contract rules — one bar later than vn.py fills (conservative, never look-ahead).
 * ArrayManager ATR/RSI use TA-Lib-style Wilder smoothing; other indicators are numpy
@@ -69,9 +71,10 @@ Semantics — the shim never places an order:
   daily bars through; DAILY/WEEKLY windows aggregate N bars.
 * Verified: the official examples DoubleMa, AtrRsi, BollChannel, KingKeltner, TurtleSignal
   and DualThrust run unmodified (`scripts/test_vnpy_shim.py`, and in Docker on FUT_RB).
-  Known differences: pyramiding beyond `fixed_size` lots is clipped to ±1; time-of-day
-  logic (DualThrust's exit time) is meaningless on daily bars; no `pricetick` rounding of
-  order prices; no TA-Lib, so values can differ slightly from vn.py.
+  `max_units` = the `cmsq_max_units` parameter, else a `max_units` strategy attribute, else 1;
+  pyramiding strategies (the turtle adds up to 4 units) set it so each unit is a fraction of
+  the full position. Known differences: time-of-day logic (DualThrust's exit time) is
+  meaningless on daily bars; no TA-Lib, so values can differ slightly from vn.py.
 
 `job.json` now carries `position_min`: 0 for A-shares, -1 for futures (`FUT_*`), so
 short targets survive only on futures jobs; the host re-validates the range.

@@ -12,8 +12,14 @@ Approximations (documented in docs/DROP_FORMAT.md):
     target, which the host then executes at the following bar's open (one bar
     later than vn.py would fill — conservative, never look-ahead);
   * intraday BarGenerator windows (minute/hour) pass daily bars straight through;
-  * target = clip(pos / fixed_size, position_min, 1) where fixed_size is the
-    strategy's `fixed_size` attribute (default 1);
+  * target = clip(pos / (fixed_size * max_units), position_min, 1) where
+    fixed_size is the strategy's `fixed_size` attribute (default 1) and
+    max_units is the `cmsq_max_units` parameter, else the strategy's
+    `max_units` attribute, else 1 (pyramiding strategies such as the turtle
+    set it to 4 so each added unit is a quarter of the full position);
+  * order prices are rounded to the contract's price tick (job `pricetick`),
+    as vn.py's BacktestingEngine does;
+  * on_tick is never called (daily bars only); BarGenerator.update_tick is inert;
   * only daily bars are fed; BarGenerator passes bars straight through
     (window bars are aggregated by count).
 """
@@ -24,6 +30,16 @@ import sys
 import types
 
 import numpy as np
+
+
+_PRICETICK = 0.01
+
+
+def _round_to(value, target):
+    """vn.py's round_to: nearest multiple of target (no-op for target <= 0)."""
+    if not target or target <= 0 or value != value:
+        return value
+    return float(round(round(value / target) * target, 10))
 
 
 class Direction(Enum):
@@ -132,6 +148,7 @@ class CtaTemplate:
         self.pos = 0
         self._oid = 0
         self._orders = {}
+        self._pricetick = _PRICETICK
         self.variables = ["inited", "trading", "pos"] + [v for v in type(self).variables if v not in ("inited", "trading", "pos")]
         for k in type(self).parameters:
             if k in setting:
@@ -170,6 +187,7 @@ class CtaTemplate:
         if not self.trading:
             return []
         self._oid += 1
+        price = _round_to(float(price), self._pricetick)
         oid = ("STOP.%d" if stop else "SIM.%d") % self._oid
         self._orders[oid] = (bool(stop), direction, offset, float(price), abs(float(volume)))
         if stop:
@@ -238,7 +256,7 @@ class CtaTemplate:
         return "BACKTESTING"
 
     def get_pricetick(self):
-        return 1.0
+        return self._pricetick
 
     def get_size(self):
         return 1
@@ -440,7 +458,7 @@ def install():
         sys.modules.setdefault(pkg, types.ModuleType(pkg))
 
 
-def run_cta(mod, df, params, lo):
+def run_cta(mod, df, params, lo, pricetick=None):
     cls = None
     for v in vars(mod).values():
         if isinstance(v, type) and issubclass(v, CtaTemplate) and v not in (CtaTemplate, TargetPosTemplate) and "on_bar" in vars(v):
@@ -448,11 +466,14 @@ def run_cta(mod, df, params, lo):
     if cls is None:
         raise RuntimeError("no CtaTemplate subclass with on_bar found")
     s = cls(None, cls.__name__, "SIM.LOCAL", dict(params))
+    if pricetick:
+        s._pricetick = float(pricetick)
     s.on_init()
     s.inited = True
     s.trading = True
     s.on_start()
-    size = float(getattr(s, "fixed_size", 1) or 1)
+    units = float(params.get("cmsq_max_units") or getattr(s, "max_units", 1) or 1)
+    size = float(getattr(s, "fixed_size", 1) or 1) * max(1.0, units)
     out = []
     for d, r in df.iterrows():
         bar = BarData(datetime=d.to_pydatetime(), open_price=r["open"], high_price=r["high"], low_price=r["low"],

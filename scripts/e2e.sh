@@ -23,7 +23,7 @@ hr "build"
 cargo build -q -p cmsq-cli
 if docker info >/dev/null 2>&1; then
   BACKEND=docker
-  docker image inspect cmsq-runner:2.2.1 >/dev/null 2>&1 || scripts/build_runner.sh
+  docker image inspect cmsq-runner:2.2.2 >/dev/null 2>&1 || scripts/build_runner.sh
 elif [ $ALLOW_DEV = 1 ]; then
   BACKEND=process; echo "!!! DEV backend (--allow-dev): nothing may pass the gate"
 else
@@ -104,7 +104,7 @@ hr "5. typed confirmation + one-time vault holdout"
 # single-idea library with the trial floor explicitly lowered (CMSQ_DSR_MIN_TRIALS=1,
 # recorded in each evaluation's gate config). This is a mechanics demo, not a pass claim.
 V_HOME=$(mktemp -d /tmp/cmsq-e2e-vault.XXXX)
-V="env CMSQ_HOME=$V_HOME CMSQ_SECRETS_DIR=$V_HOME.secrets CMSQ_DSR_MIN_TRIALS=1 $BIN"
+V="env CMSQ_HOME=$V_HOME CMSQ_SECRETS_DIR=$V_HOME.secrets CMSQ_DSR_MIN_TRIALS=1 CMSQ_ALLOW_SYNTHETIC=1 $BIN"
 mkdir -p "$V_HOME.secrets" && chmod 700 "$V_HOME.secrets"; [ $DBK = postgres ] && install -m 600 "$REAL_SECRETS/db.env" "$V_HOME.secrets/db.env"
 $V init >/dev/null; cp fixtures/posts/ma_crossover.json "$V_HOME/drop/"; $V ingest >/dev/null; $V extract >/dev/null
 vid() { $V list --json | python3 -c "import json,sys; v=[s['id'][:8] for s in json.load(sys.stdin) if sys.argv[1] in s['title']]; print(v[0] if v else '')" "$1"; }
@@ -135,6 +135,34 @@ PY
   $V audit verify || bad "vault workspace audit did not verify"
 elif [ $BACKEND = docker ]; then
   bad "single-idea vault demo: ma_crossover did not reach GatePassed"
+fi
+
+hr "5b. full happy path: GatePassed -> vault -> Promoted -> QIFI export (mechanics demo)"
+# SAMPLE_PERSIST is a synthetic fixed bull/bear schedule where trend following has a
+# built-in edge (scripts/gen_sample_data.py); it only proves the plumbing end to end.
+Q_HOME=$(mktemp -d /tmp/cmsq-e2e-qifi.XXXX)
+Q="env CMSQ_HOME=$Q_HOME CMSQ_SECRETS_DIR=$Q_HOME.secrets CMSQ_DSR_MIN_TRIALS=1 CMSQ_ALLOW_SYNTHETIC=1 $BIN"
+mkdir -p "$Q_HOME.secrets" && chmod 700 "$Q_HOME.secrets"; [ $DBK = postgres ] && install -m 600 "$REAL_SECRETS/db.env" "$Q_HOME.secrets/db.env"
+[ -f "$REAL_SECRETS/runner_image_id" ] && install -m 600 "$REAL_SECRETS/runner_image_id" "$Q_HOME.secrets/runner_image_id"
+$Q init >/dev/null; cp fixtures/posts/vnpy_double_ma.json "$Q_HOME/drop/"; $Q ingest >/dev/null; $Q extract >/dev/null
+QID=$($Q list --json | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'][:8])")
+$Q backtest "$QID" --symbol SAMPLE_PERSIST --backend $BACKEND > "$Q_HOME/bt.txt" 2>&1 || true; tail -2 "$Q_HOME/bt.txt"
+if [ $BACKEND = docker ]; then
+  $Q promote "$QID" --confirm "PROMOTE $QID" | tail -1
+  QST=$($Q show "$QID" --json | python3 -c "import json,sys; print(json.load(sys.stdin)['strategy']['status'])")
+  [ "$QST" = Promoted ] || bad "happy-path demo ended $QST (expected Promoted)"
+  $Q export-qifi "$QID" --out "$Q_HOME/qifi.json" || bad "QIFI export failed"
+  python3 - "$Q_HOME/qifi.json" <<'PY' || bad "QIFI document invalid"
+import json,sys; q=json.load(open(sys.argv[1]))
+assert q["cmsq"]["observe_only"] is True and q["orders"] == {}, "observe-only"
+for k in ("account_cookie","accounts","positions","trades","trading_day"): assert k in q, k
+a=q["accounts"]; assert abs(a["balance"]-a["available"]-a["margin"]) < 1e-6 or a["margin"] == 0
+assert len(q["cmsq"]["signals"]) == 1 and len(q["trades"]) > 0
+print("   QIFI ok: balance %.0f, %d trades, %d positions, signal %s" % (a["balance"], len(q["trades"]), len(q["positions"]), q["cmsq"]["signals"][0]["target_position"]))
+PY
+  $Q show "$QID" --json | python3 -c "import json,sys; d=json.load(sys.stdin); j=[x for x in d['jobs'] if x['kind']=='vault'][0]; t=j['result']['trade_stats']; assert t['display_only']; print('   vault trade stats (display only): %s round trips, win rate %s' % (t['round_trips'], t['win_rate']))" || bad "vault trade stats missing"
+else
+  echo "   (DEV backend: nothing may pass; happy path skipped)"
 fi
 
 hr "6. data tampering: edit a read-only snapshot / strip the sha from meta.json"

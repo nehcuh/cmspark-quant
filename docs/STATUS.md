@@ -11,7 +11,7 @@
 cargo --version                      # 必须是 1.99.1（~/.cargo/bin 放在 PATH 前面）
 sudo usermod -aG docker $USER        # 或在当前 shell 里用 sg docker -c "<命令>"
 scripts/db_up.sh                     # 启动独立部署的 PostgreSQL+TimescaleDB（docker compose），口令写入 ~/.config/cmsq/db.env
-scripts/build_runner.sh              # 构建 cmsq-runner:2.2.1（含 vn.py shim），并记录镜像 digest
+scripts/build_runner.sh              # 构建 cmsq-runner:2.2.2（含 vn.py shim），并记录镜像 digest
 scripts/test_pg.sh                   # PostgreSQL 并发/权限/篡改测试
 cargo test --workspace
 scripts/test_docker.sh               # Docker/bwrap 测试与全部攻击回归
@@ -64,7 +64,7 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * 真实数据的价格形态本身仍可能泄露年代；直接系统调用可以绕过 libfaketime（有假日期兜底）。
 * HMAC 密钥与程序属于同一 uid，同时拿到密钥并改写锚点的人可以伪造历史。
 * 交叉校验目前只有 tushare↔akshare 一对（本机连不上 baostock 和 TDX），只有 tushare 提供复权因子。
-* ST 状态根据 namechange 推断；老股票新股上市首日的 44% 涨跌幅规则未建模；vault 的消耗不计入 DSR 的 N。
+* ST 状态根据 namechange 推断；老规则新股首日 +44%/-36% 涨跌幅不需要建模：信号在收盘决定、次日开盘成交，上市首日（第 0 根）永远不会成交；vault 的消耗不计入 DSR 的 N。
 * e2e 的 vault 演示放在独立工作区，并把 DSR 下限设为 1，否则没有策略能通过门禁。
 * 截图 06 和 07 是同一时刻的画面（vault 运行很快，几乎抓不到"进行中"的状态）。
 
@@ -84,7 +84,7 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * `cmsq portfolio`：单账户共享现金、先卖后买；分配方式为等权 / 逆波动率（无前视）/ 固定权重；只用共同开发期。
   组合门禁只作参考，组合不可晋升。`cmsq backtest --symbols A,B --workers N` 并发跑多标的。
 ### P2 vn.py 兼容层与期货规则
-* 沙箱内提供 `CtaTemplate`/`ArrayManager`/`BarGenerator` shim（runner 2.2.1），vn.py 风格策略不改代码即可运行，仍然只输出仓位。
+* 沙箱内提供 `CtaTemplate`/`ArrayManager`/`BarGenerator` shim（runner 2.2.2），vn.py 风格策略不改代码即可运行，仍然只输出仓位。
 * 期货：`FUT_<品种>` 主力连续（按持仓量换月，连续 3 日确认，次日生效）、合约乘数、保证金上限、最小变动价位、涨跌停、
   夜盘交易日归属、逐合约手续费、换月两腿成本；空头仓位 [-1,1]。akshare 逐合约交叉校验，覆盖不足 90% 时记为 partial。
 ### P3 CTP 行情（只观察）
@@ -130,6 +130,16 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * Dashboard：每个 run 下面显示交易统计和平今成本；通过 vault 的 run 再显示 QIFI 账户摘要。
 * 对抗审查记录见 `docs/reviews/06-pingjin-calendar-qifi-tradestats.md`。
 * 验证：`cargo test` 全部通过（core 单元测试 81 个，另有集成测试），clippy 0 告警，`test_docker.sh` 通过，`e2e.sh` 通过（E2E OK）。
+
+## 11. 正确性一轮（2026-10-21，见 reviews/07）
+* 平今规则按公开资料核对后改正：上期所和能源中心由交易者指定（按较便宜的一档建模）；大商所、郑商所、中金所、广期所
+  持仓按先开先平减扣，但只要当日有今仓，手续费先按平今收取，直到按平今收费的手数达到当日开仓手数。
+* vn.py shim（runner 2.2.2）：委托价按合约最小变动价位取整（与 BacktestingEngine 的 round_to 一致）；
+  用 `cmsq_max_units` 参数或策略的 `max_units` 属性支持加仓（海龟策略为 4 个单位）。
+* 门禁新增 `real_market_data`（合成数据不能通过，只有演示时设置 `CMSQ_ALLOW_SYNTHETIC=1` 才放行）和 `capacity`
+  （容量估计：90% 的成交不超过当日成交额的 5%，最低 ¥100 万）。
+* e2e 新增 5b 节，完整跑通 GatePassed → vault → Promoted → QIFI 导出。所用的 SAMPLE_PERSIST 是固定牛熊节奏的
+  合成数据，只用来演示流程。
 
 ## 9. 后续阶段
 * **P1：组合与参数扫描。** 多标的组合回测、参数网格扫描。每个参数点都计入全库 trial 账本和 DSR 的 N，
