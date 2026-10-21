@@ -31,13 +31,14 @@ enum Tab {
     Data,
     Jobs,
     Signals,
+    Paper,
     Research,
     Futures,
     Audit,
 }
 
 impl Tab {
-    const ALL: [Tab; 9] = [
+    const ALL: [Tab; 10] = [
         Tab::Overview,
         Tab::Library,
         Tab::Compare,
@@ -46,6 +47,7 @@ impl Tab {
         Tab::Data,
         Tab::Jobs,
         Tab::Signals,
+        Tab::Paper,
         Tab::Audit,
     ];
     fn from_env() -> Tab {
@@ -61,6 +63,7 @@ impl Tab {
             "data" => Tab::Data,
             "jobs" => Tab::Jobs,
             "signals" => Tab::Signals,
+            "paper" => Tab::Paper,
             "audit" => Tab::Audit,
             _ => Tab::Overview,
         }
@@ -73,6 +76,7 @@ impl Tab {
             Tab::Data => "行情数据 Market Data",
             Tab::Jobs => "沙箱任务 Sandbox Jobs",
             Tab::Signals => "信号 Signals (observe-only)",
+            Tab::Paper => "模拟交易 Paper Trading",
             Tab::Research => "参数扫描/组合 Sweep & Portfolio",
             Tab::Futures => "期货/CTP Futures & Market Data",
             Tab::Audit => "审计 Audit",
@@ -80,11 +84,22 @@ impl Tab {
     }
 }
 
+struct PaperView {
+    id: String,
+    strategy: String,
+    status: String,
+    state: serde_json::Value,
+    curve: Vec<(i64, Option<String>, f64)>,
+    fills: Vec<serde_json::Value>,
+}
+
 #[derive(Default)]
 struct Snapshot {
     strategies: Vec<Strategy>,
     jobs: Vec<JobRecord>,
     signals: Vec<(cmsq_core::Signal, String, String)>,
+    /// (session id, strategy id, status, latest state, equity curve, recent fills)
+    paper: Vec<PaperView>,
     audit: Vec<AuditEntry>,
     audit_ok: Option<(bool, i64, String)>,
     total_attempts: i64,
@@ -538,6 +553,37 @@ impl Dashboard {
                 strategies: st.list_strategies(None)?,
                 jobs: st.list_jobs(None)?,
                 signals: st.list_signals()?,
+                paper: st
+                    .list_paper_sessions()?
+                    .into_iter()
+                    .take(10)
+                    .map(|(id, strategy, _, status, _)| {
+                        let state = st
+                            .latest_paper_snapshot(&id)
+                            .ok()
+                            .flatten()
+                            .map(|x| x.1)
+                            .unwrap_or_default();
+                        let curve = st.paper_equity_curve(&id).unwrap_or_default();
+                        let fills = st
+                            .list_paper_events(&id, 0, 100_000)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|e| e.1 == "filled")
+                            .map(|e| e.2["fill"].clone())
+                            .rev()
+                            .take(20)
+                            .collect();
+                        PaperView {
+                            id,
+                            strategy,
+                            status,
+                            state,
+                            curve,
+                            fills,
+                        }
+                    })
+                    .collect(),
                 audit: st.audit_entries(None, 200)?,
                 audit_ok: Some((v.ok, v.entries, v.problem.unwrap_or_default())),
                 total_attempts: st.total_attempts()?,
@@ -1902,6 +1948,87 @@ impl Dashboard {
         d
     }
 
+    fn paper(&self) -> Stateful<Div> {
+        let mut d = div().id("paper").p_4().flex().flex_col().gap_2().overflow_y_scroll()
+            .child(div().p_3().rounded_md().border_1().border_color(rgb(0xd29922)).text_sm().text_color(rgb(0xf2cc60))
+                .child("模拟撮合 SIMULATED：按交易所行情模拟成交，无券商接口、不会发出真实委托。Simulated fills against exchange quotes; no broker, no real orders."));
+        if self.snap.paper.is_empty() {
+            d =
+                d.child(div().text_color(c_muted()).child(
+                    "no paper sessions yet — `cmsq paper run --strategy <promoted id> ...`",
+                ));
+        }
+        for p in &self.snap.paper {
+            let a = &p.state["account"];
+            let cash = a["cash"].as_f64().unwrap_or(0.0);
+            let margin = a["margin"].as_f64().unwrap_or(0.0);
+            let eq = p.curve.last().map(|x| x.2).unwrap_or(cash);
+            let mut card = div()
+                .p_3()
+                .rounded_md()
+                .bg(c_panel())
+                .border_1()
+                .border_color(c_border())
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_sm()
+                .child(div().text_color(c_accent()).child(format!(
+                    "{}  [{}]  strategy {}",
+                    p.id,
+                    p.status,
+                    &p.strategy[..8.min(p.strategy.len())]
+                )))
+                .child(div().text_color(c_text()).child(format!(
+                    "equity {eq:.2} · cash {cash:.2} · margin {margin:.2} · fees {:.2} · day {}",
+                    a["fees"].as_f64().unwrap_or(0.0),
+                    a["trading_day"].as_str().unwrap_or("-")
+                )));
+            if let Some(pos) = a["positions"].as_object() {
+                for (sym, x) in pos {
+                    card = card.child(div().text_color(c_text()).child(format!(
+                        "  {sym}: long {} (today {}) @ {:.2} · short {} (today {}) @ {:.2}",
+                        x["long_today"].as_i64().unwrap_or(0) + x["long_yd"].as_i64().unwrap_or(0),
+                        x["long_today"],
+                        x["long_cost"].as_f64().unwrap_or(0.0),
+                        x["short_today"].as_i64().unwrap_or(0)
+                            + x["short_yd"].as_i64().unwrap_or(0),
+                        x["short_today"],
+                        x["short_cost"].as_f64().unwrap_or(0.0)
+                    )));
+                }
+            }
+            if p.curve.len() > 1 {
+                let pts: Vec<String> = p
+                    .curve
+                    .iter()
+                    .map(|c| format!("{}:{:.0}", c.1.clone().unwrap_or_default(), c.2))
+                    .collect();
+                card = card.child(
+                    div()
+                        .text_xs()
+                        .text_color(c_muted())
+                        .child(format!("equity by settlement: {}", pts.join("  "))),
+                );
+            }
+            for f in &p.fills {
+                card = card.child(div().text_xs().text_color(c_muted()).child(format!(
+                    "fill #{} {} {} {} {} @ {} fee {:.2} · {}",
+                    f["order_id"],
+                    f["symbol"].as_str().unwrap_or(""),
+                    f["side"].as_str().unwrap_or(""),
+                    f["offset"].as_str().unwrap_or(""),
+                    f["qty"],
+                    f["price"],
+                    f["fee"].as_f64().unwrap_or(0.0),
+                    f["ts"].as_str().unwrap_or("")
+                )));
+            }
+            d = d.child(card);
+        }
+        d
+    }
+
     fn research(&self, cx: &mut Context<Self>) -> Div {
         let mut list = div()
             .id("runs")
@@ -2450,6 +2577,7 @@ impl Render for Dashboard {
             Tab::Data => self.data_view().into_any_element(),
             Tab::Jobs => self.jobs().into_any_element(),
             Tab::Signals => self.signals().into_any_element(),
+            Tab::Paper => self.paper().into_any_element(),
             Tab::Research => self.research(cx).into_any_element(),
             Tab::Futures => self.futures_view().into_any_element(),
             Tab::Audit => self.audit().into_any_element(),

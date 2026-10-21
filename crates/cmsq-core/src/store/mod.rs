@@ -76,6 +76,23 @@ CREATE TRIGGER IF NOT EXISTS signals_no_delete BEFORE DELETE ON signals
   BEGIN SELECT RAISE(ABORT, 'signals is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS vault_no_delete BEFORE DELETE ON vault_touches
   BEGIN SELECT RAISE(ABORT, 'vault_touches is append-only'); END;
+CREATE TABLE IF NOT EXISTS paper_sessions(
+  id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL, config_json TEXT NOT NULL, status TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS paper_events(
+  session_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, event_json TEXT NOT NULL,
+  chain TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(session_id, seq));
+CREATE TABLE IF NOT EXISTS paper_snapshots(
+  session_id TEXT NOT NULL, seq INTEGER NOT NULL, trading_day TEXT, equity REAL NOT NULL,
+  state_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(session_id, seq));
+CREATE TRIGGER IF NOT EXISTS paper_events_no_update BEFORE UPDATE ON paper_events
+  BEGIN SELECT RAISE(ABORT, 'paper_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS paper_events_no_delete BEFORE DELETE ON paper_events
+  BEGIN SELECT RAISE(ABORT, 'paper_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS paper_snapshots_no_update BEFORE UPDATE ON paper_snapshots
+  BEGIN SELECT RAISE(ABORT, 'paper_snapshots is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS paper_snapshots_no_delete BEFORE DELETE ON paper_snapshots
+  BEGIN SELECT RAISE(ABORT, 'paper_snapshots is append-only'); END;
 "#;
 
 /// Columns added after the first SQLite release (forward migration).
@@ -1066,6 +1083,92 @@ impl Store {
         })?;
         Ok(())
     }
+    // ---------- paper trading (simulated; cmsq-paper) ----------
+    pub fn create_paper_session(
+        &self,
+        id: &str,
+        strategy_id: &str,
+        config: &serde_json::Value,
+    ) -> Result<()> {
+        let t = now();
+        self.db.run(|e| e.exec("INSERT INTO paper_sessions(id,strategy_id,config_json,status,created_at,updated_at) VALUES(?1,?2,?3,'running',?4,?4)",
+            p![id, strategy_id, config.to_string(), &t]))?;
+        Ok(())
+    }
+    pub fn set_paper_session_status(&self, id: &str, status: &str) -> Result<()> {
+        self.db.run(|e| {
+            e.exec(
+                "UPDATE paper_sessions SET status=?2, updated_at=?3 WHERE id=?1",
+                p![id, status, now()],
+            )
+        })?;
+        Ok(())
+    }
+    /// (id, strategy_id, config, status, created_at)
+    #[allow(clippy::type_complexity)]
+    pub fn list_paper_sessions(
+        &self,
+    ) -> Result<Vec<(String, String, serde_json::Value, String, String)>> {
+        Ok(self.db.run(|e| e.query("SELECT id,strategy_id,config_json,status,created_at FROM paper_sessions ORDER BY created_at DESC", p![]))?
+            .iter().map(|r| (r.s(0), r.s(1), serde_json::from_str(&r.s(2)).unwrap_or_default(), r.s(3), r.s(4))).collect())
+    }
+    #[allow(clippy::explicit_counter_loop)]
+    /// Append events (seq, kind, json, chain) in one transaction; seq must continue the stored log.
+    pub fn append_paper_events(
+        &self,
+        session: &str,
+        evs: &[(i64, String, serde_json::Value, String)],
+    ) -> Result<()> {
+        if evs.is_empty() {
+            return Ok(());
+        }
+        let t = now();
+        self.db.tx(None, |e| {
+            let last = e.query("SELECT COALESCE(MAX(seq),0) FROM paper_events WHERE session_id=?1", p![session])?;
+            let mut want = last.first().map(|r| r.i(0)).unwrap_or(0) + 1;
+            for (seq, kind, j, chain) in evs {
+                anyhow::ensure!(*seq == want, "paper event gap: expected seq {want}, got {seq}");
+                e.exec("INSERT INTO paper_events(session_id,seq,kind,event_json,chain,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                    p![session, *seq, kind, j.to_string(), chain, &t])?;
+                want += 1;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+    /// (seq, kind, event, chain), ascending
+    pub fn list_paper_events(
+        &self,
+        session: &str,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, serde_json::Value, String)>> {
+        Ok(self.db.run(|e| e.query("SELECT seq,kind,event_json,chain FROM paper_events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3", p![session, after, limit]))?
+            .iter().map(|r| (r.i(0), r.s(1), serde_json::from_str(&r.s(2)).unwrap_or_default(), r.s(3))).collect())
+    }
+    pub fn insert_paper_snapshot(
+        &self,
+        session: &str,
+        seq: i64,
+        trading_day: Option<&str>,
+        equity: f64,
+        state: &serde_json::Value,
+    ) -> Result<()> {
+        self.db.run(|e| e.exec("INSERT INTO paper_snapshots(session_id,seq,trading_day,equity,state_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            p![session, seq, trading_day, equity, state.to_string(), now()]))?;
+        Ok(())
+    }
+    /// latest (seq, state)
+    pub fn latest_paper_snapshot(&self, session: &str) -> Result<Option<(i64, serde_json::Value)>> {
+        Ok(self.db.run(|e| e.query("SELECT seq,state_json FROM paper_snapshots WHERE session_id=?1 ORDER BY seq DESC LIMIT 1", p![session]))?
+            .first().map(|r| (r.i(0), serde_json::from_str(&r.s(1)).unwrap_or_default())))
+    }
+    /// equity curve: (seq, trading_day, equity)
+    pub fn paper_equity_curve(&self, session: &str) -> Result<Vec<(i64, Option<String>, f64)>> {
+        Ok(self.db.run(|e| e.query("SELECT seq,trading_day,equity FROM paper_snapshots WHERE session_id=?1 ORDER BY seq", p![session]))?
+            .iter().map(|r| (r.i(0), r.os(1), r.f(2))).collect())
+    }
+
     pub fn list_runs(&self, kind: Option<&str>) -> Result<Vec<ResearchRun>> {
         Ok(self.db.run(|e| e.query("SELECT id,kind,strategy_id,spec_json,result_json,status,created_at,finished_at FROM research_runs WHERE (?1 IS NULL OR kind=?1) ORDER BY created_at DESC", p![kind]))?
             .iter().map(|r| ResearchRun { id: r.s(0), kind: r.s(1), strategy_id: r.os(2), spec: serde_json::from_str(&r.s(3)).unwrap_or_default(),
@@ -1141,6 +1244,31 @@ impl Store {
             }
             Ok(ticks.len())
         })
+    }
+    /// Recorded ticks of one instrument in time order (paper-trading replay).
+    pub fn list_ticks(&self, instrument: &str, limit: i64) -> Result<Vec<crate::ctp::Tick>> {
+        let pg = matches!(self.db, Backend::Postgres(_));
+        let sql = if pg {
+            "SELECT instrument,CAST(ts AS TEXT),trading_day,last,volume,open_interest,bid1,ask1,source FROM ticks WHERE instrument=?1 ORDER BY ts LIMIT ?2"
+        } else {
+            "SELECT instrument,ts,trading_day,last,volume,open_interest,bid1,ask1,source FROM ticks WHERE instrument=?1 ORDER BY ts, rowid LIMIT ?2"
+        };
+        Ok(self
+            .db
+            .run(|e| e.query(sql, p![instrument, limit]))?
+            .iter()
+            .map(|r| crate::ctp::Tick {
+                instrument: r.s(0),
+                ts: r.s(1),
+                trading_day: r.s(2),
+                last: r.f(3),
+                volume: r.f(4),
+                open_interest: r.of(5),
+                bid1: r.of(6),
+                ask1: r.of(7),
+                source: r.s(8),
+            })
+            .collect())
     }
     pub fn tick_count(&self, instrument: Option<&str>) -> Result<i64> {
         Ok(self
