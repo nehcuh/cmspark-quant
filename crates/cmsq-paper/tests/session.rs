@@ -57,6 +57,8 @@ fn persist_resume_verify_and_tamper_detection() {
     let store = Store::open(
         &d.path().join("db.sqlite"),
         AuditConfig {
+            signer: None,
+            chain: String::new(),
             key: b"k".to_vec(),
             anchor: None,
         },
@@ -95,6 +97,8 @@ fn pg_paper_lifecycle() {
             % 1_000_000_000_000
     );
     let c = AuditConfig {
+        signer: None,
+        chain: String::new(),
         key: b"k".to_vec(),
         anchor: None,
     };
@@ -183,6 +187,8 @@ fn signal_driver_trades_next_day_and_replays_identically() {
         let store = Store::open(
             &d.path().join("db.sqlite"),
             AuditConfig {
+                signer: None,
+                chain: String::new(),
                 key: b"k".to_vec(),
                 anchor: None,
             },

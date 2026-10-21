@@ -1,0 +1,7 @@
+[Unit]
+Description=publish cmsq audit head to git hourly
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target

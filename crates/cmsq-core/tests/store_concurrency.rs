@@ -14,6 +14,8 @@ type Factory = Arc<dyn Fn() -> Store + Send + Sync>;
 
 fn cfg(dir: &Path) -> AuditConfig {
     AuditConfig {
+        signer: None,
+        chain: String::new(),
         key: b"race-test-key-0123456789".to_vec(),
         anchor: Some(dir.join("anchors/race.anchor")),
     }

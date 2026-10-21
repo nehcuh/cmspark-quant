@@ -1,0 +1,7 @@
+[Unit]
+Description=publish cmsq audit head to the anchor git repo (signed commit, push)
+[Service]
+Type=oneshot
+User=cmsq
+Environment=CMSQ_AUDIT_SIGNER=/run/cmsq-signer/sock
+ExecStart=/usr/local/bin/cmsq --home /srv/cmsq audit anchor-git --repo /srv/cmsq-anchors --sign --push

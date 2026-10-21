@@ -1,0 +1,23 @@
+# Audit signer: holds the audit key as its own user. App users in group cmsq-sign may connect.
+[Unit]
+Description=cmsq audit signer
+[Service]
+User=cmsq-signer
+Group=cmsq-sign
+StateDirectory=cmsq-signer
+StateDirectoryMode=0700
+RuntimeDirectory=cmsq-signer
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStart=/usr/local/bin/cmsq signer serve --dir /var/lib/cmsq-signer --socket /run/cmsq-signer/sock
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+[Install]
+WantedBy=multi-user.target

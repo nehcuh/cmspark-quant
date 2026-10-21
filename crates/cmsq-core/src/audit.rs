@@ -21,8 +21,92 @@ pub const GENESIS: &str = "00000000000000000000000000000000000000000000000000000
 
 #[derive(Clone)]
 pub struct AuditConfig {
+    /// in-process key (env/file providers); empty when a separate signer holds it
     pub key: Vec<u8>,
     pub anchor: Option<PathBuf>,
+    /// external signer (key held by another OS user); takes precedence over `key`
+    pub signer: Option<std::sync::Arc<dyn KeyProvider>>,
+    /// chain identity sent to the signer (one chain per workspace / schema)
+    pub chain: String,
+}
+
+/// Where the audit MAC key lives. The app asks for MACs; with a signer backend it
+/// can never read the key. Backends: in-process key (env / file) and the unix-socket
+/// signer (`cmsq signer serve`, run as a separate OS user). HSM/KMS fit the same trait.
+pub trait KeyProvider: Send + Sync {
+    fn describe(&self) -> String;
+    /// MAC for the NEXT entry of `chain` (seq/prev let a signer refuse rewrites).
+    fn sign_next(&self, chain: &str, seq: i64, prev: &str, msg: &[u8]) -> anyhow::Result<String>;
+    /// Constant-time check of an existing entry; never returns the MAC itself.
+    fn verify(&self, chain: &str, seq: i64, msg: &[u8], mac: &str) -> anyhow::Result<bool>;
+    /// Head (seq, mac) the provider itself last signed for `chain`, if it tracks one.
+    fn head(&self, chain: &str) -> anyhow::Result<Option<(i64, String)>>;
+}
+
+impl AuditConfig {
+    pub fn mac_next(&self, seq: i64, prev: &str, msg: &[u8]) -> anyhow::Result<String> {
+        match &self.signer {
+            Some(s) => s.sign_next(&self.chain, seq, prev, msg),
+            None => Ok(hmac_hex(&self.key, msg)),
+        }
+    }
+    pub fn check(&self, seq: i64, msg: &[u8], mac: &str) -> anyhow::Result<bool> {
+        match &self.signer {
+            Some(s) => s.verify(&self.chain, seq, msg, mac),
+            None => Ok(ct_eq(hmac_hex(&self.key, msg).as_bytes(), mac.as_bytes())),
+        }
+    }
+    pub fn signer_head(&self) -> anyhow::Result<Option<(i64, String)>> {
+        match &self.signer {
+            Some(s) => s.head(&self.chain),
+            None => Ok(None),
+        }
+    }
+    pub fn key_source(&self) -> String {
+        self.signer
+            .as_ref()
+            .map(|s| s.describe())
+            .unwrap_or_else(|| "in-process key".into())
+    }
+}
+
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |x, (p, q)| x | (p ^ q)) == 0
+}
+
+pub fn hmac_hex(key: &[u8], msg: &[u8]) -> String {
+    let mut h = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac accepts any key length");
+    h.update(msg);
+    hex::encode(h.finalize().into_bytes())
+}
+
+/// Canonical, length-prefixed message that the MAC covers.
+#[allow(clippy::too_many_arguments)]
+pub fn entry_message(
+    prev_hash: &str,
+    seq: i64,
+    ts: &str,
+    actor: &str,
+    action: &str,
+    target: Option<&str>,
+    details: &str,
+    success: bool,
+) -> Vec<u8> {
+    let mut m = Vec::new();
+    for part in [
+        prev_hash,
+        &seq.to_string(),
+        ts,
+        actor,
+        action,
+        target.unwrap_or(""),
+        details,
+        if success { "1" } else { "0" },
+    ] {
+        m.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
 }
 
 impl std::fmt::Debug for AuditConfig {
@@ -40,6 +124,8 @@ impl AuditConfig {
         Self {
             key: b"cmsq-test-key-not-secret".to_vec(),
             anchor: None,
+            signer: None,
+            chain: String::new(),
         }
     }
 }
@@ -56,21 +142,10 @@ pub fn entry_hash(
     details: &str,
     success: bool,
 ) -> String {
-    let mut h = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac accepts any key length");
-    for part in [
-        prev_hash,
-        &seq.to_string(),
-        ts,
-        actor,
-        action,
-        target.unwrap_or(""),
-        details,
-        if success { "1" } else { "0" },
-    ] {
-        h.update(&(part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
-    hex::encode(h.finalize().into_bytes())
+    hmac_hex(
+        key,
+        &entry_message(prev_hash, seq, ts, actor, action, target, details, success),
+    )
 }
 
 pub fn append_anchor(path: &Path, seq: i64, hash: &str, ts: &str) -> std::io::Result<()> {
