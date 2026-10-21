@@ -14,16 +14,21 @@
 //!
 //! Rules modelled: contract multiplier, minimum tick (fills rounded to tick),
 //! margin requirement (orders that would exceed equity are cut), limit
-//! up/down from the previous close (no buying at limit-up open, no selling at
-//! limit-down open), per-contract fees (per-lot or ratio, open / close /
-//! close-today), main-contract roll (old contract closed and new one opened at
-//! the roll-day open: both legs pay fees and slippage).
+//! up/down from the previous trading day's close (no buying at limit-up open,
+//! no selling at limit-down open), per-contract fees (per-lot or ratio, open /
+//! close / close-today), main-contract roll (old contract closed and new one
+//! opened at the roll-day open: both legs pay fees and slippage).
+//! Close-today (平今): every open lot is tagged with its trading day; a close
+//! consumes lots in the exchange's [`CloseOrder`] and lots opened on the same
+//! trading day pay the close-today tier. At daily granularity a position is
+//! always opened and closed on different trading days, so the tier only bites
+//! in [`simulate_session`] with intraday bars (and after a roll, whose new
+//! lots count as opened that day).
 //! Simplifications (documented): limits use the previous close, not the
 //! previous settlement; the overnight move on a roll day is taken from the new
-//! contract (ratio continuity); close-today fees never arise at daily
-//! granularity (one trade per day) but are modelled for intraday use.
+//! contract (ratio continuity).
 use crate::market::Bar;
-use crate::scorer::{CostModel, SimResult, INITIAL_CAPITAL};
+use crate::scorer::{CostModel, Fill, SimResult, INITIAL_CAPITAL};
 use serde::{Deserialize, Serialize};
 
 pub const EXECUTION_LABEL: &str = "futures: signal at close t -> filled at open t+1 (night-session open where traded, +slippage), marked to close; integer lots × multiplier; tick-rounded fills; margin cap; limit up/down blocks; per-contract fees; main-contract roll pays both legs";
@@ -50,6 +55,82 @@ pub struct ContractSpec {
     pub fee: Fee,
     /// night session (start, end) local time; None = day session only
     pub night: Option<(String, String)>,
+    /// which lots a close order consumes first; None = exchange default ([`default_close_order`])
+    #[serde(default)]
+    pub close_order: Option<CloseOrder>,
+}
+
+/// Order in which a closing trade consumes today's vs earlier lots (decides
+/// whether the close-today fee tier applies).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseOrder {
+    /// oldest lots first (DCE / CZCE / GFEX default: 先开先平)
+    Fifo,
+    /// today's lots first (CFFEX default)
+    TodayFirst,
+    /// trader chooses CloseToday / CloseYesterday explicitly (SHFE / INE):
+    /// modelled as the cheaper bucket first
+    Cheapest,
+}
+
+/// Default close order per exchange. These are modelling assumptions, not
+/// broker facts: override per product with `close_order` in `CMSQ_FUTURES_SPECS`.
+pub fn default_close_order(exchange: &str) -> CloseOrder {
+    match exchange {
+        "SHFE" | "INE" => CloseOrder::Cheapest,
+        "CFFEX" => CloseOrder::TodayFirst,
+        _ => CloseOrder::Fifo,
+    }
+}
+
+impl ContractSpec {
+    pub fn close_order(&self) -> CloseOrder {
+        self.close_order.unwrap_or_else(|| default_close_order(&self.exchange))
+    }
+}
+
+/// Open lots of ONE side, tagged with the trading day they were opened.
+#[derive(Debug, Clone, Default)]
+struct Ledger {
+    lots: std::collections::VecDeque<(String, f64)>,
+}
+
+impl Ledger {
+    fn open(&mut self, day: &str, q: f64) {
+        match self.lots.back_mut() {
+            Some((d, x)) if d == day => *x += q,
+            _ => self.lots.push_back((day.to_string(), q)),
+        }
+    }
+    fn total(&self) -> f64 {
+        self.lots.iter().map(|x| x.1).sum()
+    }
+    /// Close `q` lots on `day`; returns (earlier-day lots closed, today's lots closed).
+    fn close(&mut self, day: &str, q: f64, order: CloseOrder, today_cheaper: bool) -> (f64, f64) {
+        let today_first = match order {
+            CloseOrder::Fifo => false,
+            CloseOrder::TodayFirst => true,
+            CloseOrder::Cheapest => today_cheaper,
+        };
+        let (mut left, mut his, mut tod) = (q, 0.0, 0.0);
+        while left > 1e-9 {
+            let idx = if today_first {
+self.lots.iter().position(|x| x.0 == day).unwrap_or_default()
+            } else {
+self.lots.iter().position(|x| x.0 != day).unwrap_or_default()
+            };
+            let Some(slot) = self.lots.get_mut(idx) else { break };
+            let take = slot.1.min(left);
+            slot.1 -= take;
+            left -= take;
+            if slot.0 == day { tod += take } else { his += take }
+            if slot.1 <= 1e-9 {
+                self.lots.remove(idx);
+            }
+        }
+        (his, tod)
+    }
 }
 
 /// Defaults from exchange rules (2026); exchanges adjust margins/limits and
@@ -99,7 +180,7 @@ pub fn spec_for(symbol: &str) -> Option<ContractSpec> {
     }
     TABLE.iter().find(|r| r.0 == p).map(|r| ContractSpec {
         product: r.0.into(), exchange: r.1.into(), ts_suffix: r.2.into(), multiplier: r.3, tick: r.4, margin_rate: r.5, limit_pct: r.6, fee: r.7,
-        night: r.8.map(|(a, b)| (a.to_string(), b.to_string())),
+        night: r.8.map(|(a, b)| (a.to_string(), b.to_string())), close_order: None,
     })
 }
 
@@ -132,10 +213,23 @@ fn round_tick(px: f64, tick: f64) -> f64 {
     (px / tick).round() * tick
 }
 
-/// Simulate target positions `pos` ∈ [-1, 1] on a main-contract series.
-/// `costs.multiplier` scales fees and slippage (cost stress).
+/// Simulate target positions `pos` ∈ [-1, 1] on a main-contract series of
+/// DAILY bars (trading day = bar date). `costs.multiplier` scales fees and
+/// slippage (cost stress).
 pub fn simulate(spec: &ContractSpec, bars: &[Bar], pos: &[f64], fx: &FuturesCosts, costs: &CostModel) -> SimResult {
+    let days: Vec<String> = bars.iter().map(|b| b.date.get(..10).unwrap_or(&b.date).to_string()).collect();
+    simulate_session(spec, bars, &days, pos, fx, costs)
+}
+
+/// Like [`simulate`] for bars of any granularity: `trading_days[i]` is the
+/// trading day bar i belongs to (night-session bars carry the NEXT trading
+/// day, see [`trading_day_for`]). Several bars may share a trading day; a lot
+/// opened and closed within one trading day pays the close-today fee tier,
+/// with the exchange's close order ([`CloseOrder`]) deciding which lots a
+/// close consumes. Price limits use the last close of the previous trading day.
+pub fn simulate_session(spec: &ContractSpec, bars: &[Bar], trading_days: &[String], pos: &[f64], fx: &FuturesCosts, costs: &CostModel) -> SimResult {
     assert_eq!(bars.len(), pos.len());
+    assert_eq!(bars.len(), trading_days.len());
     let n = bars.len();
     let mut r = SimResult { equity: vec![INITIAL_CAPITAL; n], exposure: vec![0.0; n], ..Default::default() };
     if n == 0 {
@@ -144,27 +238,51 @@ pub fn simulate(spec: &ContractSpec, bars: &[Bar], pos: &[f64], fx: &FuturesCost
     let m = costs.multiplier;
     let slip = spec.tick * fx.slippage_ticks * m;
     let mult = spec.multiplier;
+    let order = spec.close_order();
+    let today_cheaper = match spec.fee {
+        Fee::PerLot { close, close_today, .. } | Fee::Ratio { close, close_today, .. } => close_today < close,
+    };
     let mut equity = INITIAL_CAPITAL;
     let mut lots = 0.0_f64; // signed
+    let mut ledger = Ledger::default();
+    // previous trading day's last close and its adj factor (limit reference)
+    let (mut ref_close, mut ref_adj) = (bars[0].close, bars[0].adj_factor);
+    let mut day_close = (bars[0].close, bars[0].adj_factor);
+    let fac = |b: &Bar| b.adj_factor.unwrap_or(1.0);
     for t in 1..n {
         let (b, pb) = (&bars[t], &bars[t - 1]);
+        let day = trading_days[t].as_str();
+        if trading_days[t] != trading_days[t - 1] {
+            (ref_close, ref_adj) = day_close;
+        }
         let rolled = matches!((b.adj_factor, pb.adj_factor), (Some(a1), Some(a0)) if a0 > 0.0 && (a1 / a0 - 1.0).abs() > 1e-12);
         // previous close in the CURRENT contract's terms (ratio continuity on roll days)
         let prev_close = match (b.adj_factor, pb.adj_factor) {
             (Some(a1), Some(a0)) if a1 > 0.0 => pb.close * a0 / a1,
             _ => pb.close,
         };
-        // overnight move on held lots (incl. the night session)
+        // overnight / bar-to-bar move on held lots (incl. the night session)
         equity += lots * mult * (b.open - prev_close);
         if rolled && lots != 0.0 {
             // close old + open new at the roll-day open: both legs pay fees and slippage
-            let c = (fee(spec, lots, b.open, 1) + fee(spec, lots, b.open, 0)) * m + 2.0 * lots.abs() * slip * mult;
+            let (his, tod) = ledger.close(day, lots.abs(), order, today_cheaper);
+            let c = (fee(spec, his, b.open, 1) + fee(spec, tod, b.open, 2) + fee(spec, lots, b.open, 0)) * m + 2.0 * lots.abs() * slip * mult;
+            r.close_today_lots += tod;
+            r.close_today_fees += fee(spec, tod, b.open, 2) * m;
             equity -= c;
             r.costs_paid += c;
             r.trades += 2;
+            ledger = Ledger::default();
+            ledger.open(day, lots.abs());
+            r.fills.push(Fill { t, date: b.date.clone(), qty: -lots, price: b.open - lots.signum() * slip, adj_price: (b.open - lots.signum() * slip) * fac(b), cost: c / 2.0, kind: "roll_close".into() });
+            r.fills.push(Fill { t, date: b.date.clone(), qty: lots, price: b.open + lots.signum() * slip, adj_price: (b.open + lots.signum() * slip) * fac(b), cost: c / 2.0, kind: "roll_open".into() });
         }
-        let up = round_tick(prev_close * (1.0 + spec.limit_pct), spec.tick);
-        let down = round_tick(prev_close * (1.0 - spec.limit_pct), spec.tick);
+        let ref_cur = match (b.adj_factor, ref_adj) {
+            (Some(a1), Some(a0)) if a1 > 0.0 => ref_close * a0 / a1,
+            _ => ref_close,
+        };
+        let up = round_tick(ref_cur * (1.0 + spec.limit_pct), spec.tick);
+        let down = round_tick(ref_cur * (1.0 - spec.limit_pct), spec.tick);
         let target = pos[t - 1].clamp(-1.0, 1.0);
         let suspended = b.volume <= 0.0;
         let notional_per_lot = b.open * mult;
@@ -181,10 +299,29 @@ pub fn simulate(spec: &ContractSpec, bars: &[Bar], pos: &[f64], fx: &FuturesCost
             } else if delta < 0.0 && b.open <= down + spec.tick * 0.5 {
                 r.blocked_limit_down += 1;
             } else {
-                // closing part (reduces |lots|) pays close fee, the rest open fee
+                // closing part (reduces |lots|) pays the close or close-today fee, the rest the open fee
                 let closing = if lots.signum() != delta.signum() && lots != 0.0 { delta.abs().min(lots.abs()) } else { 0.0 };
                 let opening = delta.abs() - closing;
-                let c = (fee(spec, closing, b.open, 1) + fee(spec, opening, b.open, 0)) * m;
+                let (his, tod) = if closing > 0.0 { ledger.close(day, closing, order, today_cheaper) } else { (0.0, 0.0) };
+                let fc = fee(spec, his, b.open, 1) * m;
+                let ft = fee(spec, tod, b.open, 2) * m;
+                let fo = fee(spec, opening, b.open, 0) * m;
+                let px = b.open + delta.signum() * slip;
+                if closing > 0.0 {
+                    let cc = fc + ft + closing * slip * mult;
+                    r.fills.push(Fill { t, date: b.date.clone(), qty: closing * delta.signum(), price: px, adj_price: px * fac(b), cost: cc,
+                        kind: if tod > 0.0 && his == 0.0 { "close_today".into() } else if tod > 0.0 { "close+close_today".into() } else { "close".into() } });
+                }
+                if opening > 0.0 {
+                    if ledger.total() <= 1e-9 {
+                        ledger = Ledger::default();
+                    }
+                    ledger.open(day, opening);
+                    r.fills.push(Fill { t, date: b.date.clone(), qty: opening * delta.signum(), price: px, adj_price: px * fac(b), cost: fo + opening * slip * mult, kind: "open".into() });
+                }
+                r.close_today_lots += tod;
+                r.close_today_fees += ft;
+                let c = fc + ft + fo;
                 equity -= c + delta.abs() * slip * mult;
                 r.costs_paid += c + delta.abs() * slip * mult;
                 r.trades += 1;
@@ -195,11 +332,15 @@ pub fn simulate(spec: &ContractSpec, bars: &[Bar], pos: &[f64], fx: &FuturesCost
         equity += lots * mult * (b.close - b.open);
         r.equity[t] = equity;
         r.exposure[t] = if equity > 0.0 { lots * b.close * mult / equity } else { 0.0 };
+        day_close = (b.close, b.adj_factor);
         if equity <= 0.0 {
-            // account blown: flat from here on
+            // account blown: flat from here on (no fill recorded: there is no price to close at)
             lots = 0.0;
+            ledger = Ledger::default();
         }
     }
+    r.final_units = lots;
+    r.final_price = bars[n - 1].close;
     r
 }
 
@@ -414,5 +555,65 @@ mod tests {
         // holiday Monday skipped
         let hol = |d: NaiveDate| d != NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
         assert_eq!(trading_day_for(dt("2024-01-05 22:00:00"), hol), NaiveDate::from_ymd_opt(2024, 1, 9).unwrap());
+    }
+
+    fn zero_slip() -> FuturesCosts {
+        FuturesCosts { slippage_ticks: 0.0, leverage: 1.0 }
+    }
+
+    #[test]
+    fn daily_bars_never_pay_close_today() {
+        let ma = spec_for("FUT_MA").unwrap();
+        let b: Vec<Bar> = (0..30).map(|i| bar(&format!("2024-02-{:02}", i + 1), 2500.0, 2500.0)).collect();
+        let pos: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let s = simulate(&ma, &b, &pos, &zero_slip(), &CostModel::default());
+        assert!(s.trades > 20 && s.close_today_lots == 0.0 && s.close_today_fees == 0.0, "{} {}", s.trades, s.close_today_lots);
+        assert!(s.fills.iter().all(|f| f.kind != "close_today"));
+    }
+
+    #[test]
+    fn intraday_round_trip_pays_close_today_tier() {
+        // MA (CZCE): open 2 / close 2 / close-today 6 yuan per lot
+        let ma = spec_for("FUT_MA").unwrap();
+        let b = vec![bar("2024-02-01 09:00", 2500.0, 2500.0), bar("2024-02-01 09:01", 2500.0, 2500.0), bar("2024-02-01 09:02", 2500.0, 2500.0), bar("2024-02-02 09:00", 2500.0, 2500.0)];
+        let td = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // open on bar 1, close on bar 2 (same trading day)
+        let s = simulate_session(&ma, &b, &td(&["2024-02-01"; 4]), &[1.0, 0.0, 0.0, 0.0], &zero_slip(), &CostModel::default());
+        let lots = (INITIAL_CAPITAL / (2500.0 * 10.0)).trunc();
+        assert_eq!(s.close_today_lots, lots);
+        assert!((s.close_today_fees - 6.0 * lots).abs() < 1e-9 && (s.costs_paid - 8.0 * lots).abs() < 1e-9, "{s:?}");
+        // the same orders across a trading-day boundary pay the ordinary close fee
+        let s2 = simulate_session(&ma, &b, &td(&["2024-02-01", "2024-02-01", "2024-02-02", "2024-02-02"]), &[1.0, 0.0, 0.0, 0.0], &zero_slip(), &CostModel::default());
+        assert_eq!(s2.close_today_lots, 0.0);
+        assert!((s2.costs_paid - 4.0 * lots).abs() < 1e-9);
+        // a night-session open (21:00, trading day = next day) closed next morning IS close-today
+        let s3 = simulate_session(&ma, &b, &td(&["2024-02-01", "2024-02-02", "2024-02-02", "2024-02-02"]), &[1.0, 0.0, 0.0, 0.0], &zero_slip(), &CostModel::default());
+        assert_eq!(s3.close_today_lots, lots);
+    }
+
+    #[test]
+    fn close_order_decides_which_lots_are_closed() {
+        let mut l = Ledger::default();
+        l.open("d1", 3.0);
+        l.open("d2", 2.0);
+        assert_eq!(l.clone().close("d2", 4.0, CloseOrder::Fifo, true), (3.0, 1.0));
+        assert_eq!(l.clone().close("d2", 4.0, CloseOrder::TodayFirst, false), (2.0, 2.0));
+        assert_eq!(l.clone().close("d2", 1.0, CloseOrder::Cheapest, true), (0.0, 1.0));
+        assert_eq!(l.clone().close("d2", 1.0, CloseOrder::Cheapest, false), (1.0, 0.0));
+        assert_eq!(l.close("d2", 99.0, CloseOrder::Fifo, false), (3.0, 2.0), "never closes more than held");
+        assert_eq!(spec_for("FUT_IF").unwrap().close_order(), CloseOrder::TodayFirst);
+        assert_eq!(spec_for("FUT_RB").unwrap().close_order(), CloseOrder::Cheapest);
+        assert_eq!(spec_for("FUT_M").unwrap().close_order(), CloseOrder::Fifo);
+    }
+
+    #[test]
+    fn cffex_partial_reduce_hits_close_today_first() {
+        // IF close-today 10x the close fee: add on day 2 then cut back same day -> close-today
+        let ifs = spec_for("FUT_IF").unwrap();
+        let b = vec![bar("d1a", 3500.0, 3500.0), bar("d1b", 3500.0, 3500.0), bar("d2a", 3500.0, 3500.0), bar("d2b", 3500.0, 3500.0)];
+        let td: Vec<String> = ["d1", "d1", "d2", "d2"].iter().map(|x| x.to_string()).collect();
+        let s = simulate_session(&ifs, &b, &td, &[0.5, 1.0, 0.5, 0.5], &FuturesCosts { slippage_ticks: 0.0, leverage: 3.0 }, &CostModel::default());
+        assert!(s.close_today_lots > 0.0, "{:?}", s.fills);
+        assert!(s.fills.iter().any(|f| f.kind == "close_today"));
     }
 }

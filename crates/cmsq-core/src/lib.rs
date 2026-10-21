@@ -17,6 +17,9 @@ pub mod state;
 pub mod store;
 pub mod ctp;
 pub mod futures;
+pub mod tradestats;
+pub mod qifi;
+pub mod calendars;
 
 pub use home::Home;
 pub use models::*;

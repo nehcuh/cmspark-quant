@@ -158,6 +158,37 @@ pub struct SimResult {
     pub blocked_limit_down: usize,
     pub blocked_suspended: usize,
     pub costs_paid: f64,
+    /// every executed fill, in order (feeds trade-level stats and QIFI export; never the gate)
+    #[serde(default)]
+    pub fills: Vec<Fill>,
+    /// futures: lots closed under the close-today tier, and the fees that tier charged
+    #[serde(default)]
+    pub close_today_lots: f64,
+    #[serde(default)]
+    pub close_today_fees: f64,
+    /// units held after the last bar (A-shares: shares; futures: signed lots) and the last close
+    #[serde(default)]
+    pub final_units: f64,
+    #[serde(default)]
+    pub final_price: f64,
+}
+
+/// One executed fill as seen by the trusted host simulator.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct Fill {
+    /// bar index
+    pub t: usize,
+    pub date: String,
+    /// signed quantity (shares or lots; + buys)
+    pub qty: f64,
+    /// raw fill price incl. slippage
+    pub price: f64,
+    /// price on the adjusted (continuous) scale, for round-trip P/L across corporate actions / rolls
+    pub adj_price: f64,
+    /// fees + taxes + slippage cost of this fill
+    pub cost: f64,
+    /// buy / sell (A-shares) or open / close / close_today / roll (futures)
+    pub kind: String,
 }
 
 pub const INITIAL_CAPITAL: f64 = 1_000_000.0;
@@ -229,6 +260,8 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
                         cash -= v + c;
                         shares += lots * 100.0;
                         r.costs_paid += c + lots * 100.0 * (px - b.open);
+                        let f = b.adj_factor.unwrap_or(1.0);
+                        r.fills.push(Fill { t, date: b.date.clone(), qty: lots * 100.0 / f, price: px, adj_price: px * f, cost: c + lots * 100.0 * (px - b.open), kind: "buy".into() });
                         r.trades += 1;
                     }
                 }
@@ -241,6 +274,8 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
                 if qty > 0.0 {
                     let v = qty * px;
                     let c = commission(v) + v * stamp_duty(&b.date) * m;
+                    let f = b.adj_factor.unwrap_or(1.0);
+                    r.fills.push(Fill { t, date: b.date.clone(), qty: -qty / f, price: px, adj_price: px * f, cost: c + qty * (b.open - px), kind: "sell".into() });
                     cash += v - c;
                     shares -= qty;
                     if shares < 1e-9 {
@@ -257,6 +292,8 @@ pub fn simulate_with(symbol: &str, bars: &[Bar], pos: &[f64], costs: &CostModel,
         r.equity[t] = eq;
         r.exposure[t] = if eq > 0.0 { shares * b.close / eq } else { 0.0 };
     }
+    r.final_units = shares;
+    r.final_price = bars[n - 1].close;
     r
 }
 

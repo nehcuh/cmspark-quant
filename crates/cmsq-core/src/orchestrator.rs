@@ -620,7 +620,9 @@ impl Orchestrator {
                       "vault": {"start": bars[dev_end].date, "end": bars.last().unwrap().date, "bars": bars.len() - dev_end, "note": "never shown to the strategy before promote"}},
             "development": dm, "development_cost_2x": dm2, "walk_forward_folds": folds, "buy_and_hold": bhm,
             "trades": sim.trades, "blocked": {"limit_up": sim.blocked_limit_up, "limit_down": sim.blocked_limit_down, "suspended": sim.blocked_suspended},
-            "costs_paid": sim.costs_paid, "lookahead_probe": probe_rep, "trial": trial,
+            "costs_paid": sim.costs_paid, "close_today": {"lots": sim.close_today_lots, "fees": sim.close_today_fees},
+            "trade_stats": crate::tradestats::stats_window(&sim.fills, fut.as_ref().map(|f| f.multiplier).unwrap_or(1.0), warm),
+            "lookahead_probe": probe_rep, "trial": trial,
             "dsr": dsr, "latest_position": {"date": dev[dev_end - 1].date, "target_position": full[dev_end - 1]}, "equity_csv": jd.join("equity.csv").display().to_string(),
         });
         std::fs::write(jd.join("result.json"), serde_json::to_string_pretty(&result)?)?;
@@ -1038,7 +1040,10 @@ impl Orchestrator {
         let passed = reasons.is_empty();
         let result = json!({"kind": "vault", "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "params": params, "vault": vm, "lookahead_probe": rep,
             "runner_identity": identity, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL }, "passed": passed, "reasons": reasons,
-            "latest_position": {"date": bars[n - 1].date, "target_position": full[n - 1]}});
+            "latest_position": {"date": bars[n - 1].date, "target_position": full[n - 1]},
+            "close_today": {"lots": sim.close_today_lots, "fees": sim.close_today_fees},
+            "trade_stats": crate::tradestats::stats_window(&sim.fills, fut.as_ref().map(|f| f.multiplier).unwrap_or(1.0), dev_end),
+            "account": crate::qifi::account_inputs(&symbol, fut.as_ref(), &sim, &bars, dev_end)});
         std::fs::write(jd.join("result.json"), serde_json::to_string_pretty(&result)?)?;
         self.store.finish_job(&job_id, "succeeded", Some(0), ms, None, Some(&result))?;
         self.store.finish_vault(&s.id, passed)?;
