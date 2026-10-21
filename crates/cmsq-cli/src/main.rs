@@ -126,6 +126,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MdCmd,
     },
+    /// Paper trading: simulated fills against exchange quotes for a PROMOTED strategy (no broker, no real orders)
+    Paper {
+        #[command(subcommand)]
+        cmd: PaperCmd,
+    },
     /// Manually promote a GatePassed strategy: type `PROMOTE <id8>` (prompted if --confirm
     /// is omitted), then the one-time vault holdout runs in Docker; only a vault pass promotes.
     Promote {
@@ -251,6 +256,42 @@ enum MdCmd {
         #[arg(long)]
         front: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum PaperCmd {
+    /// Run a session: quotes from recorded ticks (--from-db), the replay feed (--mock) or the live CTP md feed
+    Run {
+        #[arg(long)]
+        strategy: String,
+        /// dataset symbol the signals refer to, e.g. FUT_RB or SH600000
+        #[arg(long)]
+        symbol: String,
+        /// quote instrument, e.g. rb2601 (defaults to --symbol)
+        #[arg(long)]
+        instrument: Option<String>,
+        #[arg(long)]
+        mock: bool,
+        #[arg(long)]
+        from_db: bool,
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+        #[arg(long)]
+        front: Option<String>,
+        #[arg(long, default_value_t = 0.1)]
+        participation: f64,
+        /// trade_through (default) or touch_queue
+        #[arg(long, default_value = "trade_through")]
+        limit_fill: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// List sessions
+    List,
+    /// QIFI-layout account export of a session (simulated)
+    Show { session: String },
+    /// Re-verify a session's stored event chain
+    Verify { session: String },
 }
 
 #[derive(Subcommand)]
@@ -719,6 +760,7 @@ async fn main() -> Result<()> {
             out(v.clone(), format!("backend {}  schema {}  url {}\n  strategies {}  trials {}  audit head {}  research runs {}  ticks {}", v["backend"], v["schema"], v["url"], v["strategies"], v["trials"], v["audit"], v["runs"], v["ticks"]));
         }
         Cmd::Md { cmd } => md_cmd(&o, cmd, &out).await?,
+        Cmd::Paper { cmd } => paper_cmd(&o, cmd, &out)?,
         Cmd::Promote { id, confirm } => {
             let s0 = o.get(&id)?;
             let confirm = match confirm {
@@ -1214,6 +1256,165 @@ fn parse_alloc(s: &str) -> Result<cmsq_core::scorer::Alloc> {
         },
         _ => anyhow::bail!("--alloc must be equal | inverse_vol[:N] | fixed:W1,W2,..."),
     })
+}
+
+fn paper_cmd(
+    o: &Orchestrator,
+    cmd: PaperCmd,
+    out: &dyn Fn(serde_json::Value, String),
+) -> Result<()> {
+    use cmsq_core::ctp::{self, Aggregator, FeedEvent, MdConfig};
+    use cmsq_paper::*;
+    match cmd {
+        PaperCmd::List => {
+            let v = o.store.list_paper_sessions()?;
+            let lines: Vec<String> = v
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{}  strategy {}  {}  {}",
+                        r.0,
+                        &r.1[..8.min(r.1.len())],
+                        r.3,
+                        r.4
+                    )
+                })
+                .collect();
+            out(serde_json::to_value(&v)?, lines.join("\n"));
+        }
+        PaperCmd::Verify { session } => {
+            let (n, h) = verify_chain(&o.store, &session)?;
+            out(
+                serde_json::json!({"session": session, "events": n, "chain": h, "ok": true}),
+                format!("{session}: {n} events, chain {h} verified"),
+            );
+        }
+        PaperCmd::Show { session } => {
+            let r = PaperSession::resume(&o.store, &session)?;
+            let q = r.engine.qifi(&session);
+            out(q.clone(), serde_json::to_string_pretty(&q)?);
+        }
+        PaperCmd::Run {
+            strategy,
+            symbol,
+            instrument,
+            mock,
+            from_db,
+            seconds,
+            front,
+            participation,
+            limit_fill,
+            session,
+        } => {
+            let s = o.get(&strategy)?;
+            anyhow::ensure!(
+                s.status == StrategyStatus::Promoted,
+                "strategy {} is {}: only Promoted strategies may paper-trade",
+                s.id,
+                s.status
+            );
+            let inst = instrument.unwrap_or_else(|| symbol.clone());
+            let market = match cmsq_core::futures::spec_for(&symbol) {
+                Some(spec) => Market::Futures { spec },
+                None => Market::AShare {
+                    rules: Default::default(),
+                },
+            };
+            let prev_close = cmsq_core::market::read_bars(&o.home.data_dir(), &symbol)
+                .ok()
+                .and_then(|b| b.last().map(|x| x.close))
+                .unwrap_or(0.0);
+            let cfg = PaperConfig {
+                participation,
+                limit_fill: match limit_fill.as_str() {
+                    "touch_queue" => LimitFill::TouchQueue,
+                    "trade_through" => LimitFill::TradeThrough,
+                    x => anyhow::bail!("unknown --limit-fill {x}"),
+                },
+                ..Default::default()
+            };
+            let mut e = PaperEngine::new(cfg);
+            e.add_instrument(InstrumentSetup {
+                symbol: inst.clone(),
+                market,
+                prev_close,
+                suspended: false,
+            });
+            let id = session.unwrap_or_else(|| {
+                format!(
+                    "paper_{}_{}",
+                    &s.id[..8.min(s.id.len())],
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                )
+            });
+            let mut ps = PaperSession::start(&o.store, &id, &s, e)?;
+            let sig: Vec<(String, f64)> = o
+                .store
+                .list_signals()?
+                .into_iter()
+                .filter(|(g, ..)| g.strategy_id == s.id && g.symbol == symbol)
+                .map(|(g, ..)| (g.date, g.target_position))
+                .collect();
+            let mut drv = SignalDriver::new(sig, &inst);
+            let mut n = 0usize;
+            if from_db {
+                for t in o.store.list_ticks(&inst, 5_000_000)? {
+                    drv.on_quote(&mut ps, &s, &Quote::from(&t))?;
+                    n += 1;
+                }
+            } else {
+                let mut feed: Box<dyn ctp::MdFeed> = if mock {
+                    Box::new(ctp::ReplayFeed::demo(std::slice::from_ref(&inst)))
+                } else {
+                    ctp::live_feed()?
+                };
+                let mcfg = MdConfig {
+                    front: front.unwrap_or_else(|| ctp::OPENCTP_7X24_MD.into()),
+                    instruments: vec![inst.clone()],
+                    broker_id: String::new(),
+                    duration: std::time::Duration::from_secs(seconds),
+                };
+                feed.start(&mcfg)?;
+                let mut agg = Aggregator::new(&mcfg.instruments);
+                agg.calendars = cmsq_core::calendars::FuturesCalendars::load(&o.home.data_dir());
+                let end = std::time::Instant::now() + mcfg.duration;
+                while std::time::Instant::now() < end && !feed.finished() {
+                    if let Some(FeedEvent::Tick(r)) =
+                        feed.next(std::time::Duration::from_millis(500))
+                    {
+                        if let Some(t) = agg.accept(&r, &format!("ctp:{}", feed.name())) {
+                            let mut q = Quote::from(&t);
+                            if r.upper_limit.is_finite()
+                                && r.upper_limit > 0.0
+                                && r.upper_limit < 1e12
+                            {
+                                q.upper_limit = Some(r.upper_limit);
+                            }
+                            if r.lower_limit.is_finite()
+                                && r.lower_limit > 0.0
+                                && r.lower_limit < 1e12
+                            {
+                                q.lower_limit = Some(r.lower_limit);
+                            }
+                            drv.on_quote(&mut ps, &s, &q)?;
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            let fills = ps.engine.fills.len();
+            let eq = ps.engine.equity();
+            let chain = ps.engine.event_log_hash();
+            let reb = drv.rebalances.clone();
+            ps.stop()?;
+            out(serde_json::json!({"session": id, "quotes": n, "fills": fills, "equity": eq, "chain": chain, "rebalances": reb, "simulated": true}),
+                format!("paper session {id}: {n} quotes, {} rebalances, {fills} simulated fills, equity {eq:.2}\nchain {chain}", reb.len()));
+        }
+    }
+    Ok(())
 }
 
 async fn md_cmd(

@@ -120,6 +120,14 @@ impl R {
             _ => 0.0,
         }
     }
+    pub fn of(&self, i: usize) -> Option<f64> {
+        match &self.0[i] {
+            V::F(x) => Some(*x),
+            V::I(x) => Some(*x as f64),
+            V::T(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
     pub fn b(&self, i: usize) -> bool {
         self.i(i) != 0
     }

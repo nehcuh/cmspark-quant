@@ -29,12 +29,35 @@ Only strategies in status `Promoted` may submit orders.
 - Deterministic replay: the same tape gives the same event log, and `event_log_hash` stays stable. This is tested.
 - `qifi()` exports the account in QIFI layout, marked `cmsq.paper=true` and `broker=null`.
 
-## Status
-Done in this chunk: the engine and its tests.
+## Persistence and audit
+`PaperSession` writes to the cmsq store (PostgreSQL in production, migration `0003_paper.sql`; SQLite offline). It uses three tables:
+- `paper_sessions`
+- `paper_events`: append-only, with a contiguous seq, and each row carries the chained hash h_n = sha256(h_{n-1} ‖ event)
+- `paper_snapshots`: append-only; a full engine state is written at each settlement and at stop
 
-Next chunks:
-- Postgres persistence of orders, fills and snapshots (audited)
-- a CLI driver that connects Promoted-strategy signals to the md pipeline
-- the dashboard view
+Every flush adds an audit entry (`paper_events`) carrying the chain head, and session start and stop are audited as well. `verify_chain` recomputes the chain. `resume` refuses to continue if:
+- the chain was altered,
+- the snapshot does not match the log, or
+- events exist after the last snapshot.
+
+The app role gets INSERT/SELECT only on these tables. Event JSON uses `float_roundtrip`, so the hashes survive storage.
+
+## Signals → orders
+`SignalDriver` applies a Promoted strategy's stored target fraction once per trading day. It takes the latest signal dated before the quote's trading day, so a signal at close t acts on t+1.
+
+Sizing:
+- futures: lots = trunc(target × equity / (price × multiplier))
+- A-shares: whole 100-share lots
+
+The driver sends market orders, closing before opening, and the matcher fills them on later quotes.
+
+## CLI
+    cmsq paper run --strategy <id> --symbol FUT_RB --instrument rb2601 (--mock | --from-db | live CTP md) [--participation 0.1] [--limit-fill trade_through|touch_queue]
+    cmsq paper list | show <session> (QIFI) | verify <session>
+
+`--from-db` replays recorded ticks, so recorded ticks give identical fills. The live mode uses the CTP md feed (`--features ctp`, market data only).
+
+## Status
+Done: engine, persistence, audit, CLI. Next chunk: dashboard view.
 
 Design reference: matching ideas only. No third-party code is used.

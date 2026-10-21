@@ -1051,6 +1051,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cmsq-core",
+ "cmsq-paper",
  "futures-util",
  "serde_json",
  "tokio",
@@ -1099,12 +1100,14 @@ dependencies = [
 name = "cmsq-paper"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "cmsq-core",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 

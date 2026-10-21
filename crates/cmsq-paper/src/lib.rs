@@ -23,6 +23,11 @@
 //!   taken from the quote's trading_day (night sessions via cmsq-core calendars).
 //!
 //! Only strategies in status `Promoted` may submit orders.
+pub mod driver;
+pub mod session;
+pub use driver::SignalDriver;
+pub use session::{verify_chain, PaperSession};
+
 use cmsq_core::futures::{CloseOrder, ContractSpec, Fee};
 use cmsq_core::models::{Strategy, StrategyStatus};
 use cmsq_core::scorer::{self, CostModel, Rules};
@@ -273,7 +278,7 @@ pub enum Event {
 #[error("{0}")]
 pub struct Reject(pub String);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Inst {
     setup: InstrumentSetup,
     last_cum: Option<f64>,
@@ -281,13 +286,24 @@ struct Inst {
     settle: Option<f64>,
 }
 
+/// Engine state. Serialisable for snapshots; the event log itself is not part
+/// of a snapshot (it is persisted separately) but its chained hash is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperEngine {
     pub cfg: PaperConfig,
     inst: BTreeMap<String, Inst>,
     orders: BTreeMap<u64, Order>,
     next_id: u64,
     pub account: Account,
+    /// events not yet taken by [`PaperEngine::take_events`]
+    #[serde(skip)]
     events: Vec<Event>,
+    /// number of events ever emitted
+    pub event_seq: u64,
+    /// sha256 chain over every event ever emitted: h_n = sha256(h_{n-1} ‖ json(e_n))
+    pub event_chain: String,
+    /// every fill (QIFI `trades`)
+    pub fills: Vec<Fill>,
 }
 
 fn round2(x: f64) -> f64 {
@@ -334,6 +350,9 @@ impl PaperEngine {
             next_id: 1,
             account,
             events: vec![],
+            event_seq: 0,
+            event_chain: String::new(),
+            fills: vec![],
         }
     }
 
@@ -359,6 +378,9 @@ impl PaperEngine {
             i.settle = Some(px);
         }
     }
+    pub fn market(&self, symbol: &str) -> Option<&Market> {
+        self.inst.get(symbol).map(|i| &i.setup.market)
+    }
     pub fn events(&self) -> &[Event] {
         &self.events
     }
@@ -369,15 +391,31 @@ impl PaperEngine {
         self.orders.get(&id)
     }
 
-    /// sha256 over the canonical event log: identical inputs ⇒ identical hash.
+    /// Chained sha256 over every event: identical inputs ⇒ identical hash.
     pub fn event_log_hash(&self) -> String {
+        self.event_chain.clone()
+    }
+    /// Drain pending events (for persistence), with their sequence numbers (1-based).
+    pub fn take_events(&mut self) -> Vec<(u64, Event)> {
+        let first = self.event_seq + 1 - self.events.len() as u64;
+        std::mem::take(&mut self.events)
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (first + i as u64, e))
+            .collect()
+    }
+    /// Chain step, exposed so persisted logs can be re-verified.
+    pub fn chain_step(prev: &str, e: &Event) -> String {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
-        for e in &self.events {
-            h.update(serde_json::to_vec(e).unwrap());
-            h.update(b"\n");
-        }
+        h.update(prev.as_bytes());
+        h.update(serde_json::to_vec(e).unwrap());
         hex::encode(h.finalize())
+    }
+    fn push(&mut self, e: Event) {
+        self.event_chain = Self::chain_step(&self.event_chain, &e);
+        self.event_seq += 1;
+        self.events.push(e);
     }
 
     fn mark(&self, sym: &str) -> Option<f64> {
@@ -442,7 +480,7 @@ impl PaperEngine {
         why: impl Into<String>,
     ) -> Reject {
         let reason = why.into();
-        self.events.push(Event::Rejected {
+        self.push(Event::Rejected {
             strategy_id: s.id.clone(),
             symbol: sym.into(),
             side,
@@ -638,16 +676,16 @@ impl PaperEngine {
         let queue_ahead = match (kind, i.last.as_ref()) {
             (OrderKind::Limit { price }, Some(q)) => match side {
                 Side::Buy if q.bid1.is_some_and(|b| (b - price).abs() < EPS) => {
-                    q.bid_vol1.unwrap_or(f64::INFINITY)
+                    q.bid_vol1.unwrap_or(f64::MAX)
                 }
                 Side::Sell if q.ask1.is_some_and(|a| (a - price).abs() < EPS) => {
-                    q.ask_vol1.unwrap_or(f64::INFINITY)
+                    q.ask_vol1.unwrap_or(f64::MAX)
                 }
-                Side::Buy if q.bid1.is_some_and(|b| price < b) => f64::INFINITY,
-                Side::Sell if q.ask1.is_some_and(|a| price > a) => f64::INFINITY,
+                Side::Buy if q.bid1.is_some_and(|b| price < b) => f64::MAX,
+                Side::Sell if q.ask1.is_some_and(|a| price > a) => f64::MAX,
                 _ => 0.0,
             },
-            (OrderKind::Limit { .. }, None) => f64::INFINITY,
+            (OrderKind::Limit { .. }, None) => f64::MAX,
             _ => 0.0,
         };
         let id = self.next_id;
@@ -668,7 +706,7 @@ impl PaperEngine {
             commission_paid: 0.0,
             filled_value: 0.0,
         };
-        self.events.push(Event::Accepted { order: o.clone() });
+        self.push(Event::Accepted { order: o.clone() });
         self.orders.insert(id, o);
         Ok(id)
     }
@@ -697,7 +735,7 @@ impl PaperEngine {
                 Side::Buy => p.short_frozen -= rest,
             }
         }
-        self.events.push(Event::Cancelled {
+        self.push(Event::Cancelled {
             order_id: id,
             reason: why.into(),
         });
@@ -724,6 +762,9 @@ impl PaperEngine {
             None => 0.0,
         };
         inst.last_cum = Some(q.cum_volume);
+        if inst.setup.prev_close <= 0.0 {
+            inst.setup.prev_close = q.last; // unknown reference: band centred on the first quote
+        }
         inst.last = Some(q.clone());
         if inst.setup.suspended || dv <= 0.0 {
             return vec![];
@@ -956,7 +997,8 @@ impl PaperEngine {
             ts: q.ts.clone(),
             trading_day: day,
         };
-        self.events.push(Event::Filled { fill: f.clone() });
+        self.fills.push(f.clone());
+        self.push(Event::Filled { fill: f.clone() });
         f
     }
 
@@ -1035,7 +1077,7 @@ impl PaperEngine {
             equity: self.equity(),
             margin: self.account.margin,
         };
-        self.events.push(ev);
+        self.push(ev);
     }
 
     /// Signal → orders: market orders moving the net position toward `target`
@@ -1152,8 +1194,8 @@ impl PaperEngine {
         }
         let mut trades = serde_json::Map::new();
         let mut orders = serde_json::Map::new();
-        for e in &self.events {
-            if let Event::Filled { fill: f } = e {
+        for f in &self.fills {
+            {
                 trades.insert(format!("{}-{}", f.order_id, trades.len()), json!({
                     "order_id": f.order_id.to_string(), "instrument_id": f.symbol,
                     "direction": if f.side == Side::Buy {"BUY"} else {"SELL"},
