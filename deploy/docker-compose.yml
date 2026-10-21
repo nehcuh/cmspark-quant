@@ -29,10 +29,26 @@ services:
       timeout: 3s
       retries: 30
     shm_size: 256mb
+  # OPTIONAL hot layer (quote cache, pub/sub, distributed rate limits). Ephemeral by design:
+  # no persistence, nothing of record. Start with scripts/redis_up.sh (profile "redis").
+  redis:
+    profiles: ["redis"]
+    image: redis@sha256:${CMSQ_REDIS_IMAGE_DIGEST:-858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    restart: unless-stopped
+    secrets: [redis_pw]
+    entrypoint: ["sh", "-c", "exec redis-server --requirepass \"$$(cat /run/secrets/redis_pw)\" --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru --rename-command FLUSHALL '' --rename-command CONFIG ''"]
+    ports: ["127.0.0.1:${CMSQ_REDIS_PORT:-56379}:6379"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_pw)\" --no-auth-warning ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 secrets:
   pg_owner_pw:
     file: ${CMSQ_SECRETS_DIR:?}/pg_owner_pw
   pg_app_pw:
     file: ${CMSQ_SECRETS_DIR:?}/pg_app_pw
+  redis_pw:
+    file: ${CMSQ_SECRETS_DIR:?}/redis_pw
 volumes:
   cmsq-pg:

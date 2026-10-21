@@ -346,6 +346,8 @@ pub fn run_md_blocking(
         ) {
             Some(FeedEvent::Tick(r)) => {
                 if let Some(t) = agg.accept(&r, &source) {
+                    crate::hot::global()
+                        .put_quote(&t.instrument, &serde_json::to_value(&t).unwrap_or_default());
                     buf.push(t);
                 }
                 if buf.len() >= 500 {
