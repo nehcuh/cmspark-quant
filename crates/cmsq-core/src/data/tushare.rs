@@ -233,6 +233,44 @@ impl Tushare {
         }
     }
 
+    /// Exchange-published daily price limits: `stk_limit` (A-share) or `ft_limit` (futures).
+    /// Returns (YYYY-MM-DD, up, down), ascending. `ts_code` like 600519.SH / RB2601.SHF.
+    pub async fn price_limits(
+        &self,
+        ts_code: &str,
+        futures: bool,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<(String, f64, f64)>> {
+        let api = if futures { "ft_limit" } else { "stk_limit" };
+        let (cols, rows) = self
+            .query(
+                api,
+                json!({"ts_code": ts_code, "start_date": start.replace('-', ""), "end_date": end.replace('-', "")}),
+                "ts_code,trade_date,up_limit,down_limit",
+            )
+            .await?;
+        let ix = |n: &str| cols.iter().position(|c| c == n);
+        let (d, u, l) = (
+            ix("trade_date").context("trade_date")?,
+            ix("up_limit").context("up_limit")?,
+            ix("down_limit").context("down_limit")?,
+        );
+        let num = |v: &Value| v.as_f64().or_else(|| v.as_str()?.parse().ok());
+        let mut out: Vec<(String, f64, f64)> = rows
+            .iter()
+            .filter_map(|r| {
+                let day = r.get(d)?.as_str()?;
+                let (up, dn) = (num(r.get(u)?)?, num(r.get(l)?)?);
+                (day.len() == 8 && up.is_finite() && dn.is_finite() && up > dn && dn > 0.0)
+                    .then(|| (ymd(day), up, dn))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.dedup_by(|a, b| a.0 == b.0);
+        Ok(out)
+    }
+
     pub async fn trade_cal(&self, start: &str, end: &str) -> Result<Vec<(String, bool)>> {
         self.trade_cal_for("SSE", start, end).await
     }

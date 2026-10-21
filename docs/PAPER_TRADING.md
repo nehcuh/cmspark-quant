@@ -61,3 +61,7 @@ The driver sends market orders, closing before opening, and the matcher fills th
 Done: engine, persistence, audit, CLI, dashboard tab "模拟交易 Paper Trading" (account, positions, settlement equity, recent fills). Live quote push comes with the optional Redis layer.
 
 Design reference: matching ideas only. No third-party code is used.
+
+`cmsq data limits SH600519` / `cmsq data limits FUT_RB --contract rb2601` 从 tushare `stk_limit` / `ft_limit` 拉取交易所公布的逐日涨跌停价，存为 `data/<代码或合约>.limits.csv`（快照 sha256 写入审计）。模拟盘对不带涨跌停的行情（存储的 tick、回放的分钟线）优先使用这些数据；行情自带的涨跌停优先级最高；都没有时才按规则推算。
+
+`cmsq paper run ... --from-bars FILE`：把真实录制的 1 分钟 K 线（CSV：datetime,open,high,low,close,volume）按 开→高/低（按路径顺序）→收 拆成 4 个报价回放，每个报价分得四分之一成交量；文件 sha256 写入审计。夜盘（21:00 后、03:00 前）归到下一个工作日，此处不处理节假日。
