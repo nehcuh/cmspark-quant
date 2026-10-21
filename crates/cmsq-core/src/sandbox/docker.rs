@@ -33,6 +33,37 @@ pub struct DockerSandboxExecutor {
     docker: Docker,
 }
 
+/// Futures executing a job can be cancelled at any await point. Keep cleanup
+/// independent of that future once the daemon has returned a container id.
+struct ContainerCleanup {
+    docker: Docker,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for ContainerCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let docker = self.docker.clone();
+            let id = self.id.clone();
+            runtime.spawn(async move {
+                let _ = docker
+                    .remove_container(
+                        &id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+            });
+        }
+    }
+}
+
 impl DockerSandboxExecutor {
     pub async fn connect() -> Result<Self, SandboxError> {
         let docker = Docker::connect_with_local_defaults()
@@ -78,7 +109,7 @@ impl DockerSandboxExecutor {
             binds: Some(
                 req.mounts
                     .iter()
-                    .filter(|m| !(m.container == "/out" && !m.read_only))
+                    .filter(|m| m.container != "/out" || m.read_only)
                     .map(|m| {
                         format!(
                             "{}:{}:{}",
@@ -193,6 +224,11 @@ impl SandboxExecutor for DockerSandboxExecutor {
             .await
             .map_err(|e| SandboxError::Execution(format!("create: {e}")))?;
         let id = created.id;
+        let mut cleanup = ContainerCleanup {
+            docker: self.docker.clone(),
+            id: id.clone(),
+            armed: true,
+        };
         let t0 = Instant::now();
         let budget = req.limits.log_bytes as usize;
         let (mut out_b, mut err_b): (Vec<u8>, Vec<u8>) = (vec![], vec![]);
@@ -292,14 +328,15 @@ impl SandboxExecutor for DockerSandboxExecutor {
         };
         // positions.csv comes back framed on stderr; everything else is discarded
         let (err_b, framed) = take_frame(&err_b, &nonce);
+        let mut copy_result = Ok(());
         if let (Some(dir), Some(body), Outcome::Exited) = (&out_host, framed, &outcome) {
             if body.len() <= super::POSITIONS_CAP {
-                std::fs::write(dir.join("positions.csv"), body).map_err(SandboxError::Io)?;
+                copy_result = std::fs::write(dir.join("positions.csv"), body);
             }
         }
         let cap = |b: &[u8]| String::from_utf8_lossy(&b[..b.len().min(OUTPUT_CAP)]).into_owned();
         let (stdout, stderr) = (cap(&out_b), cap(&err_b));
-        let _ = self
+        if self
             .docker
             .remove_container(
                 &id,
@@ -308,7 +345,12 @@ impl SandboxExecutor for DockerSandboxExecutor {
                     ..Default::default()
                 }),
             )
-            .await;
+            .await
+            .is_ok()
+        {
+            cleanup.armed = false;
+        }
+        copy_result.map_err(SandboxError::Io)?;
         Ok(SandboxResult {
             id: req.id.clone(),
             outcome,

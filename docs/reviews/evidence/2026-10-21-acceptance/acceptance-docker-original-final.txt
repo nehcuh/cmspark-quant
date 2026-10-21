@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running tests/reviewer_acceptance.rs (/workspace/baseline/target/debug/deps/reviewer_acceptance-10991b1728cc4a6c)
+
+running 1 test
+Docker exit=1, stderr=Traceback (most recent call last):
+  File "/input/probe.py", line 2, in <module>
+    Path('/out/unrelated.bin').write_bytes(b'Z'*(9*1024*1024))
+  File "/usr/local/lib/python3.12/pathlib.py", line 1037, in write_bytes
+    return f.write(view)
+           ^^^^^^^^^^^^^
+OSError: [Errno 28] No space left on device
+
+test docker_output_mount_accepts_more_than_positions_cap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.34s
