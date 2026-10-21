@@ -269,8 +269,16 @@ impl Pg {
             })
             .join()
             .expect("pg connect thread")
-        })
-        .context("connect to PostgreSQL (is `scripts/db_up.sh` running?)")?;
+        });
+        let pool = match pool {
+            Ok(p) => p,
+            Err(e) => {
+                // the caller may be inside a tokio context, where dropping a runtime panics
+                rt.shutdown_background();
+                return Err(anyhow::Error::from(e)
+                    .context("connect to PostgreSQL (is `scripts/db_up.sh` running?)"));
+            }
+        };
         Ok(Self { rt: Some(rt), pool })
     }
 

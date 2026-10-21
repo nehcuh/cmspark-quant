@@ -18,4 +18,5 @@ $B backtest "$(id 20日动量)" --symbol SAMPLE_REGIME 2>/dev/null || true
 $B backtest "$(id 布林带)" --symbol SAMPLE_RANGE 2>/dev/null || true
 for t in 明日涨跌 网格 ADV_hidden_peek ADV_forge; do $B backtest "$(id $t)" --symbol SAMPLE_TREND 2>/dev/null || true; done
 cp fixtures/posts/short_term_reversal.json "$CMSQ_HOME/drop/"   # left for the UI "Ingest" button
+[ -n "${PREP_ONLY:-}" ] && exit 0
 exec target/debug/cmsq-dashboard
