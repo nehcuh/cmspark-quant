@@ -198,7 +198,11 @@ impl Hot {
     /// Distributed token bucket shared by every process using this Redis.
     /// `None` = no distributed limiter (Redis off/unreachable): use the local bucket only.
     pub fn take_token(&self, bucket: &str, per_min: f64) -> Option<Duration> {
-        let burst = (per_min / 10.0).max(1.0);
+        self.take_token_burst(bucket, per_min, (per_min / 10.0).max(1.0))
+    }
+
+    /// Same, with an explicit burst (1.0 = strict spacing, for scraped web APIs).
+    pub fn take_token_burst(&self, bucket: &str, per_min: f64, burst: f64) -> Option<Duration> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
@@ -296,6 +300,11 @@ mod tests {
             }
         }
         assert_eq!(ok, 6, "burst shared across clients");
+        // akshare-style strict spacing (burst 1, 50/min = 1.2 s): a second client must wait
+        let a = format!("ak:{inst}");
+        assert!(h.take_token_burst(&a, 50.0, 1.0).unwrap().is_zero());
+        let w2 = h2.take_token_burst(&a, 50.0, 1.0).unwrap();
+        assert!(w2 >= Duration::from_millis(1000), "spacing shared: {w2:?}");
         let w = h.take_token(&b, 60.0).unwrap();
         assert!(
             w > Duration::from_millis(500) && w <= Duration::from_millis(1100),

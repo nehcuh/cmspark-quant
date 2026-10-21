@@ -51,6 +51,19 @@ impl PyProvider {
                         tokio::time::sleep(gap - t.elapsed()).await;
                     }
                 }
+                // shared spacing across processes when the optional Redis layer is on
+                // (burst 1: never two calls closer than min_spacing, cluster-wide)
+                let per_min = 60_000.0 / self.min_spacing.as_millis().max(1) as f64;
+                while let Some(w) = crate::hot::global().take_token_burst(
+                    &format!("{}:fetch", self.kind),
+                    per_min,
+                    1.0,
+                ) {
+                    if w.is_zero() {
+                        break;
+                    }
+                    tokio::time::sleep(w).await;
+                }
                 // third-party packages with network access get a scrubbed env: no
                 // TUSHARE_TOKEN, no LLM keys, nothing but what python + egress need
                 let mut cmd = tokio::process::Command::new(&self.python);
