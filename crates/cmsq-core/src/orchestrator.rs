@@ -1061,6 +1061,33 @@ impl Orchestrator {
         self.get(&s.id)
     }
 
+    /// Optional QIFI-style export of a PROMOTED strategy's observe-only paper
+    /// account (vault holdout window) and its signals. Written to
+    /// `<home>/runs/qifi_<id8>_<ts>.json` (or `out`) and audited with its sha256.
+    pub fn export_qifi(&self, id: &str, out: Option<&Path>) -> Result<(PathBuf, serde_json::Value)> {
+        let s = self.get(id)?;
+        anyhow::ensure!(s.status == StrategyStatus::Promoted, "QIFI export is only for Promoted strategies ({} is {})", &s.id[..8], s.status);
+        let jobs = self.store.list_jobs(Some(&s.id))?;
+        let vault = jobs.iter().find(|j| j.kind == "vault" && j.status == "succeeded" && j.result.as_ref().is_some_and(|r| r["passed"] == true))
+            .ok_or_else(|| anyhow::anyhow!("no passed vault job for {}", &s.id[..8]))?;
+        let r = vault.result.as_ref().unwrap();
+        anyhow::ensure!(r["account"].is_object(), "vault job {} predates account snapshots (cmsq ≤ 2.2.1); no QIFI data", &vault.id[..8]);
+        let sigs: Vec<Signal> = self.store.list_signals()?.into_iter().map(|x| x.0).filter(|g| g.strategy_id == s.id).collect();
+        let doc = crate::qifi::build(&s.id, &s.title, &r["account"], &sigs, &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        let path = match out {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let d = self.home.root.join("runs");
+                std::fs::create_dir_all(&d)?;
+                d.join(format!("qifi_{}_{}.json", &s.id[..8], chrono::Local::now().format("%Y%m%dT%H%M%S")))
+            }
+        };
+        let text = serde_json::to_string_pretty(&doc)?;
+        std::fs::write(&path, &text)?;
+        self.store.audit("user", "qifi_export", Some(&s.id), json!({"path": path, "vault_job": vault.id, "sha256": crate::calendars::sha256_hex(text.as_bytes()), "observe_only": true}), true)?;
+        Ok((path, doc))
+    }
+
     pub fn reject(&self, id: &str, actor: &str, reason: &str) -> Result<Strategy> {
         let s = self.get(id)?;
         self.transition(&s, StrategyStatus::Rejected, actor, Some(reason), json!({"manual": true}))?;

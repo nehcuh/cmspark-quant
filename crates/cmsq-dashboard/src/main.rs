@@ -192,6 +192,32 @@ fn equity_chart(pts: &[(String, f64)], split: Option<usize>, height: f32) -> Div
             .child(div().flex_1().flex().justify_end().child(last.0.clone())))
 }
 
+/// Display-only trade stats line (never part of the gate).
+fn trade_stats_line(r: &serde_json::Value) -> Option<String> {
+    let t = &r["trade_stats"];
+    if !t.is_object() {
+        return None;
+    }
+    let p = |k: &str| t[k].as_f64().map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into());
+    let f = |k: &str, d: usize| t[k].as_f64().map(|x| format!("{x:.d$}")).unwrap_or_else(|| "-".into());
+    let ct = r["close_today"]["lots"].as_f64().filter(|x| *x > 0.0).map(|x| format!(" · close-today {x:.0} lots ¥{:.0}", r["close_today"]["fees"].as_f64().unwrap_or(0.0))).unwrap_or_default();
+    Some(format!("交易统计 trades (display only, not gated): {} round trips · win rate {} · P/L ratio {} · profit factor {} · avg hold {} bars (max {}){ct}",
+        t["round_trips"], p("win_rate"), f("pl_ratio", 2), f("profit_factor", 2), f("avg_bars_held", 1), t["max_bars_held"]))
+}
+
+/// QIFI-style account summary of a passed vault run.
+fn qifi_line(r: &serde_json::Value) -> Option<String> {
+    let a = &r["account"];
+    if !a.is_object() {
+        return None;
+    }
+    let f = |k: &str| a[k].as_f64().unwrap_or(0.0);
+    let units = f("final_units");
+    let pos = if units.abs() < 1e-9 { "flat".to_string() } else if a["exchange"].is_string() { format!("{} {:.0} lots", if units > 0.0 { "long" } else { "short" }, units.abs()) } else { format!("{:.0} shares", units) };
+    Some(format!("QIFI 账户 (observe-only paper) {} · balance ¥{:.0} (from ¥{:.0}) · margin ¥{:.0} · {pos} @ {} · {} fills — export: cmsq export-qifi <id>",
+        a["trading_day"].as_str().unwrap_or(""), f("balance"), f("start_equity"), f("margin"), f("final_price"), a["fills"].as_array().map(|x| x.len()).unwrap_or(0)))
+}
+
 fn section(title: &str) -> Div {
     div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(c_text()).mt_2().child(title.to_string())
 }
@@ -645,9 +671,12 @@ impl Dashboard {
                         pct(&r["development_cost_2x"], "total_return"), pct(&r["buy_and_hold"], "total_return"))))
                     .child(div().text_xs().text_color(c_muted()).child(format!("{} · trades {} · blocked limit-up {} / limit-down {} / suspended {} · costs paid ¥{:.0} · probe: {} containers, {}",
                         r["execution"].as_str().unwrap_or(""), r["trades"], r["blocked"]["limit_up"], r["blocked"]["limit_down"], r["blocked"]["suspended"], r["costs_paid"].as_f64().unwrap_or(0.0),
-                        r["lookahead_probe"]["containers"], if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "LOOK-AHEAD" }))))
+                        r["lookahead_probe"]["containers"], if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "LOOK-AHEAD" })))
+                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(c_muted()).child(l))))
                 .when(j.status == "succeeded" && j.kind == "vault", |x| x.child(div().text_xs().text_color(rgb(0xa371f7)).child(format!("vault {}..{} · net return {} · Sharpe {} · {}",
-                    m["start"].as_str().unwrap_or(""), m["end"].as_str().unwrap_or(""), pct(&m, "total_return"), num(&m, "sharpe"), if r["passed"].as_bool() == Some(true) { "PASSED" } else { "FAILED" }))))
+                    m["start"].as_str().unwrap_or(""), m["end"].as_str().unwrap_or(""), pct(&m, "total_return"), num(&m, "sharpe"), if r["passed"].as_bool() == Some(true) { "PASSED" } else { "FAILED" })))
+                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(c_muted()).child(l)))
+                    .when_some(qifi_line(&r).filter(|_| r["passed"] == true), |x, l| x.child(div().text_xs().text_color(rgb(0x7ee2a8)).child(l))))
                 .when(j.error.is_some(), |x| x.child(div().text_xs().font_family("monospace").text_color(rgb(0xffb4a8)).child(j.error.clone().unwrap_or_default())))
                 .child(div().text_xs().text_color(c_muted()).child(format!("logs: {}/variants/NN/{{stdout,stderr}}.log", j.job_dir))));
         }
@@ -1051,5 +1080,18 @@ mod tests {
         let mut w = v.clone(); w.push(c(StrategyStatus::GatePassed, None, 0.9));
         assert_eq!(pick_best(&w).unwrap().0, 5);
         assert_eq!(pick_best(&v[..3]), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn trade_stats_and_qifi_lines() {
+        let r: serde_json::Value = serde_json::from_str(r#"{"trade_stats": {"round_trips": 4, "win_rate": 0.5, "pl_ratio": 1.25, "profit_factor": 1.1, "avg_bars_held": 3.5, "max_bars_held": 7},
+            "close_today": {"lots": 2.0, "fees": 12.0},
+            "account": {"trading_day": "2024-01-05", "balance": 1050000, "start_equity": 1000000, "margin": 200000, "final_units": -3.0, "final_price": 4000.0, "exchange": "SHFE", "fills": [1, 2]}}"#).unwrap();
+        let empty = serde_json::Value::Object(Default::default());
+        let l = trade_stats_line(&r).unwrap();
+        assert!(l.contains("not gated") && l.contains("win rate 50%") && l.contains("P/L ratio 1.25") && l.contains("close-today 2 lots"), "{l}");
+        let q = qifi_line(&r).unwrap();
+        assert!(q.contains("short 3 lots") && q.contains("observe-only"), "{q}");
+        assert!(trade_stats_line(&empty).is_none() && qifi_line(&empty).is_none());
     }
 }

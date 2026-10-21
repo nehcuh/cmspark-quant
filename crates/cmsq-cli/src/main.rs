@@ -107,6 +107,8 @@ enum Cmd {
     },
     /// Library-wide trial ledger used by the Deflated Sharpe Ratio
     Trials,
+    /// Optional QIFI-style JSON export of a Promoted strategy's observe-only paper account + signals
+    ExportQifi { id: String, #[arg(long)] out: Option<std::path::PathBuf> },
     /// Observe-only signals of promoted strategies
     Signals,
     /// Native host-side bar-by-bar replay of a reference strategy (not gated; for reference/cross-checks)
@@ -442,6 +444,13 @@ async fn main() -> Result<()> {
                     j.runner_identity.as_deref().map(|r| r.chars().take(19).collect::<String>() + "…" + r.rsplit('|').next().unwrap_or("")).unwrap_or_default()));
             }
             out(serde_json::to_value(&v)?, lines.join("\n"));
+        }
+        Cmd::ExportQifi { id, out: path } => {
+            let (p, doc) = o.export_qifi(&id, path.as_deref())?;
+            let a = &doc["accounts"];
+            out(serde_json::json!({"path": p, "qifi": doc}), format!("QIFI (observe-only paper account) → {}\n  balance ¥{:.0} · available ¥{:.0} · margin ¥{:.0} · {} position(s) · {} trade(s) · {} signal(s)",
+                p.display(), a["balance"].as_f64().unwrap_or(0.0), a["available"].as_f64().unwrap_or(0.0), a["margin"].as_f64().unwrap_or(0.0),
+                doc["positions"].as_object().map(|x| x.len()).unwrap_or(0), doc["trades"].as_object().map(|x| x.len()).unwrap_or(0), doc["cmsq"]["signals"].as_array().map(|x| x.len()).unwrap_or(0)));
         }
         Cmd::Trials => {
             let v = o.store.trials()?;

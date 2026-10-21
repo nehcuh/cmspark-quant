@@ -132,8 +132,17 @@ async fn docker_pipeline_gate_then_vault_promote() {
     let s = o.promote(&id, "test", &format!("PROMOTE {}", &id[..8]), &d).await.unwrap();
     assert!(matches!(s.status, StrategyStatus::Promoted | StrategyStatus::Rejected), "{:?}", s.status);
     assert!(o.store.vault_touch(&id).unwrap().is_some());
+    let res = &o.store.list_jobs(Some(&id)).unwrap()[0];
+    assert!(res.result.as_ref().unwrap()["trade_stats"]["display_only"] == true);
     if s.status == StrategyStatus::Promoted {
         assert_eq!(o.store.list_signals().unwrap().len(), 1);
+        // optional QIFI export of the observe-only paper account
+        let (p, q) = o.export_qifi(&id, None).unwrap();
+        assert!(p.exists() && q["cmsq"]["observe_only"] == true && q["orders"] == serde_json::json!({}));
+        assert_eq!(q["cmsq"]["signals"].as_array().unwrap().len(), 1);
+        assert!(o.store.audit_entries(Some(&id), 200).unwrap().iter().any(|e| e.action == "qifi_export"));
+    } else {
+        assert!(o.export_qifi(&id, None).is_err(), "only Promoted strategies export");
     }
     // vault is one-shot
     assert!(o.promote(&id, "test", &format!("PROMOTE {}", &id[..8]), &d).await.is_err());
