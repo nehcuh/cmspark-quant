@@ -173,8 +173,18 @@ fn data_class_comes_only_from_signed_source() {
 fn trial(o: &Orchestrator, job: &str, sym: &str, sha: &str, bars: usize, params: &str) {
     o.store
         .record_trial(&cmsq_core::store::NewTrial {
-            strategy_id: "same-strategy", job_id: job, idea_key: "same-idea", params_hash: params, symbol: sym, dataset_sha: sha, bars,
-            sharpe_daily: 0.02, positions: &[], lookahead: false, run_kind: "single", group_id: None,
+            strategy_id: "same-strategy",
+            job_id: job,
+            idea_key: "same-idea",
+            params_hash: params,
+            symbol: sym,
+            dataset_sha: sha,
+            bars,
+            sharpe_daily: 0.02,
+            positions: &[],
+            lookahead: false,
+            run_kind: "single",
+            group_id: None,
         })
         .unwrap();
 }
@@ -184,24 +194,46 @@ fn trial(o: &Orchestrator, job: &str, sym: &str, sha: &str, bars: usize, params:
 async fn cross_symbol_trials_count_in_dsr_n() {
     let (_d, o, _) = setup().await;
     for i in 0..100 {
-        trial(&o, &format!("j{i}"), &format!("SH{:06}", 600000 + i), "snapshot", 500, "same-params");
+        trial(
+            &o,
+            &format!("j{i}"),
+            &format!("SH{:06}", 600000 + i),
+            "snapshot",
+            500,
+            "same-params",
+        );
     }
     let all = o.store.trials().unwrap();
-    let metrics = cmsq_core::scorer::Metrics { bars: 500, sharpe_daily: 0.17, kurtosis: 3.0, ..Default::default() };
+    let metrics = cmsq_core::scorer::Metrics {
+        bars: 500,
+        sharpe_daily: 0.17,
+        kurtosis: 3.0,
+        ..Default::default()
+    };
     let (dsr, info) = o.dsr_for(&all, &metrics);
     let n20 = cmsq_core::scorer::deflated_sharpe_v(&metrics, dsr.sr_variance, 20);
-    println!("{info} DSR(N={})={} vs DSR(N=20)={}", dsr.trials, dsr.dsr, n20.dsr);
+    println!(
+        "{info} DSR(N={})={} vs DSR(N=20)={}",
+        dsr.trials, dsr.dsr, n20.dsr
+    );
     assert_eq!(dsr.trials, 100);
     assert_eq!(info["selections"], 100);
     assert!(n20.dsr >= 0.95 && dsr.dsr < 0.95, "crossing-threshold case");
-    assert!(info["counting_rule"].as_str().unwrap().contains("no correlation discount"));
+    assert!(info["counting_rule"]
+        .as_str()
+        .unwrap()
+        .contains("no correlation discount"));
 }
 
 /// #7: exact reruns dedupe; a different window, snapshot or params is a new trial.
 #[tokio::test]
 async fn trial_identity_dedupes_only_exact_reruns() {
     let (_d, o, _) = setup().await;
-    let n = |o: &Orchestrator| o.dsr_for(&o.store.trials().unwrap(), &Default::default()).1["selections"].as_u64().unwrap();
+    let n = |o: &Orchestrator| {
+        o.dsr_for(&o.store.trials().unwrap(), &Default::default()).1["selections"]
+            .as_u64()
+            .unwrap()
+    };
     trial(&o, "a", "SH600000", "snap1", 500, "p1");
     trial(&o, "b", "SH600000", "snap1", 500, "p1");
     assert_eq!(n(&o), 1, "identical rerun");
@@ -211,4 +243,105 @@ async fn trial_identity_dedupes_only_exact_reruns() {
     assert_eq!(n(&o), 3, "snapshot");
     trial(&o, "e", "SH600000", "snap1", 500, "p2");
     assert_eq!(n(&o), 4, "params");
+}
+
+/// #6: the probe's truncation cover spans the whole scored domain. A strategy whose
+/// signal[t] reads close[t+1] over a window of scored positions is caught for every
+/// seed (seeds 0..50 recorded here); a causal strategy is never flagged.
+#[test]
+fn probe_covers_the_whole_scored_domain() {
+    use cmsq_core::{market::Bar, probe};
+    let code = "import numpy as np\ndef generate_signals(df):\n    x=df.close.to_numpy()\n    p=np.zeros(len(x))\n    y=np.diff(x[:301])\n    p[:len(y)]=(y>0).astype(float)\n    return p\n";
+    assert!(cmsq_core::extract::static_risks(Some(code), "")
+        .iter()
+        .all(|r| r.code != "lookahead"));
+    let n = 1000;
+    let score_from = 200;
+    let bars: Vec<Bar> = (0..n)
+        .map(|i| {
+            let c = 100.0 + ((i * 7919) % 13) as f64 * 0.3;
+            Bar {
+                date: String::new(),
+                open: 100.0,
+                high: 105.0,
+                low: 99.0,
+                close: c,
+                volume: 1e6,
+                adj_factor: None,
+            }
+        })
+        .collect();
+    // signal[t] = close[t+1] > close[t] for t in [a, b) (needs bar t+1 to exist)
+    let cheat = |a: usize, b: usize| {
+        move |bs: &[Bar]| -> Vec<f64> {
+            let mut p = vec![0.0; bs.len()];
+            for t in a..b.min(bs.len().saturating_sub(1)) {
+                p[t] = if bs[t + 1].close > bs[t].close {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
+            p
+        }
+    };
+    let causal = |bs: &[Bar]| -> Vec<f64> {
+        (0..bs.len())
+            .map(|t| {
+                if t >= 5 && bs[t].close > bs[t - 5..t].iter().map(|b| b.close).sum::<f64>() / 5.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
+    let detected = |seed: u64, f: &dyn Fn(&[Bar]) -> Vec<f64>, from: usize| {
+        let mut rng = probe::Rng::new(seed);
+        let cfg = probe::ProbeConfig::default();
+        let (rc, tc) = probe::choose_cuts(bars.len(), from, &cfg, &mut rng);
+        let mc = probe::strata_cuts(bars.len(), from, &cfg, &mut rng);
+        let cuts: Vec<usize> = rc.iter().chain(&tc).copied().collect();
+        let plan = probe::plan_with_mirrors(&bars, &cuts, &rc, &mc, cfg.resamples, 0.095, &mut rng);
+        let full = plan.iter().find(|v| v.name == "full").unwrap();
+        let pos = f(&full.bars);
+        let dates: Vec<String> = full.bars.iter().map(|b| b.date.clone()).collect();
+        plan.iter()
+            .any(|v| probe::compare(&pos, v, &f(&v.bars), &dates).is_some())
+    };
+    let w = probe::stratum_width(980 - score_from);
+    for seed in 0..50 {
+        // reviewer's case: positions 0..300 peek (early prefix incl. scoring start)
+        assert!(
+            detected(seed, &cheat(0, 300), score_from),
+            "early prefix, seed {seed}"
+        );
+        // peeking only inside the scored domain, starting at the scoring start
+        assert!(
+            detected(seed, &cheat(score_from, score_from + 2 * w), score_from),
+            "scoring start, seed {seed}"
+        );
+        // mid-series only, and right at a dev/vault-like boundary region
+        assert!(
+            detected(seed, &cheat(517, 517 + 2 * w), score_from),
+            "mid, seed {seed}"
+        );
+        assert!(
+            detected(seed, &cheat(790, 790 + 2 * w), score_from),
+            "boundary, seed {seed}"
+        );
+        // tail only
+        assert!(
+            detected(seed, &cheat(n - 3, n), score_from),
+            "tail, seed {seed}"
+        );
+        assert!(
+            !detected(seed, &causal, score_from),
+            "false positive, seed {seed}"
+        );
+    }
+    // small series: duplicates removed, the scoring start is still always cut
+    let mut rng = probe::Rng::new(7);
+    let (_, tc) = probe::choose_cuts(60, 12, &probe::ProbeConfig::default(), &mut rng);
+    assert!(tc.contains(&12), "{tc:?}");
 }

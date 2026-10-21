@@ -193,7 +193,16 @@ impl TrialRow {
     /// selection dimension (symbol, data, window, allocation, params) is a new trial.
     /// No correlation discount is applied: the count is the conservative upper bound.
     pub fn selection_key(&self) -> String {
-        format!("{}|{}|{}|{}|{}|{}|{}", self.idea_key, self.params_hash, self.symbol, self.dataset_sha, self.bars, self.run_kind, self.group_id.as_deref().unwrap_or("-"))
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            self.idea_key,
+            self.params_hash,
+            self.symbol,
+            self.dataset_sha,
+            self.bars,
+            self.run_kind,
+            self.group_id.as_deref().unwrap_or("-")
+        )
     }
 }
 

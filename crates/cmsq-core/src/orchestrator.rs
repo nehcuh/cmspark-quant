@@ -1021,16 +1021,20 @@ impl Orchestrator {
         let seed = Rng::from_uuid().next_u64();
         let mut rng = Rng::new(seed);
         let view = probe::container_view(dev);
-        let (rcuts, tcuts) = probe::choose_cuts(dev_end, 10, &self.probe, &mut rng);
+        // probe the whole SCORED domain, from the first scored bar (issue #6)
+        let score_from = ((dev_end as f64) * self.warmup_frac) as usize;
+        let (rcuts, tcuts) = probe::choose_cuts(dev_end, score_from, &self.probe, &mut rng);
+        let mcuts = probe::strata_cuts(dev_end, score_from, &self.probe, &mut rng);
         let trunc: Vec<usize> = rcuts.iter().chain(&tcuts).copied().collect();
         let max_move = match &fut {
             Some(f) => f.limit_pct - 0.005,
             None => scorer::limit_pct(symbol, &dev[0].date) - 0.005,
         };
-        let plan = probe::plan(
+        let plan = probe::plan_with_mirrors(
             &view,
             &trunc,
             &rcuts,
+            &mcuts,
             self.probe.resamples,
             max_move,
             &mut rng,
@@ -1038,7 +1042,7 @@ impl Orchestrator {
         self.store.audit("sandbox", "sandbox_start", Some(&s.id), json!({"job": job_id, "backend": exec.name(), "hardened": exec.hardened(),
             "runner_identity": identity, "limits": self.limits, "symbol": symbol, "data_source": meta.source, "run_kind": run_kind, "group": group, "params": params,
             "dev_window": {"start": dev[0].date, "end": dev[dev_end - 1].date, "bars": dev_end}, "vault_bars": bars.len() - dev_end,
-            "dataset_sha256": dataset_sha, "probe": {"seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "config": self.probe, "container_dates": "fake weekday sequence from 2000-01-03"},
+            "dataset_sha256": dataset_sha, "probe": {"seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "mirror_cuts": mcuts, "score_from": score_from, "config": self.probe, "container_dates": "fake weekday sequence from 2000-01-03"},
             "variants": plan.iter().map(|v| &v.name).collect::<Vec<_>>()}), true)?;
         self.log(&format!(
             "job {} [{run_kind}] {symbol}: {} variants, one fresh container each, random order",
@@ -1245,7 +1249,11 @@ impl Orchestrator {
             .map(|t| (t.idea_key.as_str(), t.params_hash.as_str()))
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        let selections = all.iter().map(|t| t.selection_key()).collect::<std::collections::BTreeSet<_>>().len();
+        let selections = all
+            .iter()
+            .map(|t| t.selection_key())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let clusters = all
             .iter()
             .map(|t| t.idea_key.as_str())
@@ -2076,8 +2084,9 @@ impl Orchestrator {
         let (mut rcuts, tcuts) = probe::choose_cuts(n, dev_end + 1, &vcfg, &mut rng);
         rcuts.insert(0, dev_end);
         let trunc: Vec<usize> = rcuts.iter().chain(&tcuts).copied().collect();
-        let plan = probe::plan(&view, &trunc, &rcuts, 1, lim, &mut rng);
-        self.store.audit("sandbox", "vault_probe_plan", Some(&s.id), json!({"job": job_id, "seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "dataset_sha256": dev_sha}), true)?;
+        let mcuts = probe::strata_cuts(n, dev_end + 1, &vcfg, &mut rng);
+        let plan = probe::plan_with_mirrors(&view, &trunc, &rcuts, &mcuts, 1, lim, &mut rng);
+        self.store.audit("sandbox", "vault_probe_plan", Some(&s.id), json!({"job": job_id, "seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "mirror_cuts": mcuts, "dataset_sha256": dev_sha}), true)?;
         // the vault runs the exact parameters that were gated (sweep winner included)
         let params = dev_job
             .result
