@@ -42,3 +42,26 @@ This imports the old key as key 0. Start the signer, set `CMSQ_AUDIT_SIGNER`, th
 - `signer::tests`: append-only, rotation, permission refusal
 - `tests/audit_signer.rs`: edit, truncation and git-rewrite detection through the store
 - `scripts/signer_e2e.sh`: a real separate OS user; the app user gets "permission denied" on the key, and a forged edit is detected
+
+## 显式登记（取代首次信任）与迁移
+
+签名进程不再自动接受没见过的审计链。新工作区先由运维（能写签名目录的用户）登记：
+
+```bash
+sudo env CMSQ_AUDIT_SIGNER=/run/cmsq-signer/sock cmsq --home /srv/cmsq audit signer-enroll --signer-dir /var/lib/cmsq-signer
+sudo chown -R cmsq-signer:cmsq-signer /var/lib/cmsq-signer/enroll
+```
+
+登记会钉住链的当前链头（新链为 seq 0）。签名进程只接受从这个链头往后接，同一序号的重试必须与原消息逐字节相同，因此也无法替换最新一条。
+
+已有 `audit.key` 的工作区用迁移命令：
+
+```bash
+cmsq --home /srv/cmsq audit migrate-to-signer --signer-dir /var/lib/cmsq-signer --socket /run/cmsq-signer/sock
+```
+
+它导入密钥为 key 0、按已验证的链头登记，然后**通过签名进程的 socket** 重新验证整条链；只有验证通过才覆写并删除应用侧的 `audit.key`。签名进程需要在导入后重启一次以加载 key 0（未加载时命令会拒绝并保留密钥，重跑即可，导入和登记都是幂等的）。部署默认使用签名进程模式（`CMSQ_AUDIT_SIGNER`）。
+
+## 锚点仓库
+
+锚点推送到私有仓库 `github.com/nehcuh/cmspark-quant-anchors`。部署时把它克隆到 `/srv/cmsq-anchors`，配置 SSH 提交签名（`gpg.format ssh`，`user.signingkey`），由 `deploy/systemd/cmsq-anchor.timer` 每小时执行 `audit anchor-git --sign --push`；`audit verify-git` 校验历史上所有锚点。签名公钥若要在 GitHub 上显示 Verified，需要把它作为 signing key 添加到账号。

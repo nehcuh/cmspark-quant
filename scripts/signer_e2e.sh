@@ -21,6 +21,10 @@ echo "--- app user cannot read the key:"
 if cat $SD/keys/1.key 2>/dev/null || ls $SD 2>/dev/null; then echo "FAIL: key readable"; exit 1; else echo "ok: permission denied"; fi
 H=$(mktemp -d /tmp/cmsq-signer-e2e.XXXX)
 export CMSQ_DB=sqlite CMSQ_AUDIT_SIGNER=$RD/sock CMSQ_SECRETS_DIR=$H/secrets
+# explicit enrollment (operator/root writes the signer dir; replaces trust-on-first-use)
+sudo env CMSQ_DB=sqlite CMSQ_AUDIT_SIGNER=$RD/sock CMSQ_SECRETS_DIR=$H/secrets "$BIN" --home $H/ws audit signer-enroll --signer-dir $SD
+sudo chown -R cmsq-signer:cmsq-signer $SD/enroll
+sudo chown -R "$(id -u)" $H/secrets
 "$BIN" --home $H/ws init >/dev/null
 "$BIN" --home $H/ws audit verify
 REPO=$H/anchors; git init -q $REPO

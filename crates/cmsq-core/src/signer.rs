@@ -7,8 +7,12 @@
 //! only `seq == head+1 && prev == head_mac` (or a retry of the head itself, for a DB
 //! commit that failed after signing). So even an attacker who controls the app cannot
 //! get MACs to rewrite history; `verify` answers yes/no and never reveals a MAC.
-//! A chain the signer has never seen is adopted at its first request (TOFU), which
-//! allows migrating an existing workspace.
+//! A chain the signer has never seen is REFUSED: the operator must pin it first with
+//! `cmsq audit signer-enroll` (writes `enroll/<chain>.json` into the signer directory,
+//! which the app cannot write). The enrollment pins the chain's current head (seq, mac;
+//! seq 0 = empty chain), so a compromised app can neither adopt a forged chain nor start
+//! a second one. A head retry is only answered for the byte-identical message (hash
+//! pinned), closing the "replace the latest entry" window.
 //!
 //! Key rotation: `cmsq signer rotate` adds key N+1 to the key directory. Each chain
 //! records epochs (from_seq, key id); the next entry starts a new epoch under the newest
@@ -95,6 +99,25 @@ pub struct ChainState {
     pub prev: String,
     /// (from_seq, key id), ascending
     pub epochs: Vec<(i64, u32)>,
+    /// sha256 of the head message: a retry must be byte-identical
+    #[serde(default)]
+    pub msg_sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Enrollment {
+    pub chain: String,
+    /// current head seq (0 = empty chain, next entry is seq 1 from GENESIS)
+    pub seq: i64,
+    /// current head mac (GENESIS when seq == 0)
+    pub mac: String,
+}
+
+fn valid_chain(c: &str) -> bool {
+    !c.is_empty()
+        && c.len() <= 128
+        && c.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 pub struct SignerCore {
@@ -170,8 +193,57 @@ impl SignerCore {
         let k = hex::decode(key_hex.trim()).context("hex")?;
         ensure!(k.len() >= 16, "key too short");
         let p = kd.join("0.key");
-        ensure!(!p.exists(), "key 0 already exists");
+        if p.exists() {
+            // idempotent re-run of a migration; a DIFFERENT key 0 is refused
+            ensure!(
+                std::fs::read_to_string(&p)?.trim() == hex::encode(&k),
+                "a different key 0 already exists"
+            );
+            return Ok(());
+        }
         write_private(&p, hex::encode(&k).as_bytes())
+    }
+    /// Operator-side: pin a chain at its current head. Needs write access to the signer
+    /// directory (the app has none). Works while the signer is running.
+    pub fn enroll(dir: &Path, e: &Enrollment) -> Result<()> {
+        check_private(dir, true)?;
+        ensure!(valid_chain(&e.chain), "bad chain id");
+        ensure!(e.seq >= 0, "bad seq");
+        ensure!(
+            (e.seq == 0) == (e.mac == GENESIS),
+            "seq 0 iff mac == GENESIS"
+        );
+        let ed = dir.join("enroll");
+        if !ed.exists() {
+            std::fs::create_dir(&ed)?;
+            std::fs::set_permissions(&ed, std::fs::Permissions::from_mode(0o700))?;
+        }
+        check_private(&ed, true)?;
+        let p = ed.join(format!("{}.json", e.chain));
+        if p.exists() {
+            let old: Enrollment = serde_json::from_str(&std::fs::read_to_string(&p)?)?;
+            ensure!(
+                old.seq == e.seq && old.mac == e.mac,
+                "chain {} already enrolled at a different head",
+                e.chain
+            );
+            return Ok(());
+        }
+        write_private(&p, serde_json::to_string(e)?.as_bytes())
+    }
+    fn enrollment(&self, chain: &str) -> Result<Option<Enrollment>> {
+        if !valid_chain(chain) {
+            return Ok(None);
+        }
+        let p = self.dir.join("enroll").join(format!("{chain}.json"));
+        if !p.exists() {
+            return Ok(None);
+        }
+        check_private(&self.dir.join("enroll"), true)?;
+        check_private(&p, false)?;
+        let e: Enrollment = serde_json::from_str(&std::fs::read_to_string(&p)?)?;
+        ensure!(e.chain == chain, "enrollment file mismatch");
+        Ok(Some(e))
     }
     pub fn rotate(&mut self) -> Result<u32> {
         let id = self.keys.keys().next_back().map(|x| x + 1).unwrap_or(1);
@@ -221,18 +293,37 @@ impl SignerCore {
                     "message does not encode the claimed seq/prev"
                 );
                 let cur = self.current();
-                let st = self.state.entry(chain.clone()).or_default();
-                let fresh = st.seq == 0 && st.mac.is_empty();
+                if !self.state.contains_key(&chain) {
+                    let Some(e) = self.enrollment(&chain)? else {
+                        bail!("chain {chain:?} is not enrolled with this signer (run `cmsq audit signer-enroll`)");
+                    };
+                    ensure!(
+                        seq == e.seq + 1 && prev == e.mac,
+                        "refusing to sign seq {seq}: enrolled head is seq {}",
+                        e.seq
+                    );
+                    self.state.insert(
+                        chain.clone(),
+                        ChainState {
+                            seq: e.seq,
+                            mac: e.mac.clone(),
+                            prev: String::new(),
+                            epochs: vec![],
+                            msg_sha: String::new(),
+                        },
+                    );
+                }
+                let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&msg));
+                let st = self.state.get_mut(&chain).unwrap();
                 let next = st.seq + 1 == seq && st.mac == prev;
-                let retry = seq == st.seq && prev == st.prev && !fresh;
-                let adopt = fresh && (seq == 1 && prev == GENESIS || seq > 1);
+                let retry =
+                    seq == st.seq && prev == st.prev && !st.msg_sha.is_empty() && st.msg_sha == sha;
                 ensure!(
-                    next || retry || adopt,
-                    "refusing to sign seq {seq}: chain head is seq {} (signer is append-only)",
+                    next || retry,
+                    "refusing to sign seq {seq}: chain head is seq {} (signer is append-only; a head retry must be byte-identical)",
                     st.seq
                 );
                 if st.epochs.last().map(|e| e.1) != Some(cur) {
-                    // new epoch at this seq (first use or after a rotation)
                     st.epochs.retain(|e| e.0 < seq);
                     st.epochs.push((seq, cur));
                 }
@@ -242,6 +333,7 @@ impl SignerCore {
                     mac: mac.clone(),
                     prev,
                     epochs: st.epochs.clone(),
+                    msg_sha: sha,
                 };
                 self.persist()?;
                 Ok(json!({"ok": true, "mac": mac}))
@@ -386,6 +478,7 @@ mod tests {
     fn append_only_no_rewrite_no_mac_oracle_for_old_entries() {
         let d = dir();
         let mut c = SignerCore::open(d.path()).unwrap();
+        enroll0(d.path());
         let m1 = sign(&mut c, 1, GENESIS)["mac"]
             .as_str()
             .unwrap()
@@ -426,6 +519,7 @@ mod tests {
     fn rotation_keeps_old_segment_verifiable() {
         let d = dir();
         let mut c = SignerCore::open(d.path()).unwrap();
+        enroll0(d.path());
         let m1 = sign(&mut c, 1, GENESIS)["mac"]
             .as_str()
             .unwrap()
@@ -443,6 +537,70 @@ mod tests {
                 "seq {seq}"
             );
         }
+    }
+
+    fn enroll0(p: &Path) {
+        SignerCore::enroll(
+            p,
+            &Enrollment {
+                chain: "c".into(),
+                seq: 0,
+                mac: GENESIS.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn unenrolled_chain_refused_and_enrollment_pins_head() {
+        let d = dir();
+        let mut c = SignerCore::open(d.path()).unwrap();
+        // no TOFU: neither genesis nor mid-chain adoption without enrollment
+        assert_eq!(sign(&mut c, 1, GENESIS)["ok"], false);
+        assert_eq!(sign(&mut c, 7, "ab")["ok"], false);
+        SignerCore::enroll(
+            d.path(),
+            &Enrollment {
+                chain: "c".into(),
+                seq: 6,
+                mac: "ab".into(),
+            },
+        )
+        .unwrap();
+        // must continue exactly from the pinned head
+        assert_eq!(sign(&mut c, 7, "cd")["ok"], false);
+        assert_eq!(sign(&mut c, 1, GENESIS)["ok"], false);
+        assert_eq!(sign(&mut c, 7, "ab")["ok"], true);
+        // re-enrolling at a different head is refused (identical re-run is a no-op)
+        assert!(SignerCore::enroll(
+            d.path(),
+            &Enrollment {
+                chain: "c".into(),
+                seq: 0,
+                mac: GENESIS.into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn head_retry_must_be_byte_identical() {
+        let d = dir();
+        let mut c = SignerCore::open(d.path()).unwrap();
+        enroll0(d.path());
+        let m1 = sign(&mut c, 1, GENESIS)["mac"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(sign(&mut c, 1, GENESIS)["mac"], m1.as_str());
+        // a different message for the same (seq, prev) = replacing the head: refused
+        let other = entry_message(GENESIS, 1, "t", "a", "FORGED", None, "{}", true);
+        assert_eq!(
+            c.handle(
+                &json!({"op":"sign","chain":"c","seq":1,"prev":GENESIS,"msg":hex::encode(other)})
+            )["ok"],
+            false
+        );
     }
 
     #[test]
