@@ -183,9 +183,9 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
         if !i.synthetic {
             "real market data".into()
         } else if cfg.allow_synthetic {
-            "SYNTHETIC sample, allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into()
+            "NOT attested real data (sample/csv/unknown signed source), allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into()
         } else {
-            "SYNTHETIC sample data cannot pass the gate".into()
+            "signed data source is not an independent real-market fetch (sample/csv/unknown): cannot pass the gate".into()
         },
     );
     check(

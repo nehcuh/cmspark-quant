@@ -1162,7 +1162,7 @@ impl Orchestrator {
         trial["params_hash"] = json!(phash);
         trial["ledger_position"] = json!(all.len());
         trial["near_duplicates_of"] = json!(near_dups);
-        let synthetic = meta.source == "sample";
+        let synthetic = !attested_real_data(att, symbol);
         let capacity = scorer::capacity(
             dev,
             &sim,
@@ -1172,7 +1172,7 @@ impl Orchestrator {
             0.05,
         );
         let result = json!({
-            "schema_version": 3, "synthetic_data": synthetic, "capacity_cny": capacity, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL },
+            "schema_version": 3, "synthetic_data": synthetic, "data_class_source": att["source"], "capacity_cny": capacity, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL },
             "market": if fut.is_some() { "cn_futures" } else { "cn_ashare" }, "futures_spec": fut,
             "run_kind": run_kind, "group_id": group, "params": params,
             "costs": self.costs, "initial_capital": scorer::INITIAL_CAPITAL, "runner_identity": identity, "backend": exec.name(), "hardened": exec.hardened(),
@@ -2420,3 +2420,14 @@ trait Pipe: Sized {
     }
 }
 impl Pipe for serde_json::Value {}
+
+/// Sources whose fetches are independent real-market downloads. Only the signed
+/// (audited, HMAC-chained) fetch attestation decides the class; the editable
+/// `<symbol>.meta.json` never does (issue #5). Anything else (bundled samples,
+/// user CSV imports, unknown or missing source) fails closed as non-real.
+pub const REAL_DATA_SOURCES: &[&str] = &["tushare", "rstdx"];
+
+pub fn attested_real_data(att: &serde_json::Value, symbol: &str) -> bool {
+    let src = att["source"].as_str().unwrap_or("");
+    REAL_DATA_SOURCES.contains(&src) && !symbol.starts_with("SAMPLE_")
+}
