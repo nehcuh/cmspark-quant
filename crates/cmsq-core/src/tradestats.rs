@@ -73,8 +73,17 @@ pub fn round_trips(fills: &[Fill], mult: f64) -> (Vec<RoundTrip>, f64, f64) {
                     let take = o.2.abs().min(left.abs());
                     let side = o.2.signum();
                     let pnl = side * take * (f.adj_price - o.3) * mult - take * (o.4 + unit_cost);
-                    out.push(RoundTrip { entry_date: o.1.clone(), exit_date: f.date.clone(), side: side as i8, qty: take, entry_price: o.3, exit_price: f.adj_price,
-                        bars_held: f.t.saturating_sub(o.0), exit_t: f.t, pnl });
+                    out.push(RoundTrip {
+                        entry_date: o.1.clone(),
+                        exit_date: f.date.clone(),
+                        side: side as i8,
+                        qty: take,
+                        entry_price: o.3,
+                        exit_price: f.adj_price,
+                        bars_held: f.t.saturating_sub(o.0),
+                        exit_t: f.t,
+                        pnl,
+                    });
                     o.2 -= side * take;
                     left += side * take;
                     if o.2.abs() <= 1e-9 {
@@ -105,19 +114,39 @@ pub fn stats(fills: &[Fill], mult: f64) -> TradeStats {
 pub fn stats_window(fills: &[Fill], mult: f64, from_t: usize) -> TradeStats {
     let (rts, roll, open) = round_trips(fills, mult);
     let rts: Vec<RoundTrip> = rts.into_iter().filter(|r| r.exit_t >= from_t).collect();
-    let roll = if from_t == 0 { roll } else { fills.iter().filter(|f| f.kind.starts_with("roll") && f.t >= from_t).map(|f| f.cost).sum() };
+    let roll = if from_t == 0 {
+        roll
+    } else {
+        fills
+            .iter()
+            .filter(|f| f.kind.starts_with("roll") && f.t >= from_t)
+            .map(|f| f.cost)
+            .sum()
+    };
     let mut merged: Vec<RoundTrip> = vec![];
     for r in rts {
         match merged.last_mut() {
-            Some(m) if m.entry_date == r.entry_date && m.exit_date == r.exit_date && m.side == r.side => {
+            Some(m)
+                if m.entry_date == r.entry_date
+                    && m.exit_date == r.exit_date
+                    && m.side == r.side =>
+            {
                 m.pnl += r.pnl;
                 m.qty += r.qty;
             }
             _ => merged.push(r),
         }
     }
-    let wins: Vec<f64> = merged.iter().filter(|r| r.pnl > 0.0).map(|r| r.pnl).collect();
-    let losses: Vec<f64> = merged.iter().filter(|r| r.pnl <= 0.0).map(|r| r.pnl).collect();
+    let wins: Vec<f64> = merged
+        .iter()
+        .filter(|r| r.pnl > 0.0)
+        .map(|r| r.pnl)
+        .collect();
+    let losses: Vec<f64> = merged
+        .iter()
+        .filter(|r| r.pnl <= 0.0)
+        .map(|r| r.pnl)
+        .collect();
     let n = merged.len();
     let mean = |v: &[f64]| (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64);
     let (aw, al) = (mean(&wins), mean(&losses));
@@ -145,16 +174,36 @@ pub fn stats_window(fills: &[Fill], mult: f64, from_t: usize) -> TradeStats {
 mod tests {
     use super::*;
     fn f(t: usize, qty: f64, px: f64, cost: f64) -> Fill {
-        Fill { t, date: format!("d{t:03}"), qty, price: px, adj_price: px, cost, kind: if qty > 0.0 { "buy".into() } else { "sell".into() } }
+        Fill {
+            t,
+            date: format!("d{t:03}"),
+            qty,
+            price: px,
+            adj_price: px,
+            cost,
+            kind: if qty > 0.0 {
+                "buy".into()
+            } else {
+                "sell".into()
+            },
+        }
     }
 
     #[test]
     fn fifo_round_trips_and_ratios() {
         // win 100*(11-10)-2 = 98 held 3; loss 100*(9-10)-2 = -102 held 2; open 50 left
-        let fl = vec![f(1, 100.0, 10.0, 1.0), f(4, -100.0, 11.0, 1.0), f(5, 150.0, 10.0, 1.5), f(7, -100.0, 9.0, 1.0)];
+        let fl = vec![
+            f(1, 100.0, 10.0, 1.0),
+            f(4, -100.0, 11.0, 1.0),
+            f(5, 150.0, 10.0, 1.5),
+            f(7, -100.0, 9.0, 1.0),
+        ];
         let s = stats(&fl, 1.0);
         assert_eq!((s.round_trips, s.wins, s.losses), (2, 1, 1));
-        assert!((s.avg_win.unwrap() - 98.0).abs() < 1e-9 && (s.avg_loss.unwrap() + 102.0).abs() < 1e-9, "{s:?}");
+        assert!(
+            (s.avg_win.unwrap() - 98.0).abs() < 1e-9 && (s.avg_loss.unwrap() + 102.0).abs() < 1e-9,
+            "{s:?}"
+        );
         assert!((s.pl_ratio.unwrap() - 98.0 / 102.0).abs() < 1e-9);
         assert_eq!(s.win_rate, Some(0.5));
         assert_eq!(s.avg_bars_held, Some(2.5));
@@ -165,7 +214,11 @@ mod tests {
     #[test]
     fn short_and_flip_with_multiplier() {
         // short 2 lots at 4000, buy 3 at 3900: closes short (+2*100*10 = 2000) and opens 1 long
-        let fl = vec![f(1, -2.0, 4000.0, 0.0), f(3, 3.0, 3900.0, 0.0), f(5, -1.0, 3950.0, 0.0)];
+        let fl = vec![
+            f(1, -2.0, 4000.0, 0.0),
+            f(3, 3.0, 3900.0, 0.0),
+            f(5, -1.0, 3950.0, 0.0),
+        ];
         let s = stats(&fl, 10.0);
         assert_eq!(s.round_trips, 2);
         assert!((s.net_pnl - (2000.0 + 500.0)).abs() < 1e-9, "{s:?}");
@@ -178,22 +231,40 @@ mod tests {
         assert_eq!((s.round_trips, s.win_rate, s.pl_ratio), (0, None, None));
         let mut r = f(2, -1.0, 100.0, 5.0);
         r.kind = "roll_close".into();
-        let s = stats(&[f(1, 1.0, 100.0, 0.0), r.clone(), Fill { qty: 1.0, ..r }, f(3, -1.0, 110.0, 0.0)], 1.0);
+        let s = stats(
+            &[
+                f(1, 1.0, 100.0, 0.0),
+                r.clone(),
+                Fill { qty: 1.0, ..r },
+                f(3, -1.0, 110.0, 0.0),
+            ],
+            1.0,
+        );
         assert_eq!(s.round_trips, 1);
         assert!((s.roll_costs - 10.0).abs() < 1e-9 && (s.net_pnl - 10.0).abs() < 1e-9);
     }
 
     #[test]
     fn window_keeps_trade_opened_before_it() {
-        let fl = vec![f(1, 100.0, 10.0, 0.0), f(4, -100.0, 11.0, 0.0), f(6, 100.0, 10.0, 0.0), f(9, -100.0, 12.0, 0.0)];
+        let fl = vec![
+            f(1, 100.0, 10.0, 0.0),
+            f(4, -100.0, 11.0, 0.0),
+            f(6, 100.0, 10.0, 0.0),
+            f(9, -100.0, 12.0, 0.0),
+        ];
         let s = stats_window(&fl, 1.0, 8);
         assert_eq!((s.round_trips, s.wins), (1, 1));
-        assert!((s.net_pnl - 200.0).abs() < 1e-9 && s.avg_bars_held == Some(3.0), "{s:?}");
+        assert!(
+            (s.net_pnl - 200.0).abs() < 1e-9 && s.avg_bars_held == Some(3.0),
+            "{s:?}"
+        );
     }
 
     #[test]
     fn gate_never_uses_trade_stats() {
         let src = include_str!("gate.rs");
-        assert!(!src.contains("tradestats") && !src.contains("TradeStats") && !src.contains("win_rate"));
+        assert!(
+            !src.contains("tradestats") && !src.contains("TradeStats") && !src.contains("win_rate")
+        );
     }
 }

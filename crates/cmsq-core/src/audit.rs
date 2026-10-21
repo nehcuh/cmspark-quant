@@ -27,21 +27,46 @@ pub struct AuditConfig {
 
 impl std::fmt::Debug for AuditConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuditConfig").field("key", &"<redacted>").field("anchor", &self.anchor).finish()
+        f.debug_struct("AuditConfig")
+            .field("key", &"<redacted>")
+            .field("anchor", &self.anchor)
+            .finish()
     }
 }
 
 impl AuditConfig {
     /// Fixed key, no anchor — unit tests only.
     pub fn insecure_test() -> Self {
-        Self { key: b"cmsq-test-key-not-secret".to_vec(), anchor: None }
+        Self {
+            key: b"cmsq-test-key-not-secret".to_vec(),
+            anchor: None,
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn entry_hash(key: &[u8], prev_hash: &str, seq: i64, ts: &str, actor: &str, action: &str, target: Option<&str>, details: &str, success: bool) -> String {
+pub fn entry_hash(
+    key: &[u8],
+    prev_hash: &str,
+    seq: i64,
+    ts: &str,
+    actor: &str,
+    action: &str,
+    target: Option<&str>,
+    details: &str,
+    success: bool,
+) -> String {
     let mut h = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac accepts any key length");
-    for part in [prev_hash, &seq.to_string(), ts, actor, action, target.unwrap_or(""), details, if success { "1" } else { "0" }] {
+    for part in [
+        prev_hash,
+        &seq.to_string(),
+        ts,
+        actor,
+        action,
+        target.unwrap_or(""),
+        details,
+        if success { "1" } else { "0" },
+    ] {
         h.update(&(part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
     }
@@ -52,7 +77,10 @@ pub fn append_anchor(path: &Path, seq: i64, hash: &str, ts: &str) -> std::io::Re
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(f, "{seq} {hash} {ts}")?;
     f.sync_data()
 }
@@ -89,11 +117,27 @@ mod tests {
     fn mac_changes_with_any_field_and_key() {
         let k = b"k1";
         let a = entry_hash(k, GENESIS, 1, "t", "u", "x", Some("id"), "{}", true);
-        assert_ne!(a, entry_hash(k, GENESIS, 1, "t", "u", "x", Some("id"), "{}", false));
-        assert_ne!(a, entry_hash(k, GENESIS, 2, "t", "u", "x", Some("id"), "{}", true));
-        assert_ne!(a, entry_hash(k, GENESIS, 1, "t", "u", "x", Some("id2"), "{}", true));
-        assert_ne!(a, entry_hash(b"k2", GENESIS, 1, "t", "u", "x", Some("id"), "{}", true), "keyed");
-        assert_ne!(entry_hash(k, GENESIS, 1, "t", "ab", "c", None, "{}", true), entry_hash(k, GENESIS, 1, "t", "a", "bc", None, "{}", true));
+        assert_ne!(
+            a,
+            entry_hash(k, GENESIS, 1, "t", "u", "x", Some("id"), "{}", false)
+        );
+        assert_ne!(
+            a,
+            entry_hash(k, GENESIS, 2, "t", "u", "x", Some("id"), "{}", true)
+        );
+        assert_ne!(
+            a,
+            entry_hash(k, GENESIS, 1, "t", "u", "x", Some("id2"), "{}", true)
+        );
+        assert_ne!(
+            a,
+            entry_hash(b"k2", GENESIS, 1, "t", "u", "x", Some("id"), "{}", true),
+            "keyed"
+        );
+        assert_ne!(
+            entry_hash(k, GENESIS, 1, "t", "ab", "c", None, "{}", true),
+            entry_hash(k, GENESIS, 1, "t", "a", "bc", None, "{}", true)
+        );
     }
     #[test]
     fn anchor_roundtrip() {

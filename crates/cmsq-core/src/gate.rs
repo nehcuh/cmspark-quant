@@ -38,11 +38,26 @@ pub struct GateConfig {
 
 impl Default for GateConfig {
     fn default() -> Self {
-        Self { min_bars: 250, min_sharpe: 0.5, min_dsr: 0.95, min_positive_folds: 3, max_drawdown_floor: -0.35, min_exposure: 0.05,
-            require_hardened_backend: true, require_adjusted_data: true,
-            dsr_min_trials: std::env::var("CMSQ_DSR_MIN_TRIALS").ok().and_then(|v| v.parse().ok()).unwrap_or(20), require_beat_buy_hold: true,
+        Self {
+            min_bars: 250,
+            min_sharpe: 0.5,
+            min_dsr: 0.95,
+            min_positive_folds: 3,
+            max_drawdown_floor: -0.35,
+            min_exposure: 0.05,
+            require_hardened_backend: true,
+            require_adjusted_data: true,
+            dsr_min_trials: std::env::var("CMSQ_DSR_MIN_TRIALS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            require_beat_buy_hold: true,
             allow_synthetic: std::env::var("CMSQ_ALLOW_SYNTHETIC").is_ok_and(|v| v == "1"),
-            min_capacity: std::env::var("CMSQ_GATE_MIN_CAPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(crate::scorer::INITIAL_CAPITAL) }
+            min_capacity: std::env::var("CMSQ_GATE_MIN_CAPACITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::scorer::INITIAL_CAPITAL),
+        }
     }
 }
 
@@ -78,12 +93,16 @@ pub struct GateOutcome {
 }
 
 pub fn runner_version_ok(identity: Option<&str>) -> bool {
-    identity.is_some_and(|i| i.split('|').any(|p| p == format!("cmsq.runner.version={RUNNER_VERSION}")))
+    identity.is_some_and(|i| {
+        i.split('|')
+            .any(|p| p == format!("cmsq.runner.version={RUNNER_VERSION}"))
+    })
 }
 
 /// Label AND image digest must match; the digest is the id recorded at build time.
 pub fn runner_pinned(identity: Option<&str>, expected: Option<&str>) -> bool {
-    runner_version_ok(identity) && expected.is_some_and(|e| identity.is_some_and(|i| i.split('|').next() == Some(e)))
+    runner_version_ok(identity)
+        && expected.is_some_and(|e| identity.is_some_and(|i| i.split('|').next() == Some(e)))
 }
 
 pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
@@ -95,44 +114,178 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
         }
         checks.push(json!({"name": name, "ok": ok, "detail": detail}));
     };
-    check("job_succeeded", i.job_status == "succeeded", format!("job status {}", i.job_status));
-    check("hardened_sandbox", i.hardened || !cfg.require_hardened_backend,
-        if i.hardened { "ran in hardened Docker sandbox".into() } else { "ran on DEV process backend — re-run on Docker to promote".into() });
-    check("runner_pinned", runner_pinned(i.runner_identity, i.expected_runner) || !cfg.require_hardened_backend,
-        format!("runner identity {:?}; expected image {} with cmsq.runner.version={RUNNER_VERSION}", i.runner_identity.unwrap_or("none"),
-            i.expected_runner.unwrap_or("<not recorded: run scripts/build_runner.sh>")));
-    check("no_lookahead", !i.probe.detected && i.probe.containers >= i.probe.variants && i.probe.variants > 1,
-        if i.probe.detected { format!("positions changed when the future changed ({} variant(s))", i.probe.mismatches.len()) }
-        else { format!("{} variants in {} fresh containers, all consistent", i.probe.variants, i.probe.containers) });
-    check("static_risks", i.high_risks.is_empty(), if i.high_risks.is_empty() { "no high-severity static findings".into() } else { i.high_risks.join(", ") });
-    check("data_adjusted", i.data_adjusted || !cfg.require_adjusted_data,
-        if i.data_adjusted { "prices adjusted (or synthetic)".into() } else { "UNADJUSTED prices: ex-dividend gaps distort returns; import adjusted data (adj_factor)".into() });
-    check("data_cross_validated", i.data_validated.0, i.data_validated.1.clone());
-    check("real_market_data", !i.synthetic || cfg.allow_synthetic,
-        if !i.synthetic { "real market data".into() } else if cfg.allow_synthetic { "SYNTHETIC sample, allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into() } else { "SYNTHETIC sample data cannot pass the gate".into() });
-    check("capacity", i.capacity.is_some_and(|c| c >= cfg.min_capacity),
-        match i.capacity { Some(c) => format!("capacity ≈ ¥{:.0} at ≤5% of daily traded value on 90% of fills (min ¥{:.0})", c, cfg.min_capacity), None => "no fills to estimate capacity".into() });
-    check("min_bars", i.dev.bars >= cfg.min_bars, format!("{} evaluation bars (min {})", i.dev.bars, cfg.min_bars));
-    check("net_return_positive", i.dev.total_return > 0.0, format!("net return {:.2}%", i.dev.total_return * 100.0));
-    check("sharpe", i.dev.sharpe >= cfg.min_sharpe, format!("Sharpe {:.2} (min {:.2})", i.dev.sharpe, cfg.min_sharpe));
-    check("deflated_sharpe", i.dsr.dsr >= cfg.min_dsr,
-        format!("DSR {:.3} (min {:.2}) over N={} library trials, SR0/day {:.4}", i.dsr.dsr, cfg.min_dsr, i.dsr.trials, i.dsr.sr0_daily));
+    check(
+        "job_succeeded",
+        i.job_status == "succeeded",
+        format!("job status {}", i.job_status),
+    );
+    check(
+        "hardened_sandbox",
+        i.hardened || !cfg.require_hardened_backend,
+        if i.hardened {
+            "ran in hardened Docker sandbox".into()
+        } else {
+            "ran on DEV process backend — re-run on Docker to promote".into()
+        },
+    );
+    check(
+        "runner_pinned",
+        runner_pinned(i.runner_identity, i.expected_runner) || !cfg.require_hardened_backend,
+        format!(
+            "runner identity {:?}; expected image {} with cmsq.runner.version={RUNNER_VERSION}",
+            i.runner_identity.unwrap_or("none"),
+            i.expected_runner
+                .unwrap_or("<not recorded: run scripts/build_runner.sh>")
+        ),
+    );
+    check(
+        "no_lookahead",
+        !i.probe.detected && i.probe.containers >= i.probe.variants && i.probe.variants > 1,
+        if i.probe.detected {
+            format!(
+                "positions changed when the future changed ({} variant(s))",
+                i.probe.mismatches.len()
+            )
+        } else {
+            format!(
+                "{} variants in {} fresh containers, all consistent",
+                i.probe.variants, i.probe.containers
+            )
+        },
+    );
+    check(
+        "static_risks",
+        i.high_risks.is_empty(),
+        if i.high_risks.is_empty() {
+            "no high-severity static findings".into()
+        } else {
+            i.high_risks.join(", ")
+        },
+    );
+    check(
+        "data_adjusted",
+        i.data_adjusted || !cfg.require_adjusted_data,
+        if i.data_adjusted {
+            "prices adjusted (or synthetic)".into()
+        } else {
+            "UNADJUSTED prices: ex-dividend gaps distort returns; import adjusted data (adj_factor)"
+                .into()
+        },
+    );
+    check(
+        "data_cross_validated",
+        i.data_validated.0,
+        i.data_validated.1.clone(),
+    );
+    check(
+        "real_market_data",
+        !i.synthetic || cfg.allow_synthetic,
+        if !i.synthetic {
+            "real market data".into()
+        } else if cfg.allow_synthetic {
+            "SYNTHETIC sample, allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into()
+        } else {
+            "SYNTHETIC sample data cannot pass the gate".into()
+        },
+    );
+    check(
+        "capacity",
+        i.capacity.is_some_and(|c| c >= cfg.min_capacity),
+        match i.capacity {
+            Some(c) => format!(
+                "capacity ≈ ¥{:.0} at ≤5% of daily traded value on 90% of fills (min ¥{:.0})",
+                c, cfg.min_capacity
+            ),
+            None => "no fills to estimate capacity".into(),
+        },
+    );
+    check(
+        "min_bars",
+        i.dev.bars >= cfg.min_bars,
+        format!("{} evaluation bars (min {})", i.dev.bars, cfg.min_bars),
+    );
+    check(
+        "net_return_positive",
+        i.dev.total_return > 0.0,
+        format!("net return {:.2}%", i.dev.total_return * 100.0),
+    );
+    check(
+        "sharpe",
+        i.dev.sharpe >= cfg.min_sharpe,
+        format!("Sharpe {:.2} (min {:.2})", i.dev.sharpe, cfg.min_sharpe),
+    );
+    check(
+        "deflated_sharpe",
+        i.dsr.dsr >= cfg.min_dsr,
+        format!(
+            "DSR {:.3} (min {:.2}) over N={} library trials, SR0/day {:.4}",
+            i.dsr.dsr, cfg.min_dsr, i.dsr.trials, i.dsr.sr0_daily
+        ),
+    );
     let pos = i.folds.iter().filter(|f| f.total_return > 0.0).count();
-    check("walk_forward", pos >= cfg.min_positive_folds.min(i.folds.len()) && !i.folds.is_empty(),
-        format!("{pos}/{} walk-forward folds positive (min {})", i.folds.len(), cfg.min_positive_folds));
-    check("cost_stress_2x", i.dev_cost_2x.total_return > 0.0, format!("net return with 2x costs {:.2}%", i.dev_cost_2x.total_return * 100.0));
-    check("max_drawdown", i.dev.max_drawdown >= cfg.max_drawdown_floor, format!("max DD {:.1}% (floor {:.0}%)", i.dev.max_drawdown * 100.0, cfg.max_drawdown_floor * 100.0));
-    check("beats_buy_and_hold", !cfg.require_beat_buy_hold || i.dev.sharpe > i.buy_hold.sharpe,
-        format!("Sharpe {:.2} vs buy-and-hold {:.2} (return {:+.1}% vs {:+.1}%)", i.dev.sharpe, i.buy_hold.sharpe, i.dev.total_return * 100.0, i.buy_hold.total_return * 100.0));
-    check("exposure", i.dev.exposure >= cfg.min_exposure, format!("avg exposure {:.1}%", i.dev.exposure * 100.0));
-    GateOutcome { passed: reasons.is_empty(), reasons, checks: json!({"checks": checks, "config": cfg, "dsr": i.dsr}) }
+    check(
+        "walk_forward",
+        pos >= cfg.min_positive_folds.min(i.folds.len()) && !i.folds.is_empty(),
+        format!(
+            "{pos}/{} walk-forward folds positive (min {})",
+            i.folds.len(),
+            cfg.min_positive_folds
+        ),
+    );
+    check(
+        "cost_stress_2x",
+        i.dev_cost_2x.total_return > 0.0,
+        format!(
+            "net return with 2x costs {:.2}%",
+            i.dev_cost_2x.total_return * 100.0
+        ),
+    );
+    check(
+        "max_drawdown",
+        i.dev.max_drawdown >= cfg.max_drawdown_floor,
+        format!(
+            "max DD {:.1}% (floor {:.0}%)",
+            i.dev.max_drawdown * 100.0,
+            cfg.max_drawdown_floor * 100.0
+        ),
+    );
+    check(
+        "beats_buy_and_hold",
+        !cfg.require_beat_buy_hold || i.dev.sharpe > i.buy_hold.sharpe,
+        format!(
+            "Sharpe {:.2} vs buy-and-hold {:.2} (return {:+.1}% vs {:+.1}%)",
+            i.dev.sharpe,
+            i.buy_hold.sharpe,
+            i.dev.total_return * 100.0,
+            i.buy_hold.total_return * 100.0
+        ),
+    );
+    check(
+        "exposure",
+        i.dev.exposure >= cfg.min_exposure,
+        format!("avg exposure {:.1}%", i.dev.exposure * 100.0),
+    );
+    GateOutcome {
+        passed: reasons.is_empty(),
+        reasons,
+        checks: json!({"checks": checks, "config": cfg, "dsr": i.dsr}),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn m(ret: f64, sharpe: f64) -> Metrics {
-        Metrics { bars: 700, total_return: ret, sharpe, sharpe_daily: sharpe / 252f64.sqrt(), kurtosis: 3.0, max_drawdown: -0.1, exposure: 0.5, ..Default::default() }
+        Metrics {
+            bars: 700,
+            total_return: ret,
+            sharpe,
+            sharpe_daily: sharpe / 252f64.sqrt(),
+            kurtosis: 3.0,
+            max_drawdown: -0.1,
+            exposure: 0.5,
+            ..Default::default()
+        }
     }
     struct Fx {
         dev: Metrics,
@@ -146,24 +299,70 @@ mod tests {
     fn fx() -> Fx {
         let dev = m(0.3, 1.2);
         let dsr = crate::scorer::deflated_sharpe(&dev, &[dev.sharpe_daily]);
-        Fx { c2: m(0.2, 1.0), folds: vec![m(0.05, 1.0); 4], dsr, probe: ProbeReport { detected: false, variants: 10, containers: 10, ..Default::default() }, risks: vec![], dev, bh: m(0.1, 0.3) }
+        Fx {
+            c2: m(0.2, 1.0),
+            folds: vec![m(0.05, 1.0); 4],
+            dsr,
+            probe: ProbeReport {
+                detected: false,
+                variants: 10,
+                containers: 10,
+                ..Default::default()
+            },
+            risks: vec![],
+            dev,
+            bh: m(0.1, 0.3),
+        }
     }
     fn input(f: &Fx) -> GateInput<'_> {
-        GateInput { job_status: "succeeded", hardened: true, runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.2"), expected_runner: Some("sha256:abc"), buy_hold: &f.bh, dev: &f.dev, dev_cost_2x: &f.c2,
-            folds: &f.folds, dsr: &f.dsr, probe: &f.probe, data_adjusted: true, data_validated: (true, "sample".into()), high_risks: &f.risks,
-            synthetic: false, capacity: Some(5e7) }
+        GateInput {
+            job_status: "succeeded",
+            hardened: true,
+            runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.2"),
+            expected_runner: Some("sha256:abc"),
+            buy_hold: &f.bh,
+            dev: &f.dev,
+            dev_cost_2x: &f.c2,
+            folds: &f.folds,
+            dsr: &f.dsr,
+            probe: &f.probe,
+            data_adjusted: true,
+            data_validated: (true, "sample".into()),
+            high_risks: &f.risks,
+            synthetic: false,
+            capacity: Some(5e7),
+        }
     }
     #[test]
     fn synthetic_and_capacity_checks() {
         let f = fx();
         let mut i = input(&f);
         i.synthetic = true;
-        let cfg = GateConfig { allow_synthetic: false, min_capacity: 1e6, ..GateConfig::default() };
-        assert!(evaluate(&i, &cfg).reasons.iter().any(|r| r.starts_with("real_market_data")));
-        assert!(evaluate(&i, &GateConfig { allow_synthetic: true, ..cfg.clone() }).passed);
+        let cfg = GateConfig {
+            allow_synthetic: false,
+            min_capacity: 1e6,
+            ..GateConfig::default()
+        };
+        assert!(evaluate(&i, &cfg)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("real_market_data")));
+        assert!(
+            evaluate(
+                &i,
+                &GateConfig {
+                    allow_synthetic: true,
+                    ..cfg.clone()
+                }
+            )
+            .passed
+        );
         i.synthetic = false;
         i.capacity = Some(2e5);
-        assert!(evaluate(&i, &cfg).reasons.iter().any(|r| r.starts_with("capacity")));
+        assert!(evaluate(&i, &cfg)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("capacity")));
         i.capacity = None;
         assert!(!evaluate(&i, &cfg).passed);
     }
@@ -202,23 +401,35 @@ mod tests {
         // label right, digest wrong / not recorded
         let mut i = input(&f);
         i.expected_runner = Some("sha256:def");
-        assert!(evaluate(&i, &cfg).reasons.iter().any(|r| r.starts_with("runner_pinned")));
+        assert!(evaluate(&i, &cfg)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("runner_pinned")));
         let mut i = input(&f);
         i.expected_runner = None;
         assert!(!evaluate(&i, &cfg).passed);
         let mut i = input(&f);
         i.data_validated = (false, "x".into());
-        assert!(evaluate(&i, &cfg).reasons.iter().any(|r| r.starts_with("data_cross_validated")));
+        assert!(evaluate(&i, &cfg)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("data_cross_validated")));
         let mut f4 = fx();
         f4.bh = m(0.5, 1.5);
-        assert!(evaluate(&input(&f4), &cfg).reasons.iter().any(|r| r.starts_with("beats_buy_and_hold")));
+        assert!(evaluate(&input(&f4), &cfg)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("beats_buy_and_hold")));
     }
     #[test]
     fn walk_forward_and_cost_stress_and_dsr() {
         let cfg = GateConfig::default();
         let mut f = fx();
         f.folds = vec![m(0.1, 1.0), m(-0.1, -1.0), m(-0.01, -0.1), m(0.2, 2.0)];
-        assert!(evaluate(&input(&f), &cfg).reasons.iter().any(|r| r.starts_with("walk_forward")));
+        assert!(evaluate(&input(&f), &cfg)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("walk_forward")));
         let mut f = fx();
         f.c2.total_return = -0.01;
         assert!(!evaluate(&input(&f), &cfg).passed);
@@ -226,6 +437,10 @@ mod tests {
         let many: Vec<f64> = (0..200).map(|k| (k as f64 - 100.0) / 300.0).collect();
         f.dsr = crate::scorer::deflated_sharpe(&f.dev, &many);
         let o = evaluate(&input(&f), &cfg);
-        assert!(o.reasons.iter().any(|r| r.starts_with("deflated_sharpe")), "{:?}", f.dsr);
+        assert!(
+            o.reasons.iter().any(|r| r.starts_with("deflated_sharpe")),
+            "{:?}",
+            f.dsr
+        );
     }
 }

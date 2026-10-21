@@ -80,10 +80,17 @@ CREATE TRIGGER IF NOT EXISTS vault_no_delete BEFORE DELETE ON vault_touches
 
 /// Columns added after the first SQLite release (forward migration).
 const SQLITE_COLUMNS: &[(&str, &str, &str)] = &[
-    ("jobs", "owner_pid", "INTEGER"), ("jobs", "runner_identity", "TEXT"), ("jobs", "kind", "TEXT NOT NULL DEFAULT 'dev'"), ("jobs", "owner_host", "TEXT"),
-    ("vault_touches", "idea_key", "TEXT"), ("vault_touches", "symbol", "TEXT"), ("vault_touches", "code_sha", "TEXT"),
+    ("jobs", "owner_pid", "INTEGER"),
+    ("jobs", "runner_identity", "TEXT"),
+    ("jobs", "kind", "TEXT NOT NULL DEFAULT 'dev'"),
+    ("jobs", "owner_host", "TEXT"),
+    ("vault_touches", "idea_key", "TEXT"),
+    ("vault_touches", "symbol", "TEXT"),
+    ("vault_touches", "code_sha", "TEXT"),
     ("vault_touches", "finished", "INTEGER NOT NULL DEFAULT 0"),
-    ("trials", "lookahead", "INTEGER NOT NULL DEFAULT 0"), ("trials", "run_kind", "TEXT NOT NULL DEFAULT 'single'"), ("trials", "group_id", "TEXT"),
+    ("trials", "lookahead", "INTEGER NOT NULL DEFAULT 0"),
+    ("trials", "run_kind", "TEXT NOT NULL DEFAULT 'single'"),
+    ("trials", "group_id", "TEXT"),
 ];
 const SQLITE_LATE_TRIGGERS: &str = r#"
 CREATE TRIGGER IF NOT EXISTS vault_finalized BEFORE UPDATE ON vault_touches WHEN OLD.finished <> 0
@@ -111,7 +118,11 @@ pub struct DbConfig {
 
 impl std::fmt::Debug for DbConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DbConfig").field("url", &self.url.as_ref().map(|u| redact_url(u))).field("schema", &self.schema).field("offline", &self.offline).finish()
+        f.debug_struct("DbConfig")
+            .field("url", &self.url.as_ref().map(|u| redact_url(u)))
+            .field("schema", &self.schema)
+            .field("offline", &self.offline)
+            .finish()
     }
 }
 
@@ -125,15 +136,25 @@ pub fn redact_url(u: &str) -> String {
 impl DbConfig {
     pub fn resolve(secrets: &Path) -> Self {
         let file = std::fs::read_to_string(secrets.join("db.env")).unwrap_or_default();
-        let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).or_else(|| file.lines().find_map(|l| {
-            let v = l.trim().trim_start_matches("export ").strip_prefix(k)?.strip_prefix('=')?;
-            Some(v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
-        }));
+        let get = |k: &str| {
+            std::env::var(k).ok().filter(|v| !v.is_empty()).or_else(|| {
+                file.lines().find_map(|l| {
+                    let v = l
+                        .trim()
+                        .trim_start_matches("export ")
+                        .strip_prefix(k)?
+                        .strip_prefix('=')?;
+                    Some(v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
+                })
+            })
+        };
         Self {
             url: get("CMSQ_DATABASE_URL"),
             migrate_url: get("CMSQ_DATABASE_MIGRATE_URL"),
             schema: get("CMSQ_DATABASE_SCHEMA"),
-            max_conns: get("CMSQ_DATABASE_POOL").and_then(|v| v.parse().ok()).unwrap_or(16),
+            max_conns: get("CMSQ_DATABASE_POOL")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16),
             offline: std::env::var("CMSQ_DB").is_ok_and(|v| v == "sqlite"),
         }
     }
@@ -197,13 +218,17 @@ pub struct NewTrial<'a> {
 }
 
 fn ts(s: String) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&Utc)).unwrap_or_default()
+    DateTime::parse_from_rfc3339(&s)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_default()
 }
 fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "unknown".into())
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".into())
 }
 
 const ACOLS: &str = "seq,ts,actor,action,target,details,success,prev_hash,hash";
@@ -213,29 +238,85 @@ const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,pos
 
 fn audit_row(r: &R) -> AuditEntry {
     let d = r.s(5);
-    AuditEntry { seq: r.i(0), ts: r.s(1), actor: r.s(2), action: r.s(3), target: r.os(4),
-        details: serde_json::from_str(&d).unwrap_or(serde_json::Value::String(d)), success: r.b(6), prev_hash: r.s(7), hash: r.s(8) }
+    AuditEntry {
+        seq: r.i(0),
+        ts: r.s(1),
+        actor: r.s(2),
+        action: r.s(3),
+        target: r.os(4),
+        details: serde_json::from_str(&d).unwrap_or(serde_json::Value::String(d)),
+        success: r.b(6),
+        prev_hash: r.s(7),
+        hash: r.s(8),
+    }
 }
 fn audit_mac(key: &[u8], r: &R) -> String {
-    audit::entry_hash(key, &r.s(7), r.i(0), &r.s(1), &r.s(2), &r.s(3), r.os(4).as_deref(), &r.s(5), r.b(6))
+    audit::entry_hash(
+        key,
+        &r.s(7),
+        r.i(0),
+        &r.s(1),
+        &r.s(2),
+        &r.s(3),
+        r.os(4).as_deref(),
+        &r.s(5),
+        r.b(6),
+    )
 }
 fn strategy_row(r: &R) -> Strategy {
     Strategy {
-        id: r.s(0), title: r.s(1), source_site: r.s(2), source_url: r.os(3), author: r.os(4), scraped_at: r.os(5), ingested_at: ts(r.s(6)),
-        raw_path: r.s(7), content_sha256: r.s(8), sample: r.b(9), status: StrategyStatus::parse(&r.s(10)).unwrap_or(StrategyStatus::Failed),
-        attempts: r.i(11), last_reason: r.os(12), extracted: r.os(13).and_then(|e| serde_json::from_str(&e).ok()), updated_at: ts(r.s(14)),
+        id: r.s(0),
+        title: r.s(1),
+        source_site: r.s(2),
+        source_url: r.os(3),
+        author: r.os(4),
+        scraped_at: r.os(5),
+        ingested_at: ts(r.s(6)),
+        raw_path: r.s(7),
+        content_sha256: r.s(8),
+        sample: r.b(9),
+        status: StrategyStatus::parse(&r.s(10)).unwrap_or(StrategyStatus::Failed),
+        attempts: r.i(11),
+        last_reason: r.os(12),
+        extracted: r.os(13).and_then(|e| serde_json::from_str(&e).ok()),
+        updated_at: ts(r.s(14)),
     }
 }
 fn job_row(r: &R) -> JobRecord {
     JobRecord {
-        id: r.s(0), strategy_id: r.s(1), backend: r.s(2), image: r.s(3), symbol: r.s(4), data_source: r.s(5), status: r.s(6), exit_code: r.oi(7),
-        started_at: ts(r.s(8)), finished_at: r.os(9).map(ts), duration_ms: r.oi(10), job_dir: r.s(11), error: r.os(12),
-        result: r.os(13).and_then(|s| serde_json::from_str(&s).ok()), owner_pid: r.oi(14), runner_identity: r.os(15), kind: r.s(16), owner_host: r.os(17),
+        id: r.s(0),
+        strategy_id: r.s(1),
+        backend: r.s(2),
+        image: r.s(3),
+        symbol: r.s(4),
+        data_source: r.s(5),
+        status: r.s(6),
+        exit_code: r.oi(7),
+        started_at: ts(r.s(8)),
+        finished_at: r.os(9).map(ts),
+        duration_ms: r.oi(10),
+        job_dir: r.s(11),
+        error: r.os(12),
+        result: r.os(13).and_then(|s| serde_json::from_str(&s).ok()),
+        owner_pid: r.oi(14),
+        runner_identity: r.os(15),
+        kind: r.s(16),
+        owner_host: r.os(17),
     }
 }
 fn trial_row(r: &R) -> TrialRow {
-    TrialRow { id: r.i(0), strategy_id: r.s(1), idea_key: r.s(2), params_hash: r.s(3), symbol: r.s(4), sharpe_daily: r.f(5),
-        positions: serde_json::from_str(&r.s(6)).unwrap_or_default(), lookahead: r.b(7), run_kind: r.s(8), group_id: r.os(9) }
+    TrialRow {
+        id: r.i(0),
+        strategy_id: r.s(1),
+        idea_key: r.s(2),
+        params_hash: r.s(3),
+        symbol: r.s(4),
+        sharpe_daily: r.f(5),
+        positions: serde_json::from_str(&r.s(6)).unwrap_or_default(),
+        lookahead: r.b(7),
+        run_kind: r.s(8),
+        group_id: r.os(9),
+    }
 }
 
 /// Exclusive advisory lock on `<anchor>.lock` for the duration of the guard.
@@ -246,10 +327,19 @@ impl FileLock {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path.with_extension("lock"))?;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("lock"))?;
         // SAFETY: valid fd owned by `f`
         let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
-        anyhow::ensure!(rc == 0, "flock {}: {}", path.display(), std::io::Error::last_os_error());
+        anyhow::ensure!(
+            rc == 0,
+            "flock {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
         Ok(Self(f))
     }
 }
@@ -267,19 +357,36 @@ impl Store {
     /// offline mode or when no database is configured (logged as offline).
     pub fn open_configured(sqlite_path: &Path, db: &DbConfig, cfg: AuditConfig) -> Result<Self> {
         match (&db.url, db.offline) {
-            (Some(url), false) => Self::open_pg(url, db.migrate_url.as_deref(), db.schema.as_deref(), db.max_conns, cfg),
+            (Some(url), false) => Self::open_pg(
+                url,
+                db.migrate_url.as_deref(),
+                db.schema.as_deref(),
+                db.max_conns,
+                cfg,
+            ),
             _ => Self::open(sqlite_path, cfg),
         }
     }
 
-    pub fn open_pg(url: &str, migrate_url: Option<&str>, schema: Option<&str>, max_conns: u32, cfg: AuditConfig) -> Result<Self> {
+    pub fn open_pg(
+        url: &str,
+        migrate_url: Option<&str>,
+        schema: Option<&str>,
+        max_conns: u32,
+        cfg: AuditConfig,
+    ) -> Result<Self> {
         if let Some(mu) = migrate_url {
             Self::migrate_pg(mu, schema)?;
         }
         let pg = Pg::connect(url, schema, max_conns.max(2))?;
-        let s = Self { db: Backend::Postgres(pg), cfg, anchor_mu: Default::default() };
+        let s = Self {
+            db: Backend::Postgres(pg),
+            cfg,
+            anchor_mu: Default::default(),
+        };
         // schema must exist (migrations are run by the owner role)
-        s.db.run(|e| e.query("SELECT 1 FROM audit LIMIT 1", &[])).context("PostgreSQL schema missing: run `cmsq db migrate` (owner URL) first")?;
+        s.db.run(|e| e.query("SELECT 1 FROM audit LIMIT 1", &[]))
+            .context("PostgreSQL schema missing: run `cmsq db migrate` (owner URL) first")?;
         Ok(s)
     }
 
@@ -287,24 +394,37 @@ impl Store {
     pub fn migrate_pg(owner_url: &str, schema: Option<&str>) -> Result<()> {
         let pg = Pg::connect(owner_url, schema, 2)?;
         if let Some(sc) = schema {
-            anyhow::ensure!(sc.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'), "bad schema name");
+            anyhow::ensure!(
+                sc.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "bad schema name"
+            );
             let q = format!("CREATE SCHEMA IF NOT EXISTS {sc}; DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='cmsq_app') THEN GRANT USAGE ON SCHEMA {sc} TO cmsq_app; END IF; END $$;");
             pg.block(async { sqlx::raw_sql(&q).execute(&pg.pool).await.map(|_| ()) })?;
         }
-        pg.block(async { PG_MIGRATOR.run(&pg.pool).await }).context("PostgreSQL migrations")?;
+        pg.block(async { PG_MIGRATOR.run(&pg.pool).await })
+            .context("PostgreSQL migrations")?;
         Ok(())
     }
 
     pub fn open(path: &Path, cfg: AuditConfig) -> Result<Self> {
-        let conn = rusqlite::Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        let conn =
+            rusqlite::Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         Self::sqlite_migrate(&conn)?;
-        Ok(Self { db: Backend::Sqlite(std::sync::Mutex::new(conn)), cfg, anchor_mu: Default::default() })
+        Ok(Self {
+            db: Backend::Sqlite(std::sync::Mutex::new(conn)),
+            cfg,
+            anchor_mu: Default::default(),
+        })
     }
     fn sqlite_migrate(conn: &rusqlite::Connection) -> Result<()> {
         conn.execute_batch(SQLITE_SCHEMA)?;
         for (t, col, ddl) in SQLITE_COLUMNS {
-            let has: bool = conn.prepare(&format!("SELECT 1 FROM pragma_table_info('{t}') WHERE name=?1"))?.exists([col])?;
+            let has: bool = conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{t}') WHERE name=?1"
+                ))?
+                .exists([col])?;
             if !has {
                 conn.execute_batch(&format!("ALTER TABLE {t} ADD COLUMN {col} {ddl}"))?;
             }
@@ -314,21 +434,36 @@ impl Store {
     }
     /// Read-side open for viewers (dashboard): never runs migrations; PostgreSQL uses
     /// the runtime role with a small pool, SQLite opens the file read-only.
-    pub fn open_configured_readonly(sqlite_path: &Path, db: &DbConfig, cfg: AuditConfig) -> Result<Self> {
+    pub fn open_configured_readonly(
+        sqlite_path: &Path,
+        db: &DbConfig,
+        cfg: AuditConfig,
+    ) -> Result<Self> {
         match (&db.url, db.offline) {
             (Some(url), false) => Self::open_pg(url, None, db.schema.as_deref(), 2, cfg),
             _ => Self::open_readonly(sqlite_path, cfg),
         }
     }
     pub fn open_readonly(path: &Path, cfg: AuditConfig) -> Result<Self> {
-        let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Self { db: Backend::Sqlite(std::sync::Mutex::new(conn)), cfg, anchor_mu: Default::default() })
+        Ok(Self {
+            db: Backend::Sqlite(std::sync::Mutex::new(conn)),
+            cfg,
+            anchor_mu: Default::default(),
+        })
     }
     pub fn in_memory() -> Result<Self> {
         let conn = rusqlite::Connection::open_in_memory()?;
         Self::sqlite_migrate(&conn)?;
-        Ok(Self { db: Backend::Sqlite(std::sync::Mutex::new(conn)), cfg: AuditConfig::insecure_test(), anchor_mu: Default::default() })
+        Ok(Self {
+            db: Backend::Sqlite(std::sync::Mutex::new(conn)),
+            cfg: AuditConfig::insecure_test(),
+            anchor_mu: Default::default(),
+        })
     }
     pub fn backend(&self) -> &'static str {
         self.db.name()
@@ -344,7 +479,14 @@ impl Store {
     }
 
     // ---------- audit ----------
-    pub fn audit(&self, actor: &str, action: &str, target: Option<&str>, details: serde_json::Value, success: bool) -> Result<AuditEntry> {
+    pub fn audit(
+        &self,
+        actor: &str,
+        action: &str,
+        target: Option<&str>,
+        details: serde_json::Value,
+        success: bool,
+    ) -> Result<AuditEntry> {
         let d = serde_json::to_string(&details)?;
         let _g = self.anchor_mu.lock().unwrap_or_else(|e| e.into_inner());
         let _fl = match &self.cfg.anchor {
@@ -363,19 +505,39 @@ impl Store {
             Ok((seq, ts, prev_hash, hash))
         })?;
         if let Some(a) = &self.cfg.anchor {
-            audit::append_anchor(a, seq, &hash, &ts).with_context(|| format!("write audit anchor {}", a.display()))?;
+            audit::append_anchor(a, seq, &hash, &ts)
+                .with_context(|| format!("write audit anchor {}", a.display()))?;
         }
-        Ok(AuditEntry { seq, ts, actor: actor.into(), action: action.into(), target: target.map(Into::into), details, success, prev_hash, hash })
+        Ok(AuditEntry {
+            seq,
+            ts,
+            actor: actor.into(),
+            action: action.into(),
+            target: target.map(Into::into),
+            details,
+            success,
+            prev_hash,
+            hash,
+        })
     }
 
     pub fn audit_entries(&self, target: Option<&str>, limit: i64) -> Result<Vec<AuditEntry>> {
-        let sql = format!("SELECT {ACOLS} FROM audit WHERE (?1 IS NULL OR target=?1) ORDER BY seq DESC LIMIT ?2");
-        Ok(self.db.run(|e| e.query(&sql, p![target, limit]))?.iter().map(audit_row).collect())
+        let sql = format!(
+            "SELECT {ACOLS} FROM audit WHERE (?1 IS NULL OR target=?1) ORDER BY seq DESC LIMIT ?2"
+        );
+        Ok(self
+            .db
+            .run(|e| e.query(&sql, p![target, limit]))?
+            .iter()
+            .map(audit_row)
+            .collect())
     }
 
     /// Recompute the whole chain. Detects edits, deletions (seq gaps) and re-ordering.
     pub fn verify_audit(&self) -> Result<VerifyReport> {
-        let rows = self.db.run(|e| e.query(&format!("SELECT {ACOLS} FROM audit ORDER BY seq ASC"), &[]))?;
+        let rows = self
+            .db
+            .run(|e| e.query(&format!("SELECT {ACOLS} FROM audit ORDER BY seq ASC"), &[]))?;
         let mut prev = GENESIS.to_string();
         let mut expect_seq = 1;
         let mut n = 0;
@@ -383,10 +545,20 @@ impl Store {
         for r in &rows {
             let (seq, prev_hash, hash) = (r.i(0), r.s(7), r.s(8));
             n += 1;
-            let bad = |p: String| VerifyReport { entries: n, ok: false, first_bad_seq: Some(seq), problem: Some(p), head_hash: hash.clone(), keyed: true,
-                anchor: anchor.clone(), anchored_seq: None };
+            let bad = |p: String| VerifyReport {
+                entries: n,
+                ok: false,
+                first_bad_seq: Some(seq),
+                problem: Some(p),
+                head_hash: hash.clone(),
+                keyed: true,
+                anchor: anchor.clone(),
+                anchored_seq: None,
+            };
             if seq != expect_seq {
-                return Ok(bad(format!("sequence gap: expected {expect_seq}, found {seq} (entry deleted?)")));
+                return Ok(bad(format!(
+                    "sequence gap: expected {expect_seq}, found {seq} (entry deleted?)"
+                )));
             }
             if prev_hash != prev {
                 return Ok(bad("prev_hash does not link to previous entry".into()));
@@ -396,18 +568,32 @@ impl Store {
                     let why = "this workspace's audit chain was not signed with the current key: it was created by an older cmsq (unkeyed sha256 chain) or with a different audit.key / CMSQ_SECRETS_DIR. Use a fresh CMSQ_HOME, or point CMSQ_SECRETS_DIR at the key that created it";
                     return Ok(bad(format!("HMAC mismatch at the first entry — {why}")));
                 }
-                return Ok(bad("HMAC mismatch (entry modified or chain re-computed without the key)".into()));
+                return Ok(bad(
+                    "HMAC mismatch (entry modified or chain re-computed without the key)".into(),
+                ));
             }
             prev = hash;
             expect_seq += 1;
         }
         let head_seq = expect_seq - 1;
-        let mut rep = VerifyReport { entries: n, ok: true, first_bad_seq: None, problem: None, head_hash: prev.clone(), keyed: true, anchor, anchored_seq: None };
+        let mut rep = VerifyReport {
+            entries: n,
+            ok: true,
+            first_bad_seq: None,
+            problem: None,
+            head_hash: prev.clone(),
+            keyed: true,
+            anchor,
+            anchored_seq: None,
+        };
         if let Some(a) = &self.cfg.anchor {
             match audit::read_anchor(a)? {
                 None if head_seq > 0 => {
                     rep.ok = false;
-                    rep.problem = Some(format!("anchor file {} is missing but the log has {head_seq} entries", a.display()));
+                    rep.problem = Some(format!(
+                        "anchor file {} is missing but the log has {head_seq} entries",
+                        a.display()
+                    ));
                 }
                 None => {}
                 Some((aseq, ahash)) => {
@@ -417,7 +603,10 @@ impl Store {
                         rep.first_bad_seq = Some(head_seq + 1);
                         rep.problem = Some(format!("log truncated: anchor says head is seq {aseq}, database ends at {head_seq}"));
                     } else {
-                        let h = rows.get((aseq - 1).max(0) as usize).filter(|r| r.i(0) == aseq).map(|r| r.s(8));
+                        let h = rows
+                            .get((aseq - 1).max(0) as usize)
+                            .filter(|r| r.i(0) == aseq)
+                            .map(|r| r.s(8));
                         if h.as_deref() != Some(ahash.as_str()) {
                             rep.ok = false;
                             rep.first_bad_seq = Some(aseq);
@@ -436,17 +625,25 @@ impl Store {
 
     // ---------- strategies ----------
     pub fn insert_strategy(&self, s: &Strategy) -> Result<()> {
-        let ex = s.extracted.as_ref().map(|e| serde_json::to_string(e).unwrap());
+        let ex = s
+            .extracted
+            .as_ref()
+            .map(|e| serde_json::to_string(e).unwrap());
         self.db.run(|e| e.exec(&format!("INSERT INTO strategies({SCOLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
             p![&s.id, &s.title, &s.source_site, &s.source_url, &s.author, &s.scraped_at, s.ingested_at.to_rfc3339(), &s.raw_path,
                 &s.content_sha256, s.sample, s.status.as_str(), s.attempts, &s.last_reason, ex, s.updated_at.to_rfc3339()]))?;
         Ok(())
     }
     pub fn find_by_sha(&self, sha: &str) -> Result<Option<String>> {
-        Ok(self.db.run(|e| e.one("SELECT id FROM strategies WHERE content_sha256=?1", p![sha]))?.map(|r| r.s(0)))
+        Ok(self
+            .db
+            .run(|e| e.one("SELECT id FROM strategies WHERE content_sha256=?1", p![sha]))?
+            .map(|r| r.s(0)))
     }
     pub fn get_strategy(&self, id: &str) -> Result<Strategy> {
-        let sql = format!("SELECT {SCOLS} FROM strategies WHERE id=?1 OR id LIKE ?1 || '%' ORDER BY id LIMIT 2");
+        let sql = format!(
+            "SELECT {SCOLS} FROM strategies WHERE id=?1 OR id LIKE ?1 || '%' ORDER BY id LIMIT 2"
+        );
         let v = self.db.run(|e| e.query(&sql, p![id]))?;
         match v.len() {
             0 => anyhow::bail!("strategy not found: {id}"),
@@ -456,27 +653,55 @@ impl Store {
     }
     pub fn list_strategies(&self, status: Option<StrategyStatus>) -> Result<Vec<Strategy>> {
         let sql = format!("SELECT {SCOLS} FROM strategies WHERE (?1 IS NULL OR status=?1) ORDER BY ingested_at, id");
-        Ok(self.db.run(|e| e.query(&sql, p![status.map(|s| s.as_str())]))?.iter().map(strategy_row).collect())
+        Ok(self
+            .db
+            .run(|e| e.query(&sql, p![status.map(|s| s.as_str())]))?
+            .iter()
+            .map(strategy_row)
+            .collect())
     }
     /// Unconditional status write (crash recovery / tests). Pipeline code uses [`Self::cas_status`].
     pub fn set_status(&self, id: &str, to: StrategyStatus, reason: Option<&str>) -> Result<()> {
-        self.db.run(|e| e.exec("UPDATE strategies SET status=?2, last_reason=?3, updated_at=?4 WHERE id=?1", p![id, to.as_str(), reason, now()]))?;
+        self.db.run(|e| {
+            e.exec(
+                "UPDATE strategies SET status=?2, last_reason=?3, updated_at=?4 WHERE id=?1",
+                p![id, to.as_str(), reason, now()],
+            )
+        })?;
         Ok(())
     }
     /// Compare-and-swap: only moves `from -> to`; false if someone else moved it first.
-    pub fn cas_status(&self, id: &str, from: StrategyStatus, to: StrategyStatus, reason: Option<&str>) -> Result<bool> {
+    pub fn cas_status(
+        &self,
+        id: &str,
+        from: StrategyStatus,
+        to: StrategyStatus,
+        reason: Option<&str>,
+    ) -> Result<bool> {
         Ok(self.db.run(|e| e.exec("UPDATE strategies SET status=?3, last_reason=?4, updated_at=?5 WHERE id=?1 AND status=?2",
             p![id, from.as_str(), to.as_str(), reason, now()]))? == 1)
     }
     pub fn set_extracted(&self, id: &str, x: &ExtractedStrategy) -> Result<()> {
         let j = serde_json::to_string(x)?;
-        self.db.run(|e| e.exec("UPDATE strategies SET extracted_json=?2, updated_at=?3 WHERE id=?1", p![id, j, now()]))?;
+        self.db.run(|e| {
+            e.exec(
+                "UPDATE strategies SET extracted_json=?2, updated_at=?3 WHERE id=?1",
+                p![id, j, now()],
+            )
+        })?;
         Ok(())
     }
     pub fn bump_attempts(&self, id: &str) -> Result<i64> {
         self.db.tx(None, |e| {
-            e.exec("UPDATE strategies SET attempts=attempts+1 WHERE id=?1", p![id])?;
-            Ok(e.one("SELECT attempts FROM strategies WHERE id=?1", p![id])?.map(|r| r.i(0)).unwrap_or(0))
+            e.exec(
+                "UPDATE strategies SET attempts=attempts+1 WHERE id=?1",
+                p![id],
+            )?;
+            Ok(
+                e.one("SELECT attempts FROM strategies WHERE id=?1", p![id])?
+                    .map(|r| r.i(0))
+                    .unwrap_or(0),
+            )
         })
     }
 
@@ -487,21 +712,41 @@ impl Store {
                 std::process::id() as i64, &j.runner_identity, &j.kind, hostname()]))?;
         Ok(())
     }
-    pub fn finish_job(&self, id: &str, status: &str, exit_code: Option<i64>, duration_ms: i64, error: Option<&str>, result: Option<&serde_json::Value>) -> Result<()> {
+    pub fn finish_job(
+        &self,
+        id: &str,
+        status: &str,
+        exit_code: Option<i64>,
+        duration_ms: i64,
+        error: Option<&str>,
+        result: Option<&serde_json::Value>,
+    ) -> Result<()> {
         self.db.run(|e| e.exec("UPDATE jobs SET status=?2, exit_code=?3, finished_at=?4, duration_ms=?5, error=?6, result_json=?7 WHERE id=?1",
             p![id, status, exit_code, now(), duration_ms, error, result.map(|r| r.to_string())]))?;
         Ok(())
     }
     pub fn list_jobs(&self, strategy_id: Option<&str>) -> Result<Vec<JobRecord>> {
         let sql = format!("SELECT {JCOLS} FROM jobs WHERE (?1 IS NULL OR strategy_id=?1) ORDER BY started_at DESC");
-        Ok(self.db.run(|e| e.query(&sql, p![strategy_id]))?.iter().map(job_row).collect())
+        Ok(self
+            .db
+            .run(|e| e.query(&sql, p![strategy_id]))?
+            .iter()
+            .map(job_row)
+            .collect())
     }
     /// Jobs left in `running` by a process on THIS host that is gone (crash / kill -9).
     /// Jobs owned by other hosts sharing the database are never reaped from here.
     pub fn stale_running_jobs(&self) -> Result<Vec<JobRecord>> {
         let me = hostname();
-        Ok(self.list_jobs(None)?.into_iter()
-            .filter(|j| j.status == "running" && j.owner_host.as_deref().is_none_or(|h| h == me) && !j.owner_pid.is_some_and(pid_alive)).collect())
+        Ok(self
+            .list_jobs(None)?
+            .into_iter()
+            .filter(|j| {
+                j.status == "running"
+                    && j.owner_host.as_deref().is_none_or(|h| h == me)
+                    && !j.owner_pid.is_some_and(pid_alive)
+            })
+            .collect())
     }
 
     // ---------- trials (library-wide multiple-testing ledger) ----------
@@ -517,28 +762,77 @@ impl Store {
     }
     /// P0-compatible wrapper.
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_trial(&self, sid: &str, job: &str, idea_key: &str, params_hash: &str, symbol: &str, dataset_sha: &str, bars: usize, sr: f64, positions: &[f64], lookahead: bool) -> Result<()> {
-        self.record_trial(&NewTrial { strategy_id: sid, job_id: job, idea_key, params_hash, symbol, dataset_sha, bars, sharpe_daily: sr, positions, lookahead, run_kind: "single", group_id: None })?;
+    pub fn insert_trial(
+        &self,
+        sid: &str,
+        job: &str,
+        idea_key: &str,
+        params_hash: &str,
+        symbol: &str,
+        dataset_sha: &str,
+        bars: usize,
+        sr: f64,
+        positions: &[f64],
+        lookahead: bool,
+    ) -> Result<()> {
+        self.record_trial(&NewTrial {
+            strategy_id: sid,
+            job_id: job,
+            idea_key,
+            params_hash,
+            symbol,
+            dataset_sha,
+            bars,
+            sharpe_daily: sr,
+            positions,
+            lookahead,
+            run_kind: "single",
+            group_id: None,
+        })?;
         Ok(())
     }
     pub fn trials(&self) -> Result<Vec<TrialRow>> {
-        Ok(self.db.run(|e| e.query(&format!("SELECT {TCOLS} FROM trials ORDER BY id"), &[]))?.iter().map(trial_row).collect())
+        Ok(self
+            .db
+            .run(|e| e.query(&format!("SELECT {TCOLS} FROM trials ORDER BY id"), &[]))?
+            .iter()
+            .map(trial_row)
+            .collect())
     }
     pub fn trial_count(&self) -> Result<i64> {
-        Ok(self.db.run(|e| e.one("SELECT COUNT(*) FROM trials", &[]))?.map(|r| r.i(0)).unwrap_or(0))
+        Ok(self
+            .db
+            .run(|e| e.one("SELECT COUNT(*) FROM trials", &[]))?
+            .map(|r| r.i(0))
+            .unwrap_or(0))
     }
 
     // ---------- vault (final holdout, one touch per idea) ----------
     pub fn vault_touch(&self, sid: &str) -> Result<Option<(String, bool)>> {
-        Ok(self.db.run(|e| e.one("SELECT job_id, passed FROM vault_touches WHERE strategy_id=?1", p![sid]))?.map(|r| (r.s(0), r.b(1))))
+        Ok(self
+            .db
+            .run(|e| {
+                e.one(
+                    "SELECT job_id, passed FROM vault_touches WHERE strategy_id=?1",
+                    p![sid],
+                )
+            })?
+            .map(|r| (r.s(0), r.b(1))))
     }
     /// Atomically: read every previous vault touch + the trial ledger, run
     /// `conflict` (dedup by idea / code / correlated positions), and only if it
     /// returns `None` record the touch. Two concurrent promotes of the same idea
     /// cannot both get through.
     #[allow(clippy::too_many_arguments)]
-    pub fn claim_vault(&self, sid: &str, job: &str, idea_key: &str, symbol: &str, code_sha: &str,
-        conflict: impl FnOnce(&[VaultTouch], &[TrialRow]) -> Option<String>) -> Result<std::result::Result<(), String>> {
+    pub fn claim_vault(
+        &self,
+        sid: &str,
+        job: &str,
+        idea_key: &str,
+        symbol: &str,
+        code_sha: &str,
+        conflict: impl FnOnce(&[VaultTouch], &[TrialRow]) -> Option<String>,
+    ) -> Result<std::result::Result<(), String>> {
         self.db.tx(Some(Lock::Vault), |e| {
             if let Some(r) = e.one("SELECT job_id FROM vault_touches WHERE strategy_id=?1", p![sid])? {
                 return Ok(Err(format!("vault already used (job {})", r.s(0))));
@@ -563,7 +857,15 @@ impl Store {
     pub fn record_vault_touch(&self, sid: &str, job: &str, passed: bool) -> Result<()> {
         self.record_vault_touch_keyed(sid, job, passed, None, None, None)
     }
-    pub fn record_vault_touch_keyed(&self, sid: &str, job: &str, passed: bool, idea_key: Option<&str>, symbol: Option<&str>, code_sha: Option<&str>) -> Result<()> {
+    pub fn record_vault_touch_keyed(
+        &self,
+        sid: &str,
+        job: &str,
+        passed: bool,
+        idea_key: Option<&str>,
+        symbol: Option<&str>,
+        code_sha: Option<&str>,
+    ) -> Result<()> {
         self.db.tx(Some(Lock::Vault), |e| e.exec("INSERT INTO vault_touches(strategy_id,job_id,passed,created_at,idea_key,symbol,code_sha,finished) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
             p![sid, job, passed, now(), idea_key, symbol, code_sha]))?;
         Ok(())
@@ -578,7 +880,13 @@ impl Store {
     pub fn latest_fetch_attestation(&self, symbol: &str) -> Result<Option<AuditEntry>> {
         let r = self.db.run(|e| e.one(&format!("SELECT {ACOLS} FROM audit WHERE action='market_data_fetch' AND target=?1 AND success=1 ORDER BY seq DESC LIMIT 1"), p![symbol]))?;
         let Some(r) = r else { return Ok(None) };
-        anyhow::ensure!(audit_mac(&self.cfg.key, &r) == r.s(8), crate::error::CoreError::AuditIntegrity(format!("data attestation entry seq {} fails its HMAC", r.i(0))));
+        anyhow::ensure!(
+            audit_mac(&self.cfg.key, &r) == r.s(8),
+            crate::error::CoreError::AuditIntegrity(format!(
+                "data attestation entry seq {} fails its HMAC",
+                r.i(0)
+            ))
+        );
         let mut a = audit_row(&r);
         a.details = serde_json::from_str(&r.s(5))?;
         Ok(Some(a))
@@ -606,10 +914,29 @@ impl Store {
             .iter().map(|r| (Signal { strategy_id: r.s(0), job_id: r.s(1), symbol: r.s(2), date: r.s(3), target_position: r.f(4), created_at: ts(r.s(5)) }, r.s(6), r.s(7))).collect())
     }
     pub fn counts(&self) -> Result<Vec<(String, i64)>> {
-        Ok(self.db.run(|e| e.query("SELECT status, COUNT(*) FROM strategies GROUP BY status", &[]))?.iter().map(|r| (r.s(0), r.i(1))).collect())
+        Ok(self
+            .db
+            .run(|e| {
+                e.query(
+                    "SELECT status, COUNT(*) FROM strategies GROUP BY status",
+                    &[],
+                )
+            })?
+            .iter()
+            .map(|r| (r.s(0), r.i(1)))
+            .collect())
     }
     pub fn total_attempts(&self) -> Result<i64> {
-        Ok(self.db.run(|e| e.one("SELECT CAST(COALESCE(SUM(attempts),0) AS BIGINT) FROM strategies", &[]))?.map(|r| r.i(0)).unwrap_or(0))
+        Ok(self
+            .db
+            .run(|e| {
+                e.one(
+                    "SELECT CAST(COALESCE(SUM(attempts),0) AS BIGINT) FROM strategies",
+                    &[],
+                )
+            })?
+            .map(|r| r.i(0))
+            .unwrap_or(0))
     }
 
     // ---------- research runs (sweeps, portfolios) ----------
@@ -619,7 +946,12 @@ impl Store {
         Ok(())
     }
     pub fn finish_run(&self, id: &str, status: &str, result: &serde_json::Value) -> Result<()> {
-        self.db.run(|e| e.exec("UPDATE research_runs SET status=?2, result_json=?3, finished_at=?4 WHERE id=?1", p![id, status, result.to_string(), now()]))?;
+        self.db.run(|e| {
+            e.exec(
+                "UPDATE research_runs SET status=?2, result_json=?3, finished_at=?4 WHERE id=?1",
+                p![id, status, result.to_string(), now()],
+            )
+        })?;
         Ok(())
     }
     pub fn list_runs(&self, kind: Option<&str>) -> Result<Vec<ResearchRun>> {
@@ -631,7 +963,12 @@ impl Store {
     // ---------- time series (TimescaleDB hypertables on PostgreSQL) ----------
     /// Mirror a verified snapshot into `bars` (query/dashboard use; trust still comes
     /// from the hashed snapshot file + audit attestation).
-    pub fn insert_bars(&self, symbol: &str, snapshot_sha: &str, bars: &[crate::market::Bar]) -> Result<usize> {
+    pub fn insert_bars(
+        &self,
+        symbol: &str,
+        snapshot_sha: &str,
+        bars: &[crate::market::Bar],
+    ) -> Result<usize> {
         let pgdate = matches!(self.db, Backend::Postgres(_));
         let sql = if pgdate {
             "INSERT INTO bars(symbol,date,snapshot_sha,open,high,low,close,volume,adj_factor) VALUES(?1,CAST(?2 AS DATE),?3,?4,?5,?6,?7,?8,?9) ON CONFLICT DO NOTHING"
@@ -641,13 +978,30 @@ impl Store {
         self.db.tx(None, |e| {
             let mut n = 0;
             for b in bars {
-                n += e.exec(sql, p![symbol, b.date.as_str(), snapshot_sha, b.open, b.high, b.low, b.close, b.volume, b.adj_factor])? as usize;
+                n += e.exec(
+                    sql,
+                    p![
+                        symbol,
+                        b.date.as_str(),
+                        snapshot_sha,
+                        b.open,
+                        b.high,
+                        b.low,
+                        b.close,
+                        b.volume,
+                        b.adj_factor
+                    ],
+                )? as usize;
             }
             Ok(n)
         })
     }
     pub fn bar_count(&self, symbol: &str) -> Result<i64> {
-        Ok(self.db.run(|e| e.one("SELECT COUNT(*) FROM bars WHERE symbol=?1", p![symbol]))?.map(|r| r.i(0)).unwrap_or(0))
+        Ok(self
+            .db
+            .run(|e| e.one("SELECT COUNT(*) FROM bars WHERE symbol=?1", p![symbol]))?
+            .map(|r| r.i(0))
+            .unwrap_or(0))
     }
     pub fn insert_ticks(&self, ticks: &[crate::ctp::Tick]) -> Result<usize> {
         let pg = matches!(self.db, Backend::Postgres(_));
@@ -658,13 +1012,35 @@ impl Store {
         };
         self.db.tx(None, |e| {
             for t in ticks {
-                e.exec(sql, p![&t.instrument, &t.ts, &t.trading_day, t.last, t.volume, t.open_interest, t.bid1, t.ask1, &t.source])?;
+                e.exec(
+                    sql,
+                    p![
+                        &t.instrument,
+                        &t.ts,
+                        &t.trading_day,
+                        t.last,
+                        t.volume,
+                        t.open_interest,
+                        t.bid1,
+                        t.ask1,
+                        &t.source
+                    ],
+                )?;
             }
             Ok(ticks.len())
         })
     }
     pub fn tick_count(&self, instrument: Option<&str>) -> Result<i64> {
-        Ok(self.db.run(|e| e.one("SELECT COUNT(*) FROM ticks WHERE (?1 IS NULL OR instrument=?1)", p![instrument]))?.map(|r| r.i(0)).unwrap_or(0))
+        Ok(self
+            .db
+            .run(|e| {
+                e.one(
+                    "SELECT COUNT(*) FROM ticks WHERE (?1 IS NULL OR instrument=?1)",
+                    p![instrument],
+                )
+            })?
+            .map(|r| r.i(0))
+            .unwrap_or(0))
     }
 }
 
@@ -680,11 +1056,14 @@ mod tests {
     fn audit_chain_verifies_and_is_append_only() {
         let s = Store::in_memory().unwrap();
         for i in 0..5 {
-            s.audit("system", "test", Some("x"), json!({"i": i}), true).unwrap();
+            s.audit("system", "test", Some("x"), json!({"i": i}), true)
+                .unwrap();
         }
         let r = s.verify_audit().unwrap();
         assert!(r.ok && r.entries == 5, "{r:?}");
-        assert!(s.raw_batch("UPDATE audit SET actor='evil' WHERE seq=2").is_err());
+        assert!(s
+            .raw_batch("UPDATE audit SET actor='evil' WHERE seq=2")
+            .is_err());
         assert!(s.raw_batch("DELETE FROM audit WHERE seq=3").is_err());
     }
 
@@ -692,17 +1071,21 @@ mod tests {
     fn tampering_is_detected_even_if_triggers_dropped() {
         let s = Store::in_memory().unwrap();
         for i in 0..4 {
-            s.audit("system", "test", None, json!({"i": i}), true).unwrap();
+            s.audit("system", "test", None, json!({"i": i}), true)
+                .unwrap();
         }
-        s.raw_batch("DROP TRIGGER audit_no_update; DROP TRIGGER audit_no_delete;").unwrap();
-        s.raw_batch("UPDATE audit SET details='{\"i\":99}' WHERE seq=2").unwrap();
+        s.raw_batch("DROP TRIGGER audit_no_update; DROP TRIGGER audit_no_delete;")
+            .unwrap();
+        s.raw_batch("UPDATE audit SET details='{\"i\":99}' WHERE seq=2")
+            .unwrap();
         let r = s.verify_audit().unwrap();
         assert!(!r.ok);
         assert_eq!(r.first_bad_seq, Some(2));
 
         let s2 = Store::in_memory().unwrap();
         for i in 0..4 {
-            s2.audit("system", "test", None, json!({"i": i}), true).unwrap();
+            s2.audit("system", "test", None, json!({"i": i}), true)
+                .unwrap();
         }
         s2.raw_batch("DROP TRIGGER audit_no_delete;").unwrap();
         s2.raw_batch("DELETE FROM audit WHERE seq=3").unwrap();
@@ -711,7 +1094,10 @@ mod tests {
     }
 
     fn anchored(dir: &Path) -> (Store, AuditConfig) {
-        let cfg = AuditConfig { key: b"secret-key-outside-db".to_vec(), anchor: Some(dir.join("anchors/h.anchor")) };
+        let cfg = AuditConfig {
+            key: b"secret-key-outside-db".to_vec(),
+            anchor: Some(dir.join("anchors/h.anchor")),
+        };
         (Store::open(&dir.join("cmsq.db"), cfg.clone()).unwrap(), cfg)
     }
 
@@ -722,10 +1108,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (s, _) = anchored(d.path());
         for i in 0..6 {
-            s.audit("system", "test", None, json!({"i": i}), true).unwrap();
+            s.audit("system", "test", None, json!({"i": i}), true)
+                .unwrap();
         }
         assert!(s.verify_audit().unwrap().ok);
-        s.raw_batch("DROP TRIGGER audit_no_delete; DELETE FROM audit WHERE seq >= 5;").unwrap();
+        s.raw_batch("DROP TRIGGER audit_no_delete; DELETE FROM audit WHERE seq >= 5;")
+            .unwrap();
         let r = s.verify_audit().unwrap();
         assert!(!r.ok, "{r:?}");
         assert!(r.problem.unwrap().contains("truncated"));
@@ -738,19 +1126,47 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (s, _) = anchored(d.path());
         for i in 0..4 {
-            s.audit("gate", "evaluate", Some("x"), json!({"passed": i % 2 == 0}), true).unwrap();
+            s.audit(
+                "gate",
+                "evaluate",
+                Some("x"),
+                json!({"passed": i % 2 == 0}),
+                true,
+            )
+            .unwrap();
         }
         s.raw_batch("DROP TRIGGER audit_no_update;").unwrap();
         // attacker re-computes the chain with a guessed key
-        let rows = s.db.run(|e| e.query("SELECT seq,ts,actor,action,target,details,success FROM audit ORDER BY seq", &[])).unwrap();
+        let rows =
+            s.db.run(|e| {
+                e.query(
+                    "SELECT seq,ts,actor,action,target,details,success FROM audit ORDER BY seq",
+                    &[],
+                )
+            })
+            .unwrap();
         let mut prev = GENESIS.to_string();
         for r in rows {
             let (seq, mut details) = (r.i(0), r.s(5));
             if seq == 2 {
                 details = json!({"passed": true}).to_string();
             }
-            let h = audit::entry_hash(b"guess", &prev, seq, &r.s(1), &r.s(2), &r.s(3), r.os(4).as_deref(), &details, r.b(6));
-            s.raw_exec("UPDATE audit SET details=?2, prev_hash=?3, hash=?4 WHERE seq=?1", p![seq, details, prev.as_str(), h.as_str()]).unwrap();
+            let h = audit::entry_hash(
+                b"guess",
+                &prev,
+                seq,
+                &r.s(1),
+                &r.s(2),
+                &r.s(3),
+                r.os(4).as_deref(),
+                &details,
+                r.b(6),
+            );
+            s.raw_exec(
+                "UPDATE audit SET details=?2, prev_hash=?3, hash=?4 WHERE seq=?1",
+                p![seq, details, prev.as_str(), h.as_str()],
+            )
+            .unwrap();
             prev = h;
         }
         let r = s.verify_audit().unwrap();
@@ -764,19 +1180,40 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (s, cfg) = anchored(d.path());
         for i in 0..3 {
-            s.audit("gate", "evaluate", None, json!({"i": i}), true).unwrap();
+            s.audit("gate", "evaluate", None, json!({"i": i}), true)
+                .unwrap();
         }
         s.raw_batch("DROP TRIGGER audit_no_update;").unwrap();
         let mut prev = GENESIS.to_string();
         for seq in 1..=3i64 {
-            let r = s.db.run(|e| e.one("SELECT ts,actor,action FROM audit WHERE seq=?1", p![seq])).unwrap().unwrap();
+            let r =
+                s.db.run(|e| e.one("SELECT ts,actor,action FROM audit WHERE seq=?1", p![seq]))
+                    .unwrap()
+                    .unwrap();
             let details = json!({"i": 100 + seq}).to_string();
-            let h = audit::entry_hash(&cfg.key, &prev, seq, &r.s(0), &r.s(1), &r.s(2), None, &details, true);
-            s.raw_exec("UPDATE audit SET details=?2, prev_hash=?3, hash=?4 WHERE seq=?1", p![seq, details, prev.as_str(), h.as_str()]).unwrap();
+            let h = audit::entry_hash(
+                &cfg.key,
+                &prev,
+                seq,
+                &r.s(0),
+                &r.s(1),
+                &r.s(2),
+                None,
+                &details,
+                true,
+            );
+            s.raw_exec(
+                "UPDATE audit SET details=?2, prev_hash=?3, hash=?4 WHERE seq=?1",
+                p![seq, details, prev.as_str(), h.as_str()],
+            )
+            .unwrap();
             prev = h;
         }
         let r = s.verify_audit().unwrap();
-        assert!(!r.ok && r.problem.as_deref().unwrap().contains("rewritten"), "{r:?}");
+        assert!(
+            !r.ok && r.problem.as_deref().unwrap().contains("rewritten"),
+            "{r:?}"
+        );
     }
 
     /// Replacing the DB with an older backup (rollback) is truncation by another name.
@@ -785,7 +1222,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (s, cfg) = anchored(d.path());
         s.audit("a", "x", None, json!({}), true).unwrap();
-        s.raw_batch(&format!("VACUUM INTO '{}'", d.path().join("old.db").display())).unwrap();
+        s.raw_batch(&format!(
+            "VACUUM INTO '{}'",
+            d.path().join("old.db").display()
+        ))
+        .unwrap();
         s.audit("a", "promote", None, json!({}), true).unwrap();
         drop(s);
         let old = Store::open(&d.path().join("old.db"), cfg).unwrap();

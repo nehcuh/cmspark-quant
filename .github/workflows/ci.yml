@@ -1,0 +1,64 @@
+name: ci
+on:
+  push: { branches: [master] }
+  pull_request:
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt -p cmsq-core -p cmsq-cli --check
+      - name: clippy
+        run: cargo clippy -p cmsq-core -p cmsq-cli --all-targets -- -D warnings
+      - name: tests
+        run: cargo test -p cmsq-core -p cmsq-cli
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: vn.py shim
+        run: pip install numpy pandas && python3 scripts/test_vnpy_shim.py
+  e2e-sqlite:
+    runs-on: ubuntu-22.04  # 24.04's AppArmor blocks bwrap network namespaces
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install numpy pandas
+      - name: CI runner packages (ephemeral GitHub VM)
+        run: sudo apt-get update -q && sudo apt-get install -yq bubblewrap python3-numpy python3-pandas  # bwrap dev backend uses system python
+      - name: runner image
+        run: scripts/build_runner.sh
+      - name: sandbox tests
+        run: scripts/test_docker.sh 2>&1 | tee /tmp/td.log; r=${PIPESTATUS[0]}; [ $r = 0 ] || grep -E 'panicked|failed:|Error|error:' /tmp/td.log | head -20 | sed 's/^/::error::/'; exit $r
+      - name: e2e (sqlite)
+        env: { CMSQ_DB: sqlite }
+        run: scripts/e2e.sh 2>&1 | tee /tmp/e2e.log; r=${PIPESTATUS[0]}; [ $r = 0 ] || tail -20 /tmp/e2e.log | sed 's/^/::error::/'; exit $r
+  e2e-postgres:
+    runs-on: ubuntu-22.04
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install numpy pandas
+      - name: CI runner packages (ephemeral GitHub VM)
+        run: sudo apt-get update -q && sudo apt-get install -yq bubblewrap python3-numpy python3-pandas
+      - name: runner image
+        run: scripts/build_runner.sh
+      - name: PostgreSQL/TimescaleDB (deploy/docker-compose.yml)
+        run: scripts/db_up.sh
+      - name: PostgreSQL tests
+        run: scripts/test_pg.sh 2>&1 | tee /tmp/pg.log; r=${PIPESTATUS[0]}; [ $r = 0 ] || grep -E 'panicked|failed:|error' /tmp/pg.log | head -20 | sed 's/^/::error::/'; exit $r
+      - name: e2e (postgres)
+        run: scripts/e2e.sh 2>&1 | tee /tmp/e2e.log; r=${PIPESTATUS[0]}; [ $r = 0 ] || tail -20 /tmp/e2e.log | sed 's/^/::error::/'; exit $r

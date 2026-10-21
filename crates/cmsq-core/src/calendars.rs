@@ -34,19 +34,31 @@ fn ymd(d: NaiveDate) -> String {
 
 impl ExchangeCalendar {
     pub fn weekdays(exchange: &str) -> Self {
-        Self { exchange: exchange.into(), cal: None }
+        Self {
+            exchange: exchange.into(),
+            cal: None,
+        }
     }
     pub fn path(data_dir: &Path, exchange: &str) -> std::path::PathBuf {
         data_dir.join(format!("_calendar_{exchange}.txt"))
     }
     /// Snapshot if present, weekday fallback otherwise.
     pub fn load(data_dir: &Path, exchange: &str) -> Self {
-        Self { exchange: exchange.into(), cal: Calendar::load(&Self::path(data_dir, exchange)).ok() }
+        Self {
+            exchange: exchange.into(),
+            cal: Calendar::load(&Self::path(data_dir, exchange)).ok(),
+        }
     }
     pub fn source(&self) -> String {
         match &self.cal {
-            Some(c) => format!("tushare trade_cal {} snapshot {}..{}", self.exchange, c.first, c.last),
-            None => format!("weekday fallback (no _calendar_{}.txt; run `cmsq data calendar --exchange {}`)", self.exchange, self.exchange),
+            Some(c) => format!(
+                "tushare trade_cal {} snapshot {}..{}",
+                self.exchange, c.first, c.last
+            ),
+            None => format!(
+                "weekday fallback (no _calendar_{}.txt; run `cmsq data calendar --exchange {}`)",
+                self.exchange, self.exchange
+            ),
         }
     }
     /// Outside the snapshot range we fall back to weekdays rather than guess.
@@ -55,7 +67,11 @@ impl ExchangeCalendar {
         match &self.cal {
             Some(c) => {
                 let s = ymd(d);
-                if s < c.first || s > c.last { weekday } else { c.is_open(&s) }
+                if s < c.first || s > c.last {
+                    weekday
+                } else {
+                    c.is_open(&s)
+                }
             }
             None => weekday,
         }
@@ -113,14 +129,25 @@ pub struct FuturesCalendars {
 
 impl FuturesCalendars {
     pub fn load(data_dir: &Path) -> Self {
-        Self { by_exchange: FUTURES_EXCHANGES.iter().map(|e| (e.to_string(), ExchangeCalendar::load(data_dir, e))).collect() }
+        Self {
+            by_exchange: FUTURES_EXCHANGES
+                .iter()
+                .map(|e| (e.to_string(), ExchangeCalendar::load(data_dir, e)))
+                .collect(),
+        }
     }
     pub fn get(&self, exchange: &str) -> ExchangeCalendar {
-        self.by_exchange.get(exchange).cloned().unwrap_or_else(|| ExchangeCalendar::weekdays(exchange))
+        self.by_exchange
+            .get(exchange)
+            .cloned()
+            .unwrap_or_else(|| ExchangeCalendar::weekdays(exchange))
     }
     /// Exchange of a CTP instrument id (`rb2510`, `IF2512`, `SR509`) via the contract table.
     pub fn exchange_of_instrument(instrument: &str) -> Option<String> {
-        let p: String = instrument.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let p: String = instrument
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
         crate::futures::spec_for(&format!("FUT_{}", p.to_uppercase())).map(|s| s.exchange)
     }
     pub fn for_instrument(&self, instrument: &str) -> ExchangeCalendar {
@@ -150,7 +177,10 @@ mod tests {
             days.push((ymd(x), wk && !hol));
             x += Duration::days(1);
         }
-        ExchangeCalendar { exchange: "SHFE".into(), cal: Some(Calendar::from_days(days)) }
+        ExchangeCalendar {
+            exchange: "SHFE".into(),
+            cal: Some(Calendar::from_days(days)),
+        }
     }
 
     #[test]
@@ -169,15 +199,30 @@ mod tests {
         assert_eq!(w.trading_day(dt("2024-09-30 21:30:00")), d("2024-10-01"));
         assert!(w.has_night_session(d("2024-09-30")));
         assert!(w.source().contains("fallback") && c.source().contains("snapshot"));
-        assert_eq!(ExchangeCalendar::night_evening(dt("2024-09-28 00:30:00")), Some(d("2024-09-27")));
-        assert_eq!(ExchangeCalendar::night_evening(dt("2024-09-27 10:00:00")), None);
+        assert_eq!(
+            ExchangeCalendar::night_evening(dt("2024-09-28 00:30:00")),
+            Some(d("2024-09-27"))
+        );
+        assert_eq!(
+            ExchangeCalendar::night_evening(dt("2024-09-27 10:00:00")),
+            None
+        );
     }
 
     #[test]
     fn instrument_exchange_lookup() {
-        assert_eq!(FuturesCalendars::exchange_of_instrument("rb2510").as_deref(), Some("SHFE"));
-        assert_eq!(FuturesCalendars::exchange_of_instrument("IF2512").as_deref(), Some("CFFEX"));
-        assert_eq!(FuturesCalendars::exchange_of_instrument("SR509").as_deref(), Some("CZCE"));
+        assert_eq!(
+            FuturesCalendars::exchange_of_instrument("rb2510").as_deref(),
+            Some("SHFE")
+        );
+        assert_eq!(
+            FuturesCalendars::exchange_of_instrument("IF2512").as_deref(),
+            Some("CFFEX")
+        );
+        assert_eq!(
+            FuturesCalendars::exchange_of_instrument("SR509").as_deref(),
+            Some("CZCE")
+        );
         assert_eq!(FuturesCalendars::exchange_of_instrument("zz123"), None);
     }
 

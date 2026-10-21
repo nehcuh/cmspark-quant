@@ -58,7 +58,10 @@ pub struct ScrapeDrop {
 impl ScrapeDrop {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > MAX_DROP_BYTES {
-            bail!("drop too large: {} bytes (max {MAX_DROP_BYTES})", bytes.len());
+            bail!(
+                "drop too large: {} bytes (max {MAX_DROP_BYTES})",
+                bytes.len()
+            );
         }
         let d: ScrapeDrop = serde_json::from_slice(bytes).context("invalid drop JSON")?;
         if d.spec != SPEC {
@@ -67,7 +70,8 @@ impl ScrapeDrop {
         if d.content.title.trim().is_empty() || d.content.body.trim().is_empty() {
             bail!("content.title and content.body are required");
         }
-        chrono::DateTime::parse_from_rfc3339(&d.scraped_at).context("scraped_at must be RFC3339")?;
+        chrono::DateTime::parse_from_rfc3339(&d.scraped_at)
+            .context("scraped_at must be RFC3339")?;
         if let Some(u) = &d.source.url {
             if !(u.starts_with("https://") || u.starts_with("http://")) {
                 bail!("source.url must be http(s)");
@@ -94,7 +98,11 @@ impl ScrapeDrop {
 mod tests {
     use super::*;
     fn sample() -> String {
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/posts/ma_crossover.json")).unwrap()
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/posts/ma_crossover.json"
+        ))
+        .unwrap()
     }
     #[test]
     fn parses_fixture() {
