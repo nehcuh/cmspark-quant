@@ -39,6 +39,26 @@ enum Backend {
 enum Cmd {
     /// Create workspace, write pinned runner/vendor assets, cache sample data
     Init,
+    /// Scrape community sources (<home>/sources.json, or built-in GitHub sources) ->
+    /// ingest -> extract -> sandboxed backtest; `--every 6h` repeats on a schedule
+    Scrape {
+        /// repeat interval, e.g. 30m, 6h, 1d (default: run once)
+        #[arg(long)]
+        every: Option<String>,
+        /// dataset the new strategies are backtested on
+        #[arg(long, default_value = "FUT_RB")]
+        symbol: String,
+        /// max sandbox backtests per cycle (0 = scrape/extract only)
+        #[arg(long, default_value_t = 3)]
+        backtests: usize,
+        #[arg(long, value_enum, default_value = "docker")]
+        backend: Backend,
+        /// stop after N cycles (with --every)
+        #[arg(long)]
+        cycles: Option<usize>,
+    },
+    /// Source quality scores (what each source's items achieved downstream)
+    SourceScores,
     /// Ingest CMspark drop files (default: <home>/drop)
     Ingest { path: Option<PathBuf> },
     /// Extract all Ingested strategies (or one id)
@@ -260,6 +280,21 @@ async fn executor(b: Backend) -> Result<Box<dyn SandboxExecutor>> {
     }
 }
 
+/// "30m" / "6h" / "1d" / "90s"
+fn parse_every(s: &str) -> Result<std::time::Duration> {
+    let (n, u) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = n.parse().with_context(|| format!("bad interval {s}"))?;
+    let secs = match u {
+        "s" => n,
+        "m" | "" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86400,
+        _ => anyhow::bail!("bad interval unit in {s} (use s/m/h/d)"),
+    };
+    anyhow::ensure!(secs >= 60, "interval must be at least 1 minute");
+    Ok(std::time::Duration::from_secs(secs))
+}
+
 fn pct(v: &serde_json::Value, k: &str) -> String {
     v[k].as_f64()
         .map(|x| format!("{:+.2}%", x * 100.0))
@@ -287,6 +322,76 @@ async fn main() -> Result<()> {
         }
     };
     match cli.cmd {
+        Cmd::Scrape {
+            every,
+            symbol,
+            backtests,
+            backend,
+            cycles,
+        } => {
+            let sources = cmsq_core::scrape::load_sources(&o.home.abs().join("sources.json"))?;
+            let token = std::fs::read_to_string(o.home.secrets.join("github_token"))
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            let fetcher = cmsq_core::scrape::HttpFetcher::new(token)?;
+            let period = every.as_deref().map(parse_every).transpose()?;
+            let exec = if backtests > 0 {
+                Some(executor(backend).await?)
+            } else {
+                None
+            };
+            let mut n = 0;
+            loop {
+                n += 1;
+                let rep = o
+                    .scrape_cycle(&fetcher, &sources, exec.as_deref(), &symbol, backtests)
+                    .await?;
+                let mut lines = vec![format!("scrape cycle {n} (run {})", &rep.run_id[..8])];
+                for s in &rep.sources {
+                    lines.push(format!(
+                        "  {:<34} quota {:>2}  new {:>2}  dup {:>2}  invalid {}  {}",
+                        s["source"].as_str().unwrap_or(""),
+                        s["quota"],
+                        s["new"],
+                        s["duplicates"],
+                        s["invalid"],
+                        s["error"]
+                            .as_str()
+                            .map(|e| format!("ERROR {e}"))
+                            .unwrap_or_default()
+                    ));
+                }
+                lines.push(format!(
+                    "  extracted {}  backtested {}",
+                    rep.extracted.len(),
+                    rep.backtests.len()
+                ));
+                for b in &rep.backtests {
+                    lines.push(format!(
+                        "    {} {}",
+                        &b["strategy"].as_str().unwrap_or("")[..8],
+                        b["status"].as_str().or(b["error"].as_str()).unwrap_or("")
+                    ));
+                }
+                for sc in &rep.scores {
+                    lines.push(format!(
+                        "  score {:.3}  {:<34} items {} extracted {} backtested {} passed {}",
+                        sc.score, sc.source, sc.items, sc.extracted, sc.backtested, sc.gate_passed
+                    ));
+                }
+                out(serde_json::to_value(&rep)?, lines.join("\n"));
+                match period {
+                    Some(p) if cycles.is_none_or(|c| n < c) => tokio::time::sleep(p).await,
+                    _ => break,
+                }
+            }
+        }
+        Cmd::SourceScores => {
+            let v = o.source_scores()?;
+            let lines: Vec<String> = v.iter().map(|sc| format!("{:.3}  {:<34} items {:>3}  extracted {:>3}  backtested {:>3}  gate-passed {:>2}  failed {:>2}", sc.score, sc.source, sc.items, sc.extracted, sc.backtested, sc.gate_passed, sc.failed)).collect();
+            out(serde_json::to_value(&v)?, lines.join("\n"));
+        }
         Cmd::Init => {
             o.ensure_samples().await?;
             out(

@@ -17,6 +17,7 @@ pub mod qifi;
 pub mod replay;
 pub mod sandbox;
 pub mod scorer;
+pub mod scrape;
 pub mod state;
 pub mod store;
 pub mod tradestats;

@@ -2483,3 +2483,140 @@ pub fn attested_real_data(att: &serde_json::Value, symbol: &str) -> bool {
 pub fn signed_rolls(att: &serde_json::Value) -> Option<Vec<crate::futures::Roll>> {
     serde_json::from_value(att.get("rolls")?.clone()).ok()
 }
+
+/// Outcome of one scheduled scrape cycle (also stored as a `scrape` research run).
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct ScrapeReport {
+    pub run_id: String,
+    pub sources: Vec<serde_json::Value>,
+    pub new: Vec<String>,
+    pub duplicates: usize,
+    pub invalid: usize,
+    pub extracted: Vec<String>,
+    pub backtests: Vec<serde_json::Value>,
+    pub scores: Vec<crate::scrape::SourceScore>,
+}
+
+impl Orchestrator {
+    /// Source quality from what each source's items achieved downstream.
+    pub fn source_scores(&self) -> Result<Vec<crate::scrape::SourceScore>> {
+        let strategies = self.store.list_strategies(None)?;
+        let jobs = self.store.list_jobs(None)?;
+        let ran: std::collections::HashSet<String> = jobs
+            .iter()
+            .filter(|j| j.status == "succeeded")
+            .map(|j| j.strategy_id.clone())
+            .collect();
+        let tried: std::collections::HashSet<String> =
+            jobs.iter().map(|j| j.strategy_id.clone()).collect();
+        Ok(crate::scrape::score_sources(
+            &strategies,
+            &|id| tried.contains(id),
+            &|id| ran.contains(id),
+        ))
+    }
+
+    /// One cycle: fetch every source (quota by its score) -> ingest -> extract
+    /// -> sandboxed backtest of up to `max_backtests` new strategies on `symbol`.
+    /// A failing source is recorded and skipped; it never stops the cycle.
+    pub async fn scrape_cycle(
+        &self,
+        fetcher: &dyn crate::scrape::Fetcher,
+        sources: &[crate::scrape::SourceConfig],
+        exec: Option<&dyn SandboxExecutor>,
+        symbol: &str,
+        max_backtests: usize,
+    ) -> Result<ScrapeReport> {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let scores = self.source_scores()?;
+        let mut rep = ScrapeReport {
+            run_id: run_id.clone(),
+            ..Default::default()
+        };
+        self.store.insert_run(&crate::store::ResearchRun {
+            id: run_id.clone(),
+            kind: "scrape".into(),
+            strategy_id: None,
+            spec: json!({"sources": sources, "symbol": symbol, "max_backtests": max_backtests}),
+            result: None,
+            status: "running".into(),
+            created_at: Utc::now().to_rfc3339(),
+            finished_at: None,
+        })?;
+        let now = Utc::now().to_rfc3339();
+        for src in sources {
+            let prior = scores
+                .iter()
+                .find(|s| s.source == src.id())
+                .map(|s| s.score);
+            let q = crate::scrape::quota(src.max_files(), prior);
+            let (mut new, mut dup, mut bad) = (0, 0, 0);
+            let res = crate::scrape::fetch_source(fetcher, src, q).await;
+            let err = res.as_ref().err().map(|e| format!("{e:#}"));
+            for it in res.unwrap_or_default() {
+                let bytes = serde_json::to_vec(&crate::scrape::to_drop(src, &it, &now))?;
+                match self.ingest_bytes(&bytes, &format!("scrape:{}", src.id()))? {
+                    IngestOutcome::New(id) => {
+                        new += 1;
+                        rep.new.push(id)
+                    }
+                    IngestOutcome::Duplicate(_) => dup += 1,
+                    IngestOutcome::Invalid(_) => bad += 1,
+                }
+            }
+            rep.duplicates += dup;
+            rep.invalid += bad;
+            let entry = json!({"source": src.id(), "prior_score": prior, "quota": q, "new": new, "duplicates": dup, "invalid": bad, "error": err});
+            self.store.audit(
+                "scrape",
+                "scrape_source",
+                None,
+                entry.clone(),
+                err.is_none(),
+            )?;
+            rep.sources.push(entry);
+        }
+        for id in rep.new.clone() {
+            if let Ok(s) = self.extract(&id, &crate::extract::HeuristicExtractor).await {
+                if s.status == StrategyStatus::Extracted {
+                    rep.extracted.push(id);
+                }
+            }
+        }
+        if let Some(exec) = exec {
+            // new items first, then the backlog of earlier scraped items that were
+            // extracted but never attempted (the per-cycle cap left them behind).
+            let ids: std::collections::HashSet<String> =
+                sources.iter().map(|c| c.id().to_string()).collect();
+            let tried: std::collections::HashSet<String> = self
+                .store
+                .list_jobs(None)?
+                .into_iter()
+                .map(|j| j.strategy_id)
+                .collect();
+            let mut queue = rep.extracted.clone();
+            for s in self.store.list_strategies(None)? {
+                if !s.sample
+                    && s.status == StrategyStatus::Extracted
+                    && ids.contains(&s.source_site)
+                    && !tried.contains(&s.id)
+                    && !queue.contains(&s.id)
+                {
+                    queue.push(s.id);
+                }
+            }
+            for id in queue.iter().take(max_backtests) {
+                let r = self.backtest(id, symbol, exec, None).await;
+                rep.backtests.push(match r {
+                    Ok(b) => json!({"strategy": id, "status": self.get(id).map(|s| s.status.to_string()).unwrap_or_default(), "summary": serde_json::to_value(&b).unwrap_or_default()}),
+                    Err(e) => json!({"strategy": id, "error": format!("{e:#}")}),
+                });
+            }
+        }
+        rep.scores = self.source_scores()?;
+        self.store
+            .finish_run(&run_id, "done", &serde_json::to_value(&rep)?)?;
+        self.store.audit("scrape", "scrape_cycle", None, json!({"run": run_id, "new": rep.new.len(), "extracted": rep.extracted.len(), "backtests": rep.backtests.len()}), true)?;
+        Ok(rep)
+    }
+}
