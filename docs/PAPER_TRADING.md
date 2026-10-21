@@ -58,6 +58,6 @@ The driver sends market orders, closing before opening, and the matcher fills th
 `--from-db` replays recorded ticks, so recorded ticks give identical fills. The live mode uses the CTP md feed (`--features ctp`, market data only).
 
 ## Status
-Done: engine, persistence, audit, CLI. Next chunk: dashboard view.
+Done: engine, persistence, audit, CLI, dashboard tab "模拟交易 Paper Trading" (account, positions, settlement equity, recent fills). Live quote push comes with the optional Redis layer.
 
 Design reference: matching ideas only. No third-party code is used.
