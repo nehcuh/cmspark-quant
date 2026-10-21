@@ -55,6 +55,7 @@ const SAMPLES: &[(&str, &str, &str)] = &[
     ("SAMPLE_TREND", include_str!("../../../fixtures/market/SAMPLE_TREND.csv"), include_str!("../../../fixtures/market/SAMPLE_TREND.meta.json")),
     ("SAMPLE_RANGE", include_str!("../../../fixtures/market/SAMPLE_RANGE.csv"), include_str!("../../../fixtures/market/SAMPLE_RANGE.meta.json")),
     ("SAMPLE_REGIME", include_str!("../../../fixtures/market/SAMPLE_REGIME.csv"), include_str!("../../../fixtures/market/SAMPLE_REGIME.meta.json")),
+    ("SAMPLE_PERSIST", include_str!("../../../fixtures/market/SAMPLE_PERSIST.csv"), include_str!("../../../fixtures/market/SAMPLE_PERSIST.meta.json")),
 ];
 
 impl SampleSource {

@@ -613,8 +613,10 @@ impl Orchestrator {
         trial["params_hash"] = json!(phash);
         trial["ledger_position"] = json!(all.len());
         trial["near_duplicates_of"] = json!(near_dups);
+        let synthetic = meta.source == "sample";
+        let capacity = scorer::capacity(dev, &sim, fut.as_ref().map(|f| f.multiplier).unwrap_or(1.0), warm, dev_end, 0.05);
         let result = json!({
-            "schema_version": 3, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL },
+            "schema_version": 3, "synthetic_data": synthetic, "capacity_cny": capacity, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL },
             "market": if fut.is_some() { "cn_futures" } else { "cn_ashare" }, "futures_spec": fut,
             "run_kind": run_kind, "group_id": group, "params": params,
             "costs": self.costs, "initial_capital": scorer::INITIAL_CAPITAL, "runner_identity": identity, "backend": exec.name(), "hardened": exec.hardened(),
@@ -633,7 +635,7 @@ impl Orchestrator {
         self.store.audit("sandbox", "sandbox_finish", Some(&s.id), json!({"job": job_id, "status": "succeeded", "ms": ms, "containers": probe_rep.containers, "run_kind": run_kind}), true)?;
         let high: Vec<String> = e.risks.iter().filter(|r| r.severity == Severity::High && crate::extract::BLOCKING_RISKS.contains(&r.code.as_str())).map(|r| r.code.clone()).collect();
         Ok(RunOutcome::Scored(Box::new(Scored { job_id, symbol: symbol.into(), params: params.clone(), dm, dm2, folds, bhm, probe: probe_rep, adjusted, validated,
-            identity, hardened: exec.hardened(), dsr, positions: full, dev_bars: dev.to_vec(), result, high_risks: high, equity: sim.equity })))
+            identity, hardened: exec.hardened(), dsr, positions: full, dev_bars: dev.to_vec(), result, high_risks: high, equity: sim.equity, synthetic, capacity })))
     }
 
     /// DSR against the whole ledger. N = distinct (idea, parameter set)
@@ -653,7 +655,7 @@ impl Orchestrator {
     fn gate_scored(&self, sc: &Scored) -> gate::GateOutcome {
         gate::evaluate(&gate::GateInput { job_status: "succeeded", hardened: sc.hardened, runner_identity: sc.identity.as_deref(), dev: &sc.dm,
             dev_cost_2x: &sc.dm2, folds: &sc.folds, dsr: &sc.dsr, probe: &sc.probe, data_adjusted: sc.adjusted, data_validated: sc.validated.clone(), high_risks: &sc.high_risks,
-            buy_hold: &sc.bhm, expected_runner: self.expected_runner_id().as_deref() }, &self.gate)
+            buy_hold: &sc.bhm, expected_runner: self.expected_runner_id().as_deref(), synthetic: sc.synthetic, capacity: sc.capacity }, &self.gate)
     }
 
     fn code_of(s: &Strategy) -> Result<(ExtractedStrategy, String)> {
@@ -893,7 +895,8 @@ impl Orchestrator {
         let high: Vec<String> = scored.iter().flat_map(|x| x.high_risks.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
         let g = gate::evaluate(&gate::GateInput { job_status: "succeeded", hardened: exec.hardened(), runner_identity: scored[0].identity.as_deref(), dev: &pm, dev_cost_2x: &pm2,
             folds: &folds, dsr: &dsr, probe: &probe, data_adjusted: scored.iter().all(|x| x.adjusted), data_validated: validated, high_risks: &high, buy_hold: &bhm,
-            expected_runner: self.expected_runner_id().as_deref() }, &self.gate);
+            expected_runner: self.expected_runner_id().as_deref(), synthetic: scored.iter().any(|x| x.synthetic),
+            capacity: scored.iter().map(|x| x.capacity).collect::<Option<Vec<f64>>>().and_then(|v| v.into_iter().reduce(f64::min)) }, &self.gate);
         let eq_path = self.home.root.join("runs").join(&run_id);
         std::fs::create_dir_all(&eq_path)?;
         let mut csv = String::from("date,equity,equity_cost2x,gross_exposure");
@@ -1145,6 +1148,8 @@ pub struct Scored {
     pub result: serde_json::Value,
     pub high_risks: Vec<String>,
     pub equity: Vec<f64>,
+    pub synthetic: bool,
+    pub capacity: Option<f64>,
 }
 
 pub enum RunOutcome {

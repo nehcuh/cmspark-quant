@@ -109,6 +109,7 @@ async fn docker_pipeline_gate_then_vault_promote() {
     // explicit, test-only relaxation of the community-selection DSR floor (default 20)
     // so the vault path can be exercised on the synthetic sample
     o.gate.dsr_min_trials = 1;
+    o.gate.allow_synthetic = true;
     let id = add(&o, "posts", "ma_crossover").await.unwrap();
     let r = o.backtest(&id, "SAMPLE_REGIME", &d, None).await.unwrap();
     assert_eq!(r.status, StrategyStatus::GatePassed, "{:?}", r.reasons);

@@ -131,6 +131,16 @@ scripts/dashboard_demo.sh            # 演示工作区 + Dashboard
 * 对抗审查记录见 `docs/reviews/06-pingjin-calendar-qifi-tradestats.md`。
 * 验证：`cargo test` 全部通过（core 单元测试 81 个，另有集成测试），clippy 0 告警，`test_docker.sh` 通过，`e2e.sh` 通过（E2E OK）。
 
+## 11. 正确性一轮（2026-10-21，见 reviews/07）
+* 平今规则按公开资料核对后改正：上期所和能源中心由交易者指定（按较便宜的一档建模）；大商所、郑商所、中金所、广期所
+  持仓按先开先平减扣，但只要当日有今仓，手续费先按平今收取，直到按平今收费的手数达到当日开仓手数。
+* vn.py shim（runner 2.2.2）：委托价按合约最小变动价位取整（与 BacktestingEngine 的 round_to 一致）；
+  用 `cmsq_max_units` 参数或策略的 `max_units` 属性支持加仓（海龟策略为 4 个单位）。
+* 门禁新增 `real_market_data`（合成数据不能通过，只有演示时设置 `CMSQ_ALLOW_SYNTHETIC=1` 才放行）和 `capacity`
+  （容量估计：90% 的成交不超过当日成交额的 5%，最低 ¥100 万）。
+* e2e 新增 5b 节，完整跑通 GatePassed → vault → Promoted → QIFI 导出。所用的 SAMPLE_PERSIST 是固定牛熊节奏的
+  合成数据，只用来演示流程。
+
 ## 9. 后续阶段
 * **P1：组合与参数扫描。** 多标的组合回测、参数网格扫描。每个参数点都计入全库 trial 账本和 DSR 的 N，
   并配合 walk-forward 与 vault 纪律，避免把扫描变成过拟合。同时补上 BaoStock 第二校验源，在国内节点验证 rstdx。

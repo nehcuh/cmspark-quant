@@ -191,6 +191,25 @@ pub struct Fill {
     pub kind: String,
 }
 
+/// Capacity estimate (CNY): for every fill in bars `[lo, hi)` (roll legs
+/// excluded), the account size at which that fill would be `participation` of
+/// the day's traded value; the estimate is the 10th percentile across fills
+/// (90% of fills fit). `mult` = contract multiplier (1 for shares); A-share
+/// fill quantities are on the adjusted scale, so notional uses `adj_price`.
+pub fn capacity(bars: &[Bar], sim: &SimResult, mult: f64, lo: usize, hi: usize, participation: f64) -> Option<f64> {
+    let mut caps: Vec<f64> = sim.fills.iter().filter(|f| f.t >= lo.max(1) && f.t < hi && !f.kind.starts_with("roll")).filter_map(|f| {
+        let eq = *sim.equity.get(f.t - 1)?;
+        let notional = if mult == 1.0 { (f.qty * f.adj_price).abs() } else { (f.qty * f.price * mult).abs() };
+        let day_value = bars.get(f.t)?.volume * bars[f.t].close * mult;
+        (notional > 0.0 && eq > 0.0 && day_value > 0.0).then(|| participation * day_value / (notional / eq))
+    }).collect();
+    if caps.is_empty() {
+        return None;
+    }
+    caps.sort_by(f64::total_cmp);
+    Some(caps[((caps.len() - 1) as f64 * 0.1).floor() as usize])
+}
+
 pub const INITIAL_CAPITAL: f64 = 1_000_000.0;
 
 /// Simulate long-only target weights `pos` (decided at each bar's close).
@@ -838,5 +857,19 @@ mod tests {
         let a = simulate_portfolio(&l, &Alloc::Equal, &CostModel::default());
         let b = simulate("SH600000", &l[0].bars, &l[0].pos, &CostModel::default());
         assert!((a.sim.equity.last().unwrap() - b.equity.last().unwrap()).abs() < 1.0);
+    }
+
+    #[test]
+    fn capacity_is_p10_of_fill_sizes_vs_daily_value() {
+        let bars: Vec<Bar> = (0..5).map(|i| Bar { date: format!("2024-01-0{}", i + 1), open: 10.0, high: 10.0, low: 10.0, close: 10.0, volume: 1e6, adj_factor: Some(1.0) }).collect();
+        let mut sim = SimResult { equity: vec![1e6; 5], ..Default::default() };
+        // full-equity fill on a ¥10m-volume day: 5% * 1e7 / 1.0 = 5e5
+        sim.fills.push(Fill { t: 1, date: "d".into(), qty: 1e5, price: 10.0, adj_price: 10.0, cost: 0.0, kind: "buy".into() });
+        assert_eq!(capacity(&bars, &sim, 1.0, 0, 5, 0.05), Some(5e5));
+        // a 10%-of-equity fill is 10x roomier; p10 of two fills is the smaller
+        sim.fills.push(Fill { t: 2, qty: 1e4, ..sim.fills[0].clone() });
+        assert_eq!(capacity(&bars, &sim, 1.0, 0, 5, 0.05), Some(5e5));
+        assert_eq!(capacity(&bars, &sim, 1.0, 2, 5, 0.05), Some(5e6), "window");
+        assert_eq!(capacity(&bars, &SimResult::default(), 1.0, 0, 5, 0.05), None);
     }
 }

@@ -39,7 +39,7 @@ for sym, s in specs.items():
 # fills are not free. Trend-following has a STRUCTURAL edge here by construction
 # (regime persistence), which is what lets the demo show a full
 # GatePassed -> vault -> Promoted path. Seed fixed up front (not searched).
-def regime_series(seed=2026, p_stay=0.995, bull=(0.0020, 0.010), bear=(-0.0025, 0.016)):
+def regime_series(seed=2026, p_stay=0.995, bull=(0.0020, 0.010), bear=(-0.0025, 0.016), sym="SAMPLE_REGIME", note="regime_series"):
     rng = np.random.default_rng(seed)
     n = len(dates); state = 0; c = 10.0; rows = []
     for i in range(n):
@@ -53,11 +53,35 @@ def regime_series(seed=2026, p_stay=0.995, bull=(0.0020, 0.010), bear=(-0.0025, 
         rows.append((dates[i], round(o, 3), round(h, 3), round(l, 3), round(cl, 3), int(rng.integers(2e6, 9e6))))
         c = cl
     df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
-    df.to_csv(os.path.join(out, "SAMPLE_REGIME.csv"), index=False)
-    json.dump({"symbol": "SAMPLE_REGIME", "source": "synthetic", "label": "SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES",
-               "generator": "scripts/gen_sample_data.py (regime_series)", "seed": seed, "calendar": "huquant SSE trade_date_sse",
+    df.to_csv(os.path.join(out, f"{sym}.csv"), index=False)
+    json.dump({"symbol": sym, "source": "synthetic", "label": "SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES",
+               "generator": f"scripts/gen_sample_data.py ({note})", "seed": seed, "calendar": "huquant SSE trade_date_sse",
                "start": dates[0], "end": dates[-1], "bars": n, "adjustment": "n/a"},
-              open(os.path.join(out, "SAMPLE_REGIME.meta.json"), "w"), indent=2, ensure_ascii=False)
-    print("SAMPLE_REGIME", n, round(c, 2))
+              open(os.path.join(out, f"{sym}.meta.json"), "w"), indent=2, ensure_ascii=False)
+    print(sym, n, round(c, 2))
 
 regime_series()
+# SAMPLE_PERSIST: a FIXED schedule of long regimes (bull 160 days, bear 80 days,
+# repeating) plus noise. It exists ONLY so the e2e demo can exercise
+# GatePassed -> vault -> Promoted -> QIFI export end to end: a trend follower has a
+# built-in edge here by construction. Mechanics demo, never evidence.
+def persist_series(seed=2027, bull=(0.0016, 0.009), bear=(-0.0022, 0.012), lens=(160, 80)):
+    rng = np.random.default_rng(seed)
+    n = len(dates); c = 10.0; rows = []
+    for i in range(n):
+        mu, sd = bull if (i % sum(lens)) < lens[0] else bear
+        r = np.clip(mu + rng.normal(0, sd), -0.095, 0.095)
+        gap = np.clip(r * 0.35 + rng.normal(0, 0.003), -0.095, 0.095)
+        o = c * np.exp(gap) if i else c
+        cl = c * np.exp(r)
+        h = max(o, cl) * (1 + abs(rng.normal(0, 0.005))); l = min(o, cl) * (1 - abs(rng.normal(0, 0.005)))
+        rows.append((dates[i], round(o, 3), round(h, 3), round(l, 3), round(cl, 3), int(rng.integers(2e6, 9e6))))
+        c = cl
+    pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"]).to_csv(os.path.join(out, "SAMPLE_PERSIST.csv"), index=False)
+    json.dump({"symbol": "SAMPLE_PERSIST", "source": "synthetic", "label": "SAMPLE - SYNTHETIC DATA, NOT REAL MARKET PRICES",
+               "generator": "scripts/gen_sample_data.py (persist_series: fixed bull/bear schedule; e2e vault/QIFI mechanics demo only)", "seed": seed,
+               "calendar": "huquant SSE trade_date_sse", "start": dates[0], "end": dates[-1], "bars": n, "adjustment": "n/a"},
+              open(os.path.join(out, "SAMPLE_PERSIST.meta.json"), "w"), indent=2, ensure_ascii=False)
+    print("SAMPLE_PERSIST", n, round(c, 2))
+
+persist_series()
