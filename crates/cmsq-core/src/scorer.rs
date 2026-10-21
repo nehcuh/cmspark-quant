@@ -1253,3 +1253,218 @@ mod tests {
         );
     }
 }
+
+/// Strategy result inside one market regime (see [`regime_slices`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RegimeSlice {
+    pub regime: String,
+    pub bars: usize,
+    /// compounded strategy return over the bars in this regime
+    pub total_return: f64,
+    /// compounded market (buy-and-hold) return over the same bars
+    pub market_return: f64,
+}
+
+pub const REGIME_TREND_LOOKBACK: usize = 60;
+pub const REGIME_TREND_BAND: f64 = 0.05;
+pub const REGIME_VOL_LOOKBACK: usize = 20;
+
+/// Split bars `[from, to)` by market regime and report the strategy's return in each.
+///
+/// The regime of bar t is decided from the market series up to t-1 only:
+/// - trend: trailing 60-bar market return > +5% `trend_up`, < -5% `trend_down`, else `range`;
+/// - volatility: trailing 20-bar stdev of market returns above / at-or-below the
+///   window's median of that same trailing statistic (`vol_high` / `vol_low`).
+///
+/// `market` is the buy-and-hold equity on the same bars (so it works for single
+/// symbols, futures and portfolios alike); `strat` is the strategy equity.
+pub fn regime_slices(market: &[f64], strat: &[f64], from: usize, to: usize) -> Vec<RegimeSlice> {
+    let to = to.min(market.len()).min(strat.len());
+    let start = from
+        .max(REGIME_TREND_LOOKBACK + 1)
+        .max(REGIME_VOL_LOOKBACK + 1);
+    if to <= start {
+        return vec![];
+    }
+    let r = |s: &[f64], t: usize| s[t] / s[t - 1] - 1.0;
+    let vol = |t: usize| {
+        let xs: Vec<f64> = (t - REGIME_VOL_LOOKBACK..t).map(|k| r(market, k)).collect();
+        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+        (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (xs.len() - 1) as f64).sqrt()
+    };
+    let vols: Vec<f64> = (start..to).map(vol).collect();
+    let mut sorted = vols.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let median = sorted[sorted.len() / 2];
+    let names = ["trend_up", "range", "trend_down", "vol_high", "vol_low"];
+    let mut acc: Vec<(usize, f64, f64)> = vec![(0, 1.0, 1.0); names.len()];
+    for (i, t) in (start..to).enumerate() {
+        let tr = market[t - 1] / market[t - 1 - REGIME_TREND_LOOKBACK] - 1.0;
+        let trend = if tr > REGIME_TREND_BAND {
+            0
+        } else if tr < -REGIME_TREND_BAND {
+            2
+        } else {
+            1
+        };
+        let v = if vols[i] > median { 3 } else { 4 };
+        for k in [trend, v] {
+            acc[k].0 += 1;
+            acc[k].1 *= 1.0 + r(strat, t);
+            acc[k].2 *= 1.0 + r(market, t);
+        }
+    }
+    names
+        .iter()
+        .zip(acc)
+        .map(|(n, (bars, s, m))| RegimeSlice {
+            regime: n.to_string(),
+            bars,
+            total_return: s - 1.0,
+            market_return: m - 1.0,
+        })
+        .collect()
+}
+
+/// One out-of-sample fold of a re-fit (anchored) walk-forward.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RefitFold {
+    pub fold: usize,
+    /// index into the candidate list chosen for this fold
+    pub chosen: usize,
+    /// per-bar Sharpe of the chosen candidate on its training window
+    pub train_sharpe_daily: f64,
+    /// training window is bars `[1, train_end)` (everything before the fold)
+    pub train_end: usize,
+    pub oos: Metrics,
+}
+
+/// Fold `k` of `folds` over the scoring window `[warm, end)`: `(start, end)`.
+pub fn fold_bounds(warm: usize, end: usize, folds: usize, k: usize) -> (usize, usize) {
+    let len = (end - warm) / folds.max(1);
+    (
+        warm + k * len,
+        if k + 1 == folds {
+            end
+        } else {
+            warm + (k + 1) * len
+        },
+    )
+}
+
+/// Anchored walk-forward with a re-fit per fold: for every fold, pick the
+/// candidate (e.g. sweep point) with the best Sharpe on all bars BEFORE the fold,
+/// then score only that candidate on the fold. The fold results are therefore
+/// out-of-sample with respect to parameter selection, unlike fixed-parameter folds
+/// of a point that was itself chosen on the whole window.
+pub fn refit_walk_forward(
+    bars: &[Bar],
+    sims: &[SimResult],
+    warm: usize,
+    end: usize,
+    folds: usize,
+) -> Vec<RefitFold> {
+    if sims.is_empty() || folds == 0 || end <= warm + folds {
+        return vec![];
+    }
+    (0..folds)
+        .map(|k| {
+            let (a, b) = fold_bounds(warm, end, folds, k);
+            let (chosen, train) = sims
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    (
+                        i,
+                        if a > 2 {
+                            metrics(bars, s, 1, a).sharpe_daily
+                        } else {
+                            0.0
+                        },
+                    )
+                })
+                .fold(
+                    (0, f64::NEG_INFINITY),
+                    |acc, x| if x.1 > acc.1 { x } else { acc },
+                );
+            RefitFold {
+                fold: k,
+                chosen,
+                train_sharpe_daily: train,
+                train_end: a,
+                oos: metrics(bars, &sims[chosen], a, b),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod refit_tests {
+    use super::*;
+    fn bars(n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| Bar {
+                date: format!("d{i:04}"),
+                ..Default::default()
+            })
+            .collect()
+    }
+    fn sim(rets: impl Fn(usize) -> f64, n: usize) -> SimResult {
+        let mut e = vec![1.0];
+        for t in 1..n {
+            e.push(e[t - 1] * (1.0 + rets(t)));
+        }
+        SimResult {
+            equity: e,
+            exposure: vec![1.0; n],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn refit_picks_on_past_only() {
+        let n = 500;
+        let b = bars(n);
+        // A wins in the first half, B in the second half (noise keeps Sharpe finite)
+        let wig = |t: usize| if t.is_multiple_of(2) { 0.001 } else { -0.001 };
+        let a = sim(|t| wig(t) + if t < 250 { 0.002 } else { -0.002 }, n);
+        let bb = sim(|t| wig(t) + if t < 250 { -0.002 } else { 0.002 }, n);
+        let f = refit_walk_forward(&b, &[a, bb], 100, n, 4);
+        assert_eq!(f.len(), 4);
+        // folds start at 100,200,300,400: training data before 300 favours A,
+        // so the re-fit keeps choosing A and loses out-of-sample in the B regime
+        assert_eq!(f[2].chosen, 0);
+        assert!(f[2].oos.total_return < 0.0);
+        assert!(f
+            .iter()
+            .all(|x| x.train_end == fold_bounds(100, n, 4, x.fold).0));
+    }
+}
+
+#[cfg(test)]
+mod regime_tests {
+    use super::*;
+    #[test]
+    fn regimes_use_only_past_data_and_split_returns() {
+        // market: 100 bars up 1%/bar, then 100 bars down 1%/bar
+        let mut m = vec![1.0];
+        for t in 1..200 {
+            let g = if t < 100 { 1.01 } else { 0.99 };
+            m.push(m[t - 1] * g);
+        }
+        // strategy = long the market only while trend_up is known
+        let s = m.clone();
+        let sl = regime_slices(&m, &s, 0, 200);
+        let up = sl.iter().find(|x| x.regime == "trend_up").unwrap();
+        let dn = sl.iter().find(|x| x.regime == "trend_down").unwrap();
+        assert!(up.bars > 30 && up.total_return > 0.0);
+        assert!(dn.bars > 30 && dn.total_return < 0.0);
+        // regime of bar t never depends on bar t: changing the last bar's price
+        // changes returns but not the bar counts
+        let mut m2 = m.clone();
+        *m2.last_mut().unwrap() *= 1.5;
+        let sl2 = regime_slices(&m2, &m2, 0, 200);
+        let counts = |v: &[RegimeSlice]| v.iter().map(|x| x.bars).collect::<Vec<_>>();
+        assert_eq!(counts(&sl), counts(&sl2));
+        assert!(regime_slices(&m, &s, 0, 50).is_empty());
+    }
+}

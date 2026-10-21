@@ -1178,6 +1178,7 @@ impl Orchestrator {
             })
             .collect();
         let bhm = scorer::metrics(dev, &bh, warm, dev_end);
+        let regimes = scorer::regime_slices(&bh.equity, &sim.equity, warm, dev_end);
         Self::write_equity(&jd.join("equity.csv"), dev, &full, &sim, &sim2)?;
 
         // ---- library-wide trial ledger + DSR (insert and snapshot are one locked transaction) ----
@@ -1244,7 +1245,7 @@ impl Orchestrator {
             "data_provenance": meta, "data_attestation": att, "rules": rules, "dataset_sha256": dataset_sha, "data_adjusted": adjusted, "data_cross_validation": {"ok": validated.0, "detail": validated.1},
             "split": {"development": {"start": dev[0].date, "end": dev[dev_end - 1].date, "bars": dev_end, "warmup_bars": warm},
                       "vault": {"start": bars[dev_end].date, "end": bars.last().unwrap().date, "bars": bars.len() - dev_end, "note": "never shown to the strategy before promote"}},
-            "development": dm, "development_cost_2x": dm2, "walk_forward_folds": folds, "buy_and_hold": bhm,
+            "development": dm, "development_cost_2x": dm2, "walk_forward_folds": folds, "regimes": regimes, "buy_and_hold": bhm,
             "trades": sim.trades, "blocked": {"limit_up": sim.blocked_limit_up, "limit_down": sim.blocked_limit_down, "suspended": sim.blocked_suspended},
             "costs_paid": sim.costs_paid, "close_today": {"lots": sim.close_today_lots, "fees": sim.close_today_fees},
             "trade_stats": crate::tradestats::stats_window(&sim.fills, fut.as_ref().map(|f| f.multiplier).unwrap_or(1.0), warm),
@@ -1285,10 +1286,12 @@ impl Orchestrator {
             dev_bars: dev.to_vec(),
             result,
             high_risks: high,
+            exposure: sim.exposure.clone(),
             equity: sim.equity,
             synthetic,
             capacity,
             roll_unpriced: sim.roll_unpriced,
+            regimes,
         })))
     }
 
@@ -1350,6 +1353,7 @@ impl Orchestrator {
                 synthetic: sc.synthetic,
                 capacity: sc.capacity,
                 roll_unpriced: sc.roll_unpriced,
+                regimes: &sc.regimes,
             },
             &self.gate,
         )
@@ -1635,9 +1639,18 @@ impl Orchestrator {
         outs.sort_by_key(|o| o.0);
         let mut table = vec![];
         let mut best: Option<Box<Scored>> = None;
+        // probe-clean candidates for the re-fit walk-forward: (point, equity, exposure)
+        let mut cands: Vec<(usize, scorer::SimResult)> = vec![];
+        let mut dev_bars: Vec<Bar> = vec![];
         for (i, o) in outs {
             match o {
                 Ok(RunOutcome::Scored(sc)) => {
+                    if !sc.probe.detected {
+                        cands.push((i, scorer::SimResult { equity: sc.equity.clone(), exposure: sc.exposure.clone(), ..Default::default() }));
+                        if dev_bars.is_empty() {
+                            dev_bars = sc.dev_bars.clone();
+                        }
+                    }
                     table.push(json!({"point": i, "params": points[i], "job": sc.job_id, "status": "succeeded", "sharpe": sc.dm.sharpe, "total_return": sc.dm.total_return,
                         "max_drawdown": sc.dm.max_drawdown, "dsr_at_record": sc.dsr.dsr, "lookahead": sc.probe.detected}));
                     if !sc.probe.detected && best.as_ref().is_none_or(|b| sc.dm.sharpe > b.dm.sharpe) {
@@ -1673,12 +1686,25 @@ impl Orchestrator {
         // the selected point is judged against the FINAL ledger (all K points recorded)
         let (dsr, info) = self.dsr_for(&self.store.trials()?, &best.dm);
         best.dsr = dsr.clone();
+        // walk-forward is judged on re-fit folds: per fold the point is chosen on
+        // earlier bars only, so selecting the best point does not leak into the folds
+        let dev_end = dev_bars.len();
+        let warm = ((dev_end as f64) * self.warmup_frac) as usize;
+        let sims: Vec<scorer::SimResult> = cands.iter().map(|c| c.1.clone()).collect();
+        let refit = scorer::refit_walk_forward(&dev_bars, &sims, warm, dev_end, self.folds);
+        if !refit.is_empty() {
+            best.folds = refit.iter().map(|f| f.oos.clone()).collect();
+        }
+        let refit_json: Vec<serde_json::Value> = refit
+            .iter()
+            .map(|f| json!({"fold": f.fold, "point": cands[f.chosen].0, "params": points[cands[f.chosen].0], "train_bars": f.train_end, "train_sharpe_daily": f.train_sharpe_daily, "oos": f.oos}))
+            .collect();
         let (st, reasons) = self.conclude(
             &s,
             &best,
-            json!({"sweep_run": run_id, "points": table.len(), "trial_info": info}),
+            json!({"sweep_run": run_id, "points": table.len(), "trial_info": info, "walk_forward_refit": refit_json}),
         )?;
-        let r = json!({"points": table, "best": {"job": best.job_id, "params": best.params, "development": best.dm, "dsr": dsr, "trial_info": info}, "status": st, "reasons": reasons});
+        let r = json!({"points": table, "best": {"job": best.job_id, "params": best.params, "development": best.dm, "dsr": dsr, "trial_info": info}, "walk_forward_refit": refit_json, "status": st, "reasons": reasons});
         self.store.finish_run(&run_id, "succeeded", &r)?;
         Ok(SweepSummary {
             run_id,
@@ -1853,6 +1879,7 @@ impl Orchestrator {
             &self.costs,
         );
         let bhm = scorer::metrics(pb, &ew_bh.sim, warm, n);
+        let regimes = scorer::regime_slices(&ew_bh.sim.equity, &ps.sim.equity, warm, n);
         let ikey = crate::extract::idea_key(&code);
         let phash = params_hash(&json!({"params": params, "symbols": symbols, "alloc": alloc}));
         let label = format!("PORTFOLIO:{}", symbols.join("+"));
@@ -1923,6 +1950,7 @@ impl Orchestrator {
                     .collect::<Option<Vec<f64>>>()
                     .and_then(|v| v.into_iter().reduce(f64::min)),
                 roll_unpriced: scored.iter().map(|x| x.roll_unpriced).sum(),
+                regimes: &regimes,
             },
             &self.gate,
         );
@@ -1946,7 +1974,7 @@ impl Orchestrator {
         std::fs::write(eq_path.join("equity.csv"), csv)?;
         let result = json!({"kind": "portfolio", "computed_by": "cmsq-core scorer (host, trusted)", "symbols": symbols, "alloc": alloc, "params": params,
             "window": {"start": dates[0], "end": dates[n - 1], "bars": n, "warmup_bars": warm, "note": "common development dates only; vault bars never used"},
-            "portfolio": pm, "portfolio_cost_2x": pm2, "walk_forward_folds": folds, "equal_weight_buy_and_hold": bhm, "trades": ps.sim.trades, "costs_paid": ps.sim.costs_paid,
+            "portfolio": pm, "portfolio_cost_2x": pm2, "walk_forward_folds": folds, "regimes": regimes, "equal_weight_buy_and_hold": bhm, "trades": ps.sim.trades, "costs_paid": ps.sim.costs_paid,
             "blocked": {"limit_up": ps.sim.blocked_limit_up, "limit_down": ps.sim.blocked_limit_down, "suspended": ps.sim.blocked_suspended},
             "legs": scored.iter().map(|x| json!({"symbol": x.symbol, "job": x.job_id, "development": x.dm, "dsr": x.dsr.dsr})).collect::<Vec<_>>(),
             "leg_return_correlation": scorer::leg_correlation(&legs_in),
@@ -2616,9 +2644,11 @@ pub struct Scored {
     pub result: serde_json::Value,
     pub high_risks: Vec<String>,
     pub equity: Vec<f64>,
+    pub exposure: Vec<f64>,
     pub synthetic: bool,
     pub capacity: Option<f64>,
     pub roll_unpriced: usize,
+    pub regimes: Vec<scorer::RegimeSlice>,
 }
 
 pub enum RunOutcome {
