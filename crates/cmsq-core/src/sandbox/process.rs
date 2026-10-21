@@ -44,6 +44,14 @@ impl ProcessSandboxExecutor {
             "--symlink".into(),
             "usr/bin".into(),
             "/bin".into(),
+            // Debian/Ubuntu resolve libblas etc. via /etc/alternatives symlinks
+            // and the loader cache; both are non-secret, read-only.
+            "--ro-bind-try".into(),
+            "/etc/alternatives".into(),
+            "/etc/alternatives".into(),
+            "--ro-bind-try".into(),
+            "/etc/ld.so.cache".into(),
+            "/etc/ld.so.cache".into(),
             "--proc".into(),
             "/proc".into(),
             "--dev".into(),
