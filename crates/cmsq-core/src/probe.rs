@@ -77,6 +77,28 @@ pub fn container_view(bars: &[Bar]) -> Vec<Bar> {
         .collect()
 }
 
+/// Real prefix, then the real future with every bar's return (open/high/low/close
+/// vs the previous close) negated, chained from the variant's own previous close.
+fn mirror_future(view: &[Bar], k: usize) -> Vec<Bar> {
+    let mut out: Vec<Bar> = view[..k].to_vec();
+    for t in k..view.len() {
+        let (b, pb) = (&view[t], view[t - 1].close);
+        let pc = out[t - 1].close;
+        let m = |x: f64| pc * (2.0 - x / pb).max(0.01);
+        let (o, c) = (m(b.open), m(b.close));
+        out.push(Bar {
+            date: b.date.clone(),
+            open: o,
+            high: m(b.low).max(o).max(c),
+            low: m(b.high).min(o).min(c),
+            close: c,
+            volume: b.volume,
+            adj_factor: None,
+        });
+    }
+    out
+}
+
 fn resample_future(view: &[Bar], k: usize, rng: &mut Rng, max_move: f64) -> Vec<Bar> {
     let mut out: Vec<Bar> = view[..k].to_vec();
     if k < 3 {
@@ -130,7 +152,7 @@ impl Default for ProbeConfig {
     fn default() -> Self {
         Self {
             random_cuts: 5,
-            lo: 0.35,
+            lo: 0.0,
             hi: 0.98,
             tail: vec![1, 2, 4],
             resamples: 1,
@@ -138,14 +160,27 @@ impl Default for ProbeConfig {
     }
 }
 
-/// Choose cut indices inside [from, n). Returns (random cuts, tail cuts), deduplicated.
+/// Choose cut indices inside [from, n). Returns (random cuts, truncation-only
+/// cuts), deduplicated. `from` is the first SCORED bar.
+///
+/// Coverage contract (issue #6): the whole scored domain [from, n) is checked.
+/// * a truncation at `from` itself, so look-ahead anywhere before the first
+///   scored bar (and in the warm-up that produces its position) is caught;
+/// * stratified mirror cuts (see [`strata_cuts`]): a strategy whose positions
+///   depend on the next bar's direction over any run of ≥ 2 stratum widths of
+///   scored positions is detected for EVERY seed; shorter or sparser peeking is
+///   caught with probability ≈ (peeked positions) / (stratum width) per job;
+/// * `random_cuts` uniform cuts over [max(from, lo·n), hi], which also get
+///   bootstrap-resampled futures;
+/// * tail cuts at n - t.
 pub fn choose_cuts(
     n: usize,
     from: usize,
     cfg: &ProbeConfig,
     rng: &mut Rng,
 ) -> (Vec<usize>, Vec<usize>) {
-    let lo = (((n as f64) * cfg.lo) as usize).max(from).max(10);
+    let start = from.max(10);
+    let lo = (((n as f64) * cfg.lo) as usize).max(start);
     let hi = (((n as f64) * cfg.hi) as usize).min(n.saturating_sub(1));
     let mut random = vec![];
     if hi > lo {
@@ -160,16 +195,47 @@ pub fn choose_cuts(
         }
     }
     random.sort();
-    let mut tail: Vec<usize> = cfg
-        .tail
-        .iter()
-        .filter(|&&t| t < n && n - t >= from.max(10))
-        .map(|t| n - t)
-        .filter(|k| !random.contains(k))
-        .collect();
-    tail.sort();
-    tail.dedup();
-    (random, tail)
+    let mut trunc: Vec<usize> = vec![];
+    if start < n {
+        trunc.push(start);
+    }
+    trunc.extend(
+        cfg.tail
+            .iter()
+            .filter(|&&t| t < n && n - t >= start)
+            .map(|t| n - t),
+    );
+    trunc.retain(|k| !random.contains(k));
+    trunc.sort();
+    trunc.dedup();
+    (random, trunc)
+}
+
+/// Stratified mirror cuts over the scored domain [from, hi·n] (issue #6): one
+/// random cut per stratum of `stratum_width` bars. Each gets a `mirror@k` variant
+/// (real prefix, future with every return negated), so a position that depends on
+/// the direction of any future bar flips at k-1 for every seed.
+pub fn strata_cuts(n: usize, from: usize, cfg: &ProbeConfig, rng: &mut Rng) -> Vec<usize> {
+    let start = from.max(10);
+    let hi = (((n as f64) * cfg.hi) as usize).min(n.saturating_sub(1));
+    let mut out = vec![];
+    if hi > start {
+        let w = stratum_width(hi - start);
+        let mut a = start + 1;
+        while a <= hi {
+            let b = (a + w - 1).min(hi);
+            out.push(a + rng.below(b - a + 1));
+            a = b + 1;
+        }
+    }
+    out
+}
+
+pub const MIN_STRATUM: usize = 16;
+pub const MAX_STRATA: usize = 24;
+/// Width of one stratum of the probe's truncation cover for a scored span.
+pub fn stratum_width(span: usize) -> usize {
+    MIN_STRATUM.max(span.div_ceil(MAX_STRATA))
 }
 
 /// Dates the container sees: a fixed weekday sequence starting 2000-01-03,
@@ -205,6 +271,27 @@ pub fn plan(
     max_move: f64,
     rng: &mut Rng,
 ) -> Vec<Variant> {
+    plan_with_mirrors(
+        view,
+        trunc_cuts,
+        resample_cuts,
+        &[],
+        resamples,
+        max_move,
+        rng,
+    )
+}
+
+/// [`plan`] plus `mirror@k` variants for `mirror_cuts`.
+pub fn plan_with_mirrors(
+    view: &[Bar],
+    trunc_cuts: &[usize],
+    resample_cuts: &[usize],
+    mirror_cuts: &[usize],
+    resamples: usize,
+    max_move: f64,
+    rng: &mut Rng,
+) -> Vec<Variant> {
     let n = view.len();
     let fake = fake_dates(n);
     let mut v = vec![Variant {
@@ -220,6 +307,16 @@ pub fn plan(
             name: format!("trunc@{k}"),
             cut: k,
             bars: view[..k].to_vec(),
+        });
+    }
+    for &k in mirror_cuts {
+        if k < 10 || k >= n {
+            continue;
+        }
+        v.push(Variant {
+            name: format!("mirror@{k}"),
+            cut: k,
+            bars: mirror_future(view, k),
         });
     }
     for &k in resample_cuts {
@@ -397,8 +494,14 @@ mod tests {
         let (r2, _) = choose_cuts(1000, 200, &cfg, &mut Rng::new(8));
         assert_eq!(r1.len(), 5);
         assert_ne!(r1, r2);
-        assert!(r1.iter().all(|&k| (350..=980).contains(&k)));
-        assert_eq!(t1, vec![996, 998, 999]);
+        assert!(r1.iter().all(|&k| (200..=980).contains(&k)));
+        // the first scored bar is always cut (issue #6), plus the tail
+        assert_eq!(t1, vec![200, 996, 998, 999]);
+        // mirror strata cover (200, 980] with no gap wider than two strata
+        let m = strata_cuts(1000, 200, &cfg, &mut Rng::new(7));
+        let w = stratum_width(780);
+        assert!(m[0] <= 200 + w && *m.last().unwrap() > 980 - w);
+        assert!(m.windows(2).all(|p| p[1] - p[0] < 2 * w));
         // vault: cuts restricted to the vault window
         let (r, _) = choose_cuts(1000, 800, &cfg, &mut Rng::new(9));
         assert!(r.iter().all(|&k| k >= 800));

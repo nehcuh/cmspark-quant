@@ -117,23 +117,24 @@ impl Orchestrator {
     pub fn reap_stale_jobs(&self) -> Result<Vec<String>> {
         let mut reaped = vec![];
         for j in self.store.stale_running_jobs()? {
-            self.store.finish_job(
+            if self.store.abandon_job(
                 &j.id,
-                "abandoned",
-                None,
-                0,
-                Some("owner process exited before the job finished (crash recovery)"),
-                None,
-            )?;
-            self.store.audit(
-                "orchestrator",
-                "job_reaped",
-                Some(&j.strategy_id),
-                json!({"job": j.id, "owner_pid": j.owner_pid}),
-                true,
-            )?;
-            reaped.push(j.id);
+                "owner process exited before the job finished (crash recovery)",
+            )? {
+                self.store.audit(
+                    "orchestrator",
+                    "job_reaped",
+                    Some(&j.strategy_id),
+                    json!({"job": j.id, "owner_pid": j.owner_pid}),
+                    true,
+                )?;
+                reaped.push(j.id);
+            }
         }
+        // A Backtesting strategy is recovered only when its run lease is provably
+        // dead on this host (issue #8); a live owner between status change and job
+        // insert, or between sweep children, is never touched. Legacy rows without
+        // a lease fall back to "no running job".
         let live: Vec<String> = self
             .store
             .list_jobs(None)?
@@ -145,13 +146,22 @@ impl Orchestrator {
             .store
             .list_strategies(Some(StrategyStatus::Backtesting))?
         {
-            if !live.contains(&s.id) {
-                self.transition(
-                    &s,
-                    StrategyStatus::Failed,
+            let lease = self.store.run_owner(&s.id)?;
+            let dead = match lease.as_deref() {
+                Some(l) => crate::store::lease_alive(l) == Some(false),
+                None => !live.contains(&s.id),
+            };
+            if !dead {
+                continue;
+            }
+            let why = "recovered: backtest was interrupted (owner process exited)";
+            if self.store.reap_backtesting(&s.id, lease.as_deref(), why)? {
+                self.store.audit(
                     "orchestrator",
-                    Some("recovered: backtest was interrupted (process crashed or was killed)"),
-                    json!({"recovery": true}),
+                    "transition:Backtesting->Failed",
+                    Some(&s.id),
+                    json!({"reason": why, "details": {"recovery": true, "lease": lease}}),
+                    true,
                 )?;
                 reaped.push(s.id);
             }
@@ -529,7 +539,9 @@ impl Orchestrator {
         self.store.audit("data", "market_data_fetch", Some(symbol), json!({
             "source": meta.source, "label": meta.label, "snapshot_sha256": meta.extra["snapshot_sha256"], "bars": meta.bars, "start": meta.start, "end": meta.end,
             "adjustment": meta.adjustment, "adjusted": market::is_adjusted(meta, bars), "validation_ok": validated.0, "validation_detail": validated.1,
-            "validation": meta.extra.get("validation"), "router": meta.extra.get("router"), "rules": rules, "fetched_at": meta.fetched_at}), true)?;
+            "validation": meta.extra.get("validation"), "router": meta.extra.get("router"), "rules": rules, "fetched_at": meta.fetched_at,
+            // futures: the roll legs (contract ids, old-leg open/volume) are signed with the snapshot (issue #10)
+            "rolls": meta.extra.get("rolls")}), true)?;
         Ok(())
     }
 
@@ -794,6 +806,15 @@ impl Orchestrator {
                     format!("out of memory (limit {} MB)", self.limits.memory_mb),
                 ))
             }
+            Outcome::QuotaExceeded => {
+                return Err((
+                    "quota_exceeded".into(),
+                    format!(
+                        "output budget exceeded (/out {} B / {} inodes, logs {} B); container killed (variant {})",
+                        self.limits.out_bytes, self.limits.out_inodes, self.limits.log_bytes, v.name
+                    ),
+                ))
+            }
             Outcome::Exited => {}
         }
         if r.stdout.len() >= OUTPUT_CAP || r.stderr.len() >= OUTPUT_CAP {
@@ -1021,16 +1042,20 @@ impl Orchestrator {
         let seed = Rng::from_uuid().next_u64();
         let mut rng = Rng::new(seed);
         let view = probe::container_view(dev);
-        let (rcuts, tcuts) = probe::choose_cuts(dev_end, 10, &self.probe, &mut rng);
+        // probe the whole SCORED domain, from the first scored bar (issue #6)
+        let score_from = ((dev_end as f64) * self.warmup_frac) as usize;
+        let (rcuts, tcuts) = probe::choose_cuts(dev_end, score_from, &self.probe, &mut rng);
+        let mcuts = probe::strata_cuts(dev_end, score_from, &self.probe, &mut rng);
         let trunc: Vec<usize> = rcuts.iter().chain(&tcuts).copied().collect();
         let max_move = match &fut {
             Some(f) => f.limit_pct - 0.005,
             None => scorer::limit_pct(symbol, &dev[0].date) - 0.005,
         };
-        let plan = probe::plan(
+        let plan = probe::plan_with_mirrors(
             &view,
             &trunc,
             &rcuts,
+            &mcuts,
             self.probe.resamples,
             max_move,
             &mut rng,
@@ -1038,7 +1063,7 @@ impl Orchestrator {
         self.store.audit("sandbox", "sandbox_start", Some(&s.id), json!({"job": job_id, "backend": exec.name(), "hardened": exec.hardened(),
             "runner_identity": identity, "limits": self.limits, "symbol": symbol, "data_source": meta.source, "run_kind": run_kind, "group": group, "params": params,
             "dev_window": {"start": dev[0].date, "end": dev[dev_end - 1].date, "bars": dev_end}, "vault_bars": bars.len() - dev_end,
-            "dataset_sha256": dataset_sha, "probe": {"seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "config": self.probe, "container_dates": "fake weekday sequence from 2000-01-03"},
+            "dataset_sha256": dataset_sha, "probe": {"seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "mirror_cuts": mcuts, "score_from": score_from, "config": self.probe, "container_dates": "fake weekday sequence from 2000-01-03"},
             "variants": plan.iter().map(|v| &v.name).collect::<Vec<_>>()}), true)?;
         self.log(&format!(
             "job {} [{run_kind}] {symbol}: {} variants, one fresh container each, random order",
@@ -1081,13 +1106,18 @@ impl Orchestrator {
         let ms = t0.elapsed().as_millis() as i64;
 
         // ---- trusted scoring ----
+        let rolls = signed_rolls(att);
         let (sim, sim2, bh) = match &fut {
             Some(spec) => {
                 let fx = crate::futures::FuturesCosts::default();
+                let run = |p: &[f64], c: &scorer::CostModel| match &rolls {
+                    Some(rs) => crate::futures::simulate_with_rolls(spec, dev, rs, p, &fx, c),
+                    None => crate::futures::simulate(spec, dev, p, &fx, c),
+                };
                 (
-                    crate::futures::simulate(spec, dev, &full, &fx, &self.costs),
-                    crate::futures::simulate(spec, dev, &full, &fx, &self.costs.stressed(2.0)),
-                    crate::futures::simulate(spec, dev, &vec![1.0; dev_end], &fx, &self.costs),
+                    run(&full, &self.costs),
+                    run(&full, &self.costs.stressed(2.0)),
+                    run(&vec![1.0; dev_end], &self.costs),
                 )
             }
             None => (
@@ -1162,7 +1192,7 @@ impl Orchestrator {
         trial["params_hash"] = json!(phash);
         trial["ledger_position"] = json!(all.len());
         trial["near_duplicates_of"] = json!(near_dups);
-        let synthetic = meta.source == "sample";
+        let synthetic = !attested_real_data(att, symbol);
         let capacity = scorer::capacity(
             dev,
             &sim,
@@ -1172,7 +1202,7 @@ impl Orchestrator {
             0.05,
         );
         let result = json!({
-            "schema_version": 3, "synthetic_data": synthetic, "capacity_cny": capacity, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL },
+            "schema_version": 3, "synthetic_data": synthetic, "roll_unpriced": sim.roll_unpriced, "data_class_source": att["source"], "capacity_cny": capacity, "computed_by": "cmsq-core scorer (host, trusted)", "symbol": symbol, "execution": if fut.is_some() { crate::futures::EXECUTION_LABEL } else { scorer::EXECUTION_LABEL },
             "market": if fut.is_some() { "cn_futures" } else { "cn_ashare" }, "futures_spec": fut,
             "run_kind": run_kind, "group_id": group, "params": params,
             "costs": self.costs, "initial_capital": scorer::INITIAL_CAPITAL, "runner_identity": identity, "backend": exec.name(), "hardened": exec.hardened(),
@@ -1223,6 +1253,7 @@ impl Orchestrator {
             equity: sim.equity,
             synthetic,
             capacity,
+            roll_unpriced: sim.roll_unpriced,
         })))
     }
 
@@ -1245,16 +1276,22 @@ impl Orchestrator {
             .map(|t| (t.idea_key.as_str(), t.params_hash.as_str()))
             .collect::<std::collections::BTreeSet<_>>()
             .len();
+        let selections = all
+            .iter()
+            .map(|t| t.selection_key())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let clusters = all
             .iter()
             .map(|t| t.idea_key.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        let n_eff = configs.max(self.gate.dsr_min_trials);
+        let n_eff = selections.max(self.gate.dsr_min_trials);
         let dsr = scorer::deflated_sharpe_v(dm, var, n_eff);
         (
             dsr,
-            json!({"library_trials": all.len(), "idea_clusters": clusters, "configurations": configs, "n_effective": n_eff, "n_floor": self.gate.dsr_min_trials,
+            json!({"library_trials": all.len(), "idea_clusters": clusters, "configurations": configs, "selections": selections,
+            "counting_rule": "N = distinct (idea, params, symbol, snapshot, scoring bars, run kind, group); exact reruns dedupe; no correlation discount (conservative)", "n_effective": n_eff, "n_floor": self.gate.dsr_min_trials,
             "variance_pool": kept, "excluded_lookahead": all.len() - pool.len(), "excluded_implausible": implausible}),
         )
     }
@@ -1277,6 +1314,7 @@ impl Orchestrator {
                 expected_runner: self.expected_runner_id().as_deref(),
                 synthetic: sc.synthetic,
                 capacity: sc.capacity,
+                roll_unpriced: sc.roll_unpriced,
             },
             &self.gate,
         )
@@ -1847,6 +1885,7 @@ impl Orchestrator {
                     .map(|x| x.capacity)
                     .collect::<Option<Vec<f64>>>()
                     .and_then(|v| v.into_iter().reduce(f64::min)),
+                roll_unpriced: scored.iter().map(|x| x.roll_unpriced).sum(),
             },
             &self.gate,
         );
@@ -2074,8 +2113,9 @@ impl Orchestrator {
         let (mut rcuts, tcuts) = probe::choose_cuts(n, dev_end + 1, &vcfg, &mut rng);
         rcuts.insert(0, dev_end);
         let trunc: Vec<usize> = rcuts.iter().chain(&tcuts).copied().collect();
-        let plan = probe::plan(&view, &trunc, &rcuts, 1, lim, &mut rng);
-        self.store.audit("sandbox", "vault_probe_plan", Some(&s.id), json!({"job": job_id, "seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "dataset_sha256": dev_sha}), true)?;
+        let mcuts = probe::strata_cuts(n, dev_end + 1, &vcfg, &mut rng);
+        let plan = probe::plan_with_mirrors(&view, &trunc, &rcuts, &mcuts, 1, lim, &mut rng);
+        self.store.audit("sandbox", "vault_probe_plan", Some(&s.id), json!({"job": job_id, "seed": seed.to_string(), "random_cuts": rcuts, "tail_cuts": tcuts, "mirror_cuts": mcuts, "dataset_sha256": dev_sha}), true)?;
         // the vault runs the exact parameters that were gated (sweep winner included)
         let params = dev_job
             .result
@@ -2115,13 +2155,15 @@ impl Orchestrator {
                 return self.get(&s.id);
             }
         };
+        let rolls = signed_rolls(&att);
         let (sim, sim2) = match &fut {
             Some(spec) => {
                 let fx = crate::futures::FuturesCosts::default();
-                (
-                    crate::futures::simulate(spec, &bars, &full, &fx, &self.costs),
-                    crate::futures::simulate(spec, &bars, &full, &fx, &self.costs.stressed(2.0)),
-                )
+                let run = |c: &scorer::CostModel| match &rolls {
+                    Some(rs) => crate::futures::simulate_with_rolls(spec, &bars, rs, &full, &fx, c),
+                    None => crate::futures::simulate(spec, &bars, &full, &fx, c),
+                };
+                (run(&self.costs), run(&self.costs.stressed(2.0)))
             }
             None => (
                 scorer::simulate_with(&symbol, &bars, &full, &self.costs, &rules),
@@ -2131,6 +2173,9 @@ impl Orchestrator {
         let vm = scorer::metrics(&bars, &sim, dev_end, n);
         Self::write_equity(&jd.join("equity.csv"), &bars, &full, &sim, &sim2)?;
         let mut reasons = vec![];
+        if sim.roll_unpriced > 0 {
+            reasons.push(format!("futures roll ledger: {} roll(s) held through without an executable old-leg price (approximation is display-only)", sim.roll_unpriced));
+        }
         if rep.detected {
             reasons.push(format!(
                 "vault look-ahead/consistency probe failed: {:?}",
@@ -2330,6 +2375,7 @@ pub struct Scored {
     pub equity: Vec<f64>,
     pub synthetic: bool,
     pub capacity: Option<f64>,
+    pub roll_unpriced: usize,
 }
 
 pub enum RunOutcome {
@@ -2420,3 +2466,20 @@ trait Pipe: Sized {
     }
 }
 impl Pipe for serde_json::Value {}
+
+/// Sources whose fetches are independent real-market downloads. Only the signed
+/// (audited, HMAC-chained) fetch attestation decides the class; the editable
+/// `<symbol>.meta.json` never does (issue #5). Anything else (bundled samples,
+/// user CSV imports, unknown or missing source) fails closed as non-real.
+pub const REAL_DATA_SOURCES: &[&str] = &["tushare", "rstdx"];
+
+pub fn attested_real_data(att: &serde_json::Value, symbol: &str) -> bool {
+    let src = att["source"].as_str().unwrap_or("");
+    REAL_DATA_SOURCES.contains(&src) && !symbol.starts_with("SAMPLE_")
+}
+
+/// Roll legs from the SIGNED fetch attestation only (never meta.json). `None`
+/// for stocks and for legacy futures attestations without roll legs.
+pub fn signed_rolls(att: &serde_json::Value) -> Option<Vec<crate::futures::Roll>> {
+    serde_json::from_value(att.get("rolls")?.clone()).ok()
+}

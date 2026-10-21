@@ -91,6 +91,7 @@ const SQLITE_COLUMNS: &[(&str, &str, &str)] = &[
     ("trials", "lookahead", "INTEGER NOT NULL DEFAULT 0"),
     ("trials", "run_kind", "TEXT NOT NULL DEFAULT 'single'"),
     ("trials", "group_id", "TEXT"),
+    ("strategies", "run_owner", "TEXT"),
 ];
 const SQLITE_LATE_TRIGGERS: &str = r#"
 CREATE TRIGGER IF NOT EXISTS vault_finalized BEFORE UPDATE ON vault_touches WHEN OLD.finished <> 0
@@ -180,6 +181,30 @@ pub struct TrialRow {
     pub lookahead: bool,
     pub run_kind: String,
     pub group_id: Option<String>,
+    /// signed snapshot the run was scored on
+    pub dataset_sha: String,
+    /// evaluation bars (fixes the scoring window on that snapshot)
+    pub bars: i64,
+}
+
+impl TrialRow {
+    /// Research-selection identity for the DSR count (issue #7): code idea,
+    /// canonical params, market, signed snapshot and scoring window, run kind and
+    /// portfolio group. Exact reruns of one identity collapse; any change along a
+    /// selection dimension (symbol, data, window, allocation, params) is a new trial.
+    /// No correlation discount is applied: the count is the conservative upper bound.
+    pub fn selection_key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            self.idea_key,
+            self.params_hash,
+            self.symbol,
+            self.dataset_sha,
+            self.bars,
+            self.run_kind,
+            self.group_id.as_deref().unwrap_or("-")
+        )
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -226,15 +251,66 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "unknown".into())
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is valid for buf.len() bytes; gethostname NUL-terminates on success.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
+    let h = if ok {
+        String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(0)])
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+    if h.is_empty() {
+        "unknown".into()
+    } else {
+        h
+    }
+}
+
+/// Process start time, used to tell a live owner from a reused PID. Linux:
+/// starttime (clock ticks since boot) from /proc/<pid>/stat. Elsewhere: "" (no
+/// reuse detection; a reused PID keeps a dead lease looking alive, which only
+/// delays recovery and never fails a live run).
+fn proc_start(pid: i64) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            s.rsplit_once(')')
+                .map(|(_, rest)| rest.split_whitespace().nth(19).unwrap_or("").to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Lease of the current process: "host|pid|start".
+pub fn run_lease() -> String {
+    let pid = std::process::id() as i64;
+    format!("{}|{pid}|{}", hostname(), proc_start(pid))
+}
+
+/// Liveness contract for a lease (issue #8): `None` when it belongs to another
+/// host (never reaped from here; that host recovers it), else whether the owner
+/// process is alive — same PID AND same start time (PID reuse => dead).
+pub fn lease_alive(lease: &str) -> Option<bool> {
+    let mut it = lease.splitn(3, '|');
+    let (host, pid, start) = (
+        it.next()?,
+        it.next()?.parse::<i64>().ok()?,
+        it.next().unwrap_or(""),
+    );
+    if host != hostname() {
+        return None;
+    }
+    Some(
+        pid_alive(pid)
+            && (start.is_empty() || proc_start(pid).is_empty() || proc_start(pid) == start),
+    )
 }
 
 const ACOLS: &str = "seq,ts,actor,action,target,details,success,prev_hash,hash";
 const SCOLS: &str = "id,title,source_site,source_url,author,scraped_at,ingested_at,raw_path,content_sha256,sample,status,attempts,last_reason,extracted_json,updated_at";
 const JCOLS: &str = "id,strategy_id,backend,image,symbol,data_source,status,exit_code,started_at,finished_at,duration_ms,job_dir,error,result_json,owner_pid,runner_identity,kind,owner_host";
-const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead,run_kind,group_id";
+const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead,run_kind,group_id,dataset_sha,bars";
 
 fn audit_row(r: &R) -> AuditEntry {
     let d = r.s(5);
@@ -316,6 +392,8 @@ fn trial_row(r: &R) -> TrialRow {
         lookahead: r.b(7),
         run_kind: r.s(8),
         group_id: r.os(9),
+        dataset_sha: r.s(10),
+        bars: r.i(11),
     }
 }
 
@@ -678,8 +756,42 @@ impl Store {
         to: StrategyStatus,
         reason: Option<&str>,
     ) -> Result<bool> {
-        Ok(self.db.run(|e| e.exec("UPDATE strategies SET status=?3, last_reason=?4, updated_at=?5 WHERE id=?1 AND status=?2",
-            p![id, from.as_str(), to.as_str(), reason, now()]))? == 1)
+        // Entering Backtesting takes the run lease in the SAME statement as the
+        // status change; leaving it releases the lease (issue #8).
+        let lease = (to == StrategyStatus::Backtesting).then(run_lease);
+        Ok(self.db.run(|e| e.exec("UPDATE strategies SET status=?3, last_reason=?4, updated_at=?5, run_owner=?6 WHERE id=?1 AND status=?2",
+            p![id, from.as_str(), to.as_str(), reason, now(), lease]))? == 1)
+    }
+    /// Test hook: overwrite a lease (simulates an owner on another host / a dead PID).
+    #[doc(hidden)]
+    pub fn set_run_owner_for_test(&self, id: &str, lease: Option<&str>) -> Result<()> {
+        self.db.run(|e| {
+            e.exec(
+                "UPDATE strategies SET run_owner=?2 WHERE id=?1",
+                p![id, lease],
+            )
+        })?;
+        Ok(())
+    }
+    /// Run lease ("host|pid|proc-start") of a strategy, if any.
+    pub fn run_owner(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .run(|e| e.one("SELECT run_owner FROM strategies WHERE id=?1", p![id]))?
+            .and_then(|r| r.os(0)))
+    }
+    /// Recovery CAS: Backtesting -> Failed only if the lease is still exactly the
+    /// one the caller judged dead (`None` = legacy row without a lease).
+    pub fn reap_backtesting(&self, id: &str, lease: Option<&str>, reason: &str) -> Result<bool> {
+        Ok(self.db.run(|e| match lease {
+            Some(l) => e.exec("UPDATE strategies SET status='Failed', last_reason=?3, updated_at=?4, run_owner=NULL WHERE id=?1 AND status='Backtesting' AND run_owner=?2", p![id, l, reason, now()]),
+            None => e.exec("UPDATE strategies SET status='Failed', last_reason=?2, updated_at=?3 WHERE id=?1 AND status='Backtesting' AND run_owner IS NULL", p![id, reason, now()]),
+        })? == 1)
+    }
+    /// Recovery CAS for a job: only a job still `running` is abandoned, so a
+    /// concurrent finish_job is never overwritten.
+    pub fn abandon_job(&self, id: &str, reason: &str) -> Result<bool> {
+        Ok(self.db.run(|e| e.exec("UPDATE jobs SET status='abandoned', finished_at=?2, duration_ms=0, error=?3 WHERE id=?1 AND status='running'", p![id, now(), reason]))? == 1)
     }
     pub fn set_extracted(&self, id: &str, x: &ExtractedStrategy) -> Result<()> {
         let j = serde_json::to_string(x)?;
@@ -1044,8 +1156,14 @@ impl Store {
     }
 }
 
+/// Portable liveness: kill(pid, 0) succeeds, or fails with EPERM (exists, not ours).
 fn pid_alive(pid: i64) -> bool {
-    pid > 0 && Path::new(&format!("/proc/{pid}")).exists()
+    if pid <= 0 || pid > i32::MAX as i64 {
+        return false;
+    }
+    // SAFETY: signal 0 performs only the existence/permission check.
+    let ok = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 #[cfg(test)]
 mod tests {

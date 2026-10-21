@@ -31,7 +31,7 @@ use crate::market::Bar;
 use crate::scorer::{CostModel, Fill, SimResult, INITIAL_CAPITAL};
 use serde::{Deserialize, Serialize};
 
-pub const EXECUTION_LABEL: &str = "futures: signal at close t -> filled at open t+1 (night-session open where traded, +slippage), marked to close; integer lots × multiplier; tick-rounded fills; margin cap; limit up/down blocks; per-contract fees; main-contract roll pays both legs";
+pub const EXECUTION_LABEL: &str = "futures: signal at close t -> filled at open t+1 (night-session open where traded, +slippage), marked to close; integer lots × multiplier; tick-rounded fills; margin cap; limit up/down blocks; per-contract fees; roll: held old leg marked and closed at ITS open, new leg opened at its open, each leg paying its own fees (unpriced rolls fail the gate)";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -636,6 +636,42 @@ pub fn simulate_session(
     fx: &FuturesCosts,
     costs: &CostModel,
 ) -> SimResult {
+    simulate_core(spec, bars, trading_days, None, pos, fx, costs)
+}
+
+/// Daily simulation with the per-leg roll ledger (issue #10): on a roll day the
+/// held lots are the OLD contract's — the overnight move is the old leg's
+/// (old open − its previous close), the old leg is closed at ITS open with fees
+/// and slippage on ITS price, and the new leg is opened at the new contract's
+/// open. The new contract's move before the roll never accrues to the account.
+/// A roll the account held through without an executable old-leg price (missing
+/// bar, volume 0, locked at a price limit) is counted in `roll_unpriced`; such
+/// a result is display-only and fails the gate.
+pub fn simulate_with_rolls(
+    spec: &ContractSpec,
+    bars: &[Bar],
+    rolls: &[Roll],
+    pos: &[f64],
+    fx: &FuturesCosts,
+    costs: &CostModel,
+) -> SimResult {
+    let days: Vec<String> = bars
+        .iter()
+        .map(|b| b.date.get(..10).unwrap_or(&b.date).to_string())
+        .collect();
+    simulate_core(spec, bars, &days, Some(rolls), pos, fx, costs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_core(
+    spec: &ContractSpec,
+    bars: &[Bar],
+    trading_days: &[String],
+    rolls: Option<&[Roll]>,
+    pos: &[f64],
+    fx: &FuturesCosts,
+    costs: &CostModel,
+) -> SimResult {
     assert_eq!(bars.len(), pos.len());
     assert_eq!(bars.len(), trading_days.len());
     let n = bars.len();
@@ -672,24 +708,62 @@ pub fn simulate_session(
         if trading_days[t] != trading_days[t - 1] {
             (ref_close, ref_adj) = day_close;
         }
-        let rolled = matches!((b.adj_factor, pb.adj_factor), (Some(a1), Some(a0)) if a0 > 0.0 && (a1 / a0 - 1.0).abs() > 1e-12);
-        // previous close in the CURRENT contract's terms (ratio continuity on roll days)
-        let prev_close = match (b.adj_factor, pb.adj_factor) {
-            (Some(a1), Some(a0)) if a1 > 0.0 => pb.close * a0 / a1,
+        let jump = matches!((b.adj_factor, pb.adj_factor), (Some(a1), Some(a0)) if a0 > 0.0 && (a1 / a0 - 1.0).abs() > 1e-12);
+        // roll identity comes from the contract ids when known (same price,
+        // different contract still rolls); only legacy data falls back to the factor jump
+        let roll = rolls.and_then(|rs| rs.iter().find(|r| r.date == b.date));
+        let rolled = match rolls {
+            Some(_) => roll.is_some(),
+            None => jump,
+        };
+        // executable old leg: its own open, traded, not locked at the limit vs its previous close
+        let old_leg = roll.and_then(|r| match (r.old_open, r.old_volume) {
+            (Some(o), Some(v)) if v > 0.0 && o > 0.0 => {
+                let (up, down) = (
+                    round_tick(pb.close * (1.0 + spec.limit_pct), spec.tick),
+                    round_tick(pb.close * (1.0 - spec.limit_pct), spec.tick),
+                );
+                let locked = if lots > 0.0 {
+                    o <= down + spec.tick * 0.5
+                } else {
+                    o >= up - spec.tick * 0.5
+                };
+                (!locked).then_some(o)
+            }
+            _ => None,
+        });
+        if rolled && lots != 0.0 && old_leg.is_none() {
+            r.roll_unpriced += 1;
+        }
+        // previous close in the price terms the held lots are marked in
+        let prev_close = match (rolls, b.adj_factor, pb.adj_factor) {
+            (Some(_), _, _) => pb.close,
+            (None, Some(a1), Some(a0)) if a1 > 0.0 => pb.close * a0 / a1,
             _ => pb.close,
         };
-        // overnight / bar-to-bar move on held lots (incl. the night session)
-        equity += lots * mult * (b.open - prev_close);
+        match old_leg {
+            // held old lots move with the OLD contract until they are closed at its open
+            Some(o) if rolled && lots != 0.0 => equity += lots * mult * (o - prev_close),
+            // approximation (legacy / unpriced): new contract's open in old terms
+            _ if rolled && lots != 0.0 && rolls.is_some() => {
+                let conv = match (b.adj_factor, pb.adj_factor) {
+                    (Some(a1), Some(a0)) if a1 > 0.0 => pb.close * a0 / a1,
+                    _ => pb.close,
+                };
+                equity += lots * mult * (b.open - conv)
+            }
+            _ => equity += lots * mult * (b.open - prev_close),
+        }
         if rolled && lots != 0.0 {
-            // close old + open new at the roll-day open: both legs pay fees and slippage
+            // close old (at the old leg's price when known) + open new at the
+            // new contract's open: both legs pay their own fees and slippage
+            let close_px = old_leg.unwrap_or(b.open);
             let (his, tod) = ledger.close(day, lots.abs(), order, today_cheaper);
-            let c = (fee(spec, his, b.open, 1)
-                + fee(spec, tod, b.open, 2)
-                + fee(spec, lots, b.open, 0))
-                * m
-                + 2.0 * lots.abs() * slip * mult;
+            let close_fee = fee(spec, his, close_px, 1) + fee(spec, tod, close_px, 2);
+            let open_fee = fee(spec, lots, b.open, 0);
+            let c = (close_fee + open_fee) * m + 2.0 * lots.abs() * slip * mult;
             r.close_today_lots += tod;
-            r.close_today_fees += fee(spec, tod, b.open, 2) * m;
+            r.close_today_fees += fee(spec, tod, close_px, 2) * m;
             equity -= c;
             r.costs_paid += c;
             r.trades += 2;
@@ -699,9 +773,9 @@ pub fn simulate_session(
                 t,
                 date: b.date.clone(),
                 qty: -lots,
-                price: b.open - lots.signum() * slip,
-                adj_price: (b.open - lots.signum() * slip) * fac(b),
-                cost: c / 2.0,
+                price: close_px - lots.signum() * slip,
+                adj_price: (close_px - lots.signum() * slip) * pb.adj_factor.unwrap_or(1.0),
+                cost: close_fee * m + lots.abs() * slip * mult,
                 kind: "roll_close".into(),
             });
             r.fills.push(Fill {
@@ -710,7 +784,7 @@ pub fn simulate_session(
                 qty: lots,
                 price: b.open + lots.signum() * slip,
                 adj_price: (b.open + lots.signum() * slip) * fac(b),
-                cost: c / 2.0,
+                cost: open_fee * m + lots.abs() * slip * mult,
                 kind: "roll_open".into(),
             });
         }
@@ -834,6 +908,11 @@ pub struct Roll {
     pub from: String,
     pub to: String,
     pub factor: f64,
+    /// the OLD contract's open and volume on the roll day (the executable exit leg)
+    #[serde(default)]
+    pub old_open: Option<f64>,
+    #[serde(default)]
+    pub old_volume: Option<f64>,
 }
 
 /// Main-contract continuous series. The main contract switches to the one
@@ -868,11 +947,14 @@ pub fn build_main_series(
                 if nw.close > 0.0 {
                     factor *= o.close / nw.close;
                 }
+                let old_today = day.iter().find(|x| Some(&x.contract) == cur.as_ref());
                 rolls.push(Roll {
                     date: d.to_string(),
                     from: cur.clone().unwrap(),
                     to: next.clone(),
                     factor,
+                    old_open: old_today.map(|x| x.open),
+                    old_volume: old_today.map(|x| x.volume),
                 });
                 cur = Some(next);
             }

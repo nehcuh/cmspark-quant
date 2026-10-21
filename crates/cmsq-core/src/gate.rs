@@ -83,6 +83,8 @@ pub struct GateInput<'a> {
     pub synthetic: bool,
     /// capacity estimate (CNY); None = no trades to estimate from
     pub capacity: Option<f64>,
+    /// futures: rolls held through without an executable old-leg price (issue #10)
+    pub roll_unpriced: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,9 +185,9 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
         if !i.synthetic {
             "real market data".into()
         } else if cfg.allow_synthetic {
-            "SYNTHETIC sample, allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into()
+            "NOT attested real data (sample/csv/unknown signed source), allowed by CMSQ_ALLOW_SYNTHETIC=1 (demo/test only)".into()
         } else {
-            "SYNTHETIC sample data cannot pass the gate".into()
+            "signed data source is not an independent real-market fetch (sample/csv/unknown): cannot pass the gate".into()
         },
     );
     check(
@@ -331,6 +333,7 @@ mod tests {
             high_risks: &f.risks,
             synthetic: false,
             capacity: Some(5e7),
+            roll_unpriced: 0,
         }
     }
     #[test]
