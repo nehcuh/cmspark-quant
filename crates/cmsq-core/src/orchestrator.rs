@@ -1582,11 +1582,67 @@ impl Orchestrator {
         exec: &dyn SandboxExecutor,
         workers: usize,
     ) -> Result<SweepSummary> {
+        self.search(id, symbol, grid, exec, workers, SearchMode::Grid)
+            .await
+    }
+
+    /// Run one batch of parameter points (each a sandboxed, probed run and a trial).
+    #[allow(clippy::too_many_arguments)]
+    async fn eval_points(
+        &self,
+        s: &Strategy,
+        e: &ExtractedStrategy,
+        code: &str,
+        ds: &Dataset,
+        batch: Vec<(usize, serde_json::Value)>,
+        exec: &dyn SandboxExecutor,
+        workers: usize,
+        run_id: &str,
+        kind: &str,
+    ) -> Vec<(usize, Result<RunOutcome>)> {
         use futures_util::stream::{self, StreamExt};
+        stream::iter(batch)
+            .map(|(i, pt)| async move {
+                let params = Self::params_for(e, Some(pt));
+                (
+                    i,
+                    self.evaluate_once(s, e, code, ds, &params, exec, kind, Some(run_id))
+                        .await,
+                )
+            })
+            .buffer_unordered(workers.max(1))
+            .collect()
+            .await
+    }
+
+    /// Parameter search on one symbol: an exhaustive grid ([`SearchMode::Grid`]) or a
+    /// genetic algorithm over the same value lists ([`SearchMode::Ga`]). Every point
+    /// actually evaluated is a trial in the ledger, so the final DSR pays for the
+    /// whole search, and the walk-forward re-fits over all evaluated points.
+    pub async fn search(
+        &self,
+        id: &str,
+        symbol: &str,
+        grid: &serde_json::Map<String, serde_json::Value>,
+        exec: &dyn SandboxExecutor,
+        workers: usize,
+        mode: SearchMode,
+    ) -> Result<SweepSummary> {
         let s = self.get(id)?;
         state::check(s.status, StrategyStatus::Backtesting)?;
         let (e, code) = Self::code_of(&s)?;
-        let points = expand_grid(&e, grid)?;
+        let kind = match mode {
+            SearchMode::Grid => "sweep",
+            SearchMode::Ga { .. } => "ga",
+        };
+        let mut points: Vec<serde_json::Value> = match mode {
+            SearchMode::Grid => expand_grid(&e, grid)?,
+            SearchMode::Ga { .. } => vec![],
+        };
+        let space = match mode {
+            SearchMode::Ga { .. } => search_space(&e, grid)?,
+            SearchMode::Grid => vec![],
+        };
         let ds = self.dataset_or_refuse(&s, symbol).await?;
         anyhow::ensure!(
             ds.bars.len() >= 300,
@@ -1598,44 +1654,81 @@ impl Orchestrator {
             StrategyStatus::Backtesting,
             "orchestrator",
             None,
-            json!({"symbol": symbol, "sweep_points": points.len()}),
+            json!({"symbol": symbol, "search": kind, "sweep_points": points.len()}),
         )?;
         self.store.bump_attempts(&s.id)?;
         let run_id = uuid::Uuid::new_v4().to_string();
-        self.store.insert_run(&crate::store::ResearchRun { id: run_id.clone(), kind: "sweep".into(), strategy_id: Some(s.id.clone()),
-            spec: json!({"symbol": symbol, "grid": grid, "points": points.len(), "workers": workers}), result: None, status: "running".into(),
-            created_at: Utc::now().to_rfc3339(), finished_at: None })?;
+        let spec = json!({"symbol": symbol, "grid": grid, "points": points.len(), "workers": workers, "mode": mode});
+        self.store.insert_run(&crate::store::ResearchRun {
+            id: run_id.clone(),
+            kind: kind.into(),
+            strategy_id: Some(s.id.clone()),
+            spec: spec.clone(),
+            result: None,
+            status: "running".into(),
+            created_at: Utc::now().to_rfc3339(),
+            finished_at: None,
+        })?;
         self.store.audit(
             "orchestrator",
-            "sweep_start",
+            if kind == "ga" { "ga_start" } else { "sweep_start" },
             Some(&s.id),
-            json!({"run": run_id, "symbol": symbol, "grid": grid, "points": points.len()}),
+            json!({"run": run_id, "symbol": symbol, "grid": grid, "points": points.len(), "mode": mode}),
             true,
         )?;
-        let (ds_ref, e_ref, code_ref, s_ref, run_ref) =
-            (&ds, &e, code.as_str(), &s, run_id.as_str());
-        let mut outs: Vec<(usize, Result<RunOutcome>)> =
-            stream::iter(points.iter().cloned().enumerate())
-                .map(|(i, pt)| async move {
-                    let params = Self::params_for(e_ref, Some(pt));
-                    (
-                        i,
-                        self.evaluate_once(
-                            s_ref,
-                            e_ref,
-                            code_ref,
-                            ds_ref,
-                            &params,
-                            exec,
-                            "sweep",
-                            Some(run_ref),
-                        )
-                        .await,
-                    )
-                })
-                .buffer_unordered(workers.max(1))
-                .collect()
-                .await;
+        let mut outs: Vec<(usize, Result<RunOutcome>)> = vec![];
+        let mut ga_log = vec![];
+        match mode {
+            SearchMode::Grid => {
+                let batch = points.iter().cloned().enumerate().collect();
+                outs = self
+                    .eval_points(&s, &e, &code, &ds, batch, exec, workers, &run_id, "sweep")
+                    .await;
+            }
+            SearchMode::Ga {
+                population,
+                generations,
+                seed,
+            } => {
+                let mut ga = Ga::new(space.iter().map(|x| x.1.len()).collect(), seed);
+                let mut fitness: std::collections::BTreeMap<Vec<usize>, f64> = Default::default();
+                let mut pop = ga.initial(population);
+                for gen in 0..generations.max(1) {
+                    let fresh: Vec<Vec<usize>> = pop
+                        .iter()
+                        .filter(|g| !fitness.contains_key(*g))
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    let mut batch = vec![];
+                    let mut idx_of = std::collections::BTreeMap::new();
+                    for g in &fresh {
+                        let pt = genome_point(&space, g);
+                        idx_of.insert(points.len(), g.clone());
+                        batch.push((points.len(), pt.clone()));
+                        points.push(pt);
+                    }
+                    for (i, o) in self
+                        .eval_points(&s, &e, &code, &ds, batch, exec, workers, &run_id, "ga")
+                        .await
+                    {
+                        let f = match &o {
+                            Ok(RunOutcome::Scored(sc)) if !sc.probe.detected => sc.dm.sharpe,
+                            _ => f64::NEG_INFINITY,
+                        };
+                        fitness.insert(idx_of[&i].clone(), f);
+                        outs.push((i, o));
+                    }
+                    let best = fitness.values().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    ga_log.push(json!({"generation": gen, "evaluated_new": fresh.len(), "evaluated_total": fitness.len(), "best_sharpe": if best.is_finite() { json!(best) } else { json!(null) }}));
+                    if gen + 1 == generations.max(1) || fitness.len() >= ga.space_size() {
+                        break;
+                    }
+                    pop = ga.next(&pop, &fitness, population);
+                }
+            }
+        }
         outs.sort_by_key(|o| o.0);
         let mut table = vec![];
         let mut best: Option<Box<Scored>> = None;
@@ -1663,7 +1756,8 @@ impl Orchestrator {
         }
         let s = self.get(&s.id)?;
         let Some(mut best) = best else {
-            let r = json!({"points": table, "best": null});
+            let r =
+                json!({"points": table, "best": null, "search": kind, "ga_generations": ga_log});
             self.store.finish_run(&run_id, "failed", &r)?;
             self.transition(
                 &s,
@@ -1702,9 +1796,9 @@ impl Orchestrator {
         let (st, reasons) = self.conclude(
             &s,
             &best,
-            json!({"sweep_run": run_id, "points": table.len(), "trial_info": info, "walk_forward_refit": refit_json}),
+            json!({"sweep_run": run_id, "search": kind, "points": table.len(), "trial_info": info, "walk_forward_refit": refit_json}),
         )?;
-        let r = json!({"points": table, "best": {"job": best.job_id, "params": best.params, "development": best.dm, "dsr": dsr, "trial_info": info}, "walk_forward_refit": refit_json, "status": st, "reasons": reasons});
+        let r = json!({"points": table, "best": {"job": best.job_id, "params": best.params, "development": best.dm, "dsr": dsr, "trial_info": info}, "walk_forward_refit": refit_json, "search": kind, "evaluated": table.len(), "ga_generations": ga_log, "status": st, "reasons": reasons});
         self.store.finish_run(&run_id, "succeeded", &r)?;
         Ok(SweepSummary {
             run_id,
@@ -2683,6 +2777,161 @@ pub struct PortfolioSummary {
 
 /// Hard cap on grid size (each point costs ~15 containers and one trial).
 pub const MAX_SWEEP_POINTS: usize = 64;
+/// Largest GA budget (population × generations): every evaluation is a trial.
+pub const MAX_GA_EVALUATIONS: usize = 256;
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SearchMode {
+    Grid,
+    /// genetic algorithm over the grid's value lists; deterministic for a seed
+    Ga {
+        population: usize,
+        generations: usize,
+        seed: u64,
+    },
+}
+
+/// Validated value lists for a GA search (same rules as [`expand_grid`], no product cap).
+pub fn search_space(
+    e: &ExtractedStrategy,
+    grid: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<(String, Vec<serde_json::Value>)>> {
+    anyhow::ensure!(!grid.is_empty(), "empty search space");
+    grid.iter()
+        .map(|(k, v)| {
+            anyhow::ensure!(
+                e.parameters.contains_key(k),
+                "search parameter {k:?} is not a parameter of this strategy (known: {:?})",
+                e.parameters.keys().collect::<Vec<_>>()
+            );
+            let vals = v
+                .as_array()
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("values for {k} must be a non-empty array"))?;
+            anyhow::ensure!(
+                vals.iter()
+                    .all(|x| x.is_number() || x.is_boolean() || x.is_string()),
+                "values for {k} must be scalars"
+            );
+            let u: std::collections::BTreeSet<String> =
+                vals.iter().map(|x| x.to_string()).collect();
+            anyhow::ensure!(u.len() == vals.len(), "duplicate values for {k}");
+            Ok((k.clone(), vals.clone()))
+        })
+        .collect()
+}
+
+pub fn genome_point(space: &[(String, Vec<serde_json::Value>)], g: &[usize]) -> serde_json::Value {
+    serde_json::Value::Object(
+        space
+            .iter()
+            .zip(g)
+            .map(|((k, v), &i)| (k.clone(), v[i].clone()))
+            .collect(),
+    )
+}
+
+/// Small deterministic GA over index genomes (SplitMix64; no external RNG).
+pub struct Ga {
+    sizes: Vec<usize>,
+    state: u64,
+}
+
+impl Ga {
+    pub fn new(sizes: Vec<usize>, seed: u64) -> Self {
+        Self {
+            sizes,
+            state: seed ^ 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+    fn rand(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.rand() % n.max(1) as u64) as usize
+    }
+    pub fn space_size(&self) -> usize {
+        self.sizes.iter().fold(1usize, |a, &b| a.saturating_mul(b))
+    }
+    fn random(&mut self) -> Vec<usize> {
+        let s = self.sizes.clone();
+        s.iter().map(|&n| self.below(n)).collect()
+    }
+    pub fn initial(&mut self, population: usize) -> Vec<Vec<usize>> {
+        let want = population.min(self.space_size()).max(1);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = vec![];
+        for _ in 0..want * 50 {
+            if out.len() >= want {
+                break;
+            }
+            let g = self.random();
+            if seen.insert(g.clone()) {
+                out.push(g);
+            }
+        }
+        out
+    }
+    fn tournament(
+        &mut self,
+        pop: &[Vec<usize>],
+        fit: &std::collections::BTreeMap<Vec<usize>, f64>,
+    ) -> Vec<usize> {
+        let mut best = pop[self.below(pop.len())].clone();
+        for _ in 0..2 {
+            let c = &pop[self.below(pop.len())];
+            if fit.get(c).copied().unwrap_or(f64::NEG_INFINITY)
+                > fit.get(&best).copied().unwrap_or(f64::NEG_INFINITY)
+            {
+                best = c.clone();
+            }
+        }
+        best
+    }
+    /// Next generation: 2 elites, then tournament parents, uniform crossover and
+    /// per-gene mutation; children already evaluated are re-mutated (bounded tries),
+    /// so the budget goes to new points.
+    pub fn next(
+        &mut self,
+        pop: &[Vec<usize>],
+        fit: &std::collections::BTreeMap<Vec<usize>, f64>,
+        population: usize,
+    ) -> Vec<Vec<usize>> {
+        let mut ranked: Vec<&Vec<usize>> = fit.keys().collect();
+        ranked.sort_by(|a, b| fit[*b].total_cmp(&fit[*a]));
+        let mut out: Vec<Vec<usize>> = ranked.iter().take(2).map(|g| (*g).clone()).collect();
+        let pm = 1.0 / self.sizes.len().max(1) as f64;
+        let mut tries = 0;
+        while out.len() < population.max(1) && tries < population * 50 {
+            tries += 1;
+            let (a, b) = (self.tournament(pop, fit), self.tournament(pop, fit));
+            let mut c: Vec<usize> = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| if self.rand() & 1 == 0 { *x } else { *y })
+                .collect();
+            for (j, n) in self.sizes.clone().into_iter().enumerate() {
+                if (self.rand() as f64 / u64::MAX as f64) < pm {
+                    c[j] = self.below(n);
+                }
+            }
+            if fit.contains_key(&c) || out.contains(&c) {
+                let j = self.below(c.len());
+                c[j] = self.below(self.sizes[j]);
+                if fit.contains_key(&c) || out.contains(&c) {
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        out
+    }
+}
 
 pub fn params_hash(p: &serde_json::Value) -> String {
     // serde_json maps are ordered (BTreeMap), so the text is canonical
@@ -2891,5 +3140,50 @@ impl Orchestrator {
             .finish_run(&run_id, "done", &serde_json::to_value(&rep)?)?;
         self.store.audit("scrape", "scrape_cycle", None, json!({"run": run_id, "new": rep.new.len(), "extracted": rep.extracted.len(), "backtests": rep.backtests.len()}), true)?;
         Ok(rep)
+    }
+}
+
+#[cfg(test)]
+mod ga_tests {
+    use super::*;
+    #[test]
+    fn ga_is_deterministic_and_prefers_new_points() {
+        let sizes = vec![6, 5, 4];
+        let fit_of = |g: &Vec<usize>| {
+            -((g[0] as f64 - 4.0).powi(2)
+                + (g[1] as f64 - 1.0).powi(2)
+                + (g[2] as f64 - 2.0).powi(2))
+        };
+        let run = |seed| {
+            let mut ga = Ga::new(sizes.clone(), seed);
+            let mut fit = std::collections::BTreeMap::new();
+            let mut pop = ga.initial(8);
+            let mut evals = 0;
+            for _ in 0..6 {
+                for g in &pop {
+                    if !fit.contains_key(g) {
+                        evals += 1;
+                        fit.insert(g.clone(), fit_of(g));
+                    }
+                }
+                pop = ga.next(&pop, &fit, 8);
+            }
+            let best = fit
+                .iter()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0
+                .clone();
+            (best, evals, fit.len())
+        };
+        let (b1, e1, n1) = run(7);
+        let (b2, e2, _) = run(7);
+        assert_eq!((b1.clone(), e1), (b2, e2), "same seed, same search");
+        assert_eq!(
+            e1, n1,
+            "every evaluation is a distinct point (= a distinct trial)"
+        );
+        assert!(n1 < 120, "searched only part of the 120-point space: {n1}");
+        assert!(fit_of(&b1) >= -2.0, "GA got close to the optimum: {b1:?}");
     }
 }

@@ -73,3 +73,14 @@ docker compose -f deploy/docker-compose.yml exec signer cmsq signer rotate --dir
 单次回测的 `walk_forward` 是固定参数切 4 折。参数扫描（`cmsq sweep`）如果也这样做，最优参数本身就是看过全部开发期才选出来的，折内结果并不是样本外。
 
 所以扫描的 `walk_forward` 改为"锚定式、每折重新选参"：第 k 折开始前，只用这之前的全部 K 线（含热身段）计算每个无前视的扫描点的夏普，选最高的那个，再只用它在第 k 折上的表现计分。门槛看这些折里有几折为正（至少 3 折）。每折选了哪个参数、训练用了多少根 K 线、折内结果，都记录在扫描结果的 `walk_forward_refit` 字段和 `gate` 审计里。DSR 仍按扫描的全部点数计入试验账本。
+
+## 遗传算法参数搜索（GA）
+
+```bash
+cmsq sweep <ID> --symbol FUT_RB --ga --population 8 --generations 4 --seed 1 \
+  --grid '{"fast_window":[3,5,8,10,15,20],"slow_window":[30,40,60,90,120]}'
+```
+
+参数空间比网格上限（64 点）大时，用 `--ga` 只评估其中一部分：初始种群随机抽样，之后每代保留最优 2 个，用锦标赛选父代、均匀交叉、按基因变异，已经评估过的点不再重复评估。同一个 seed 结果可复现；总评估数 population×generations 不超过 256。
+
+**每个实际评估的点都是一次完整的沙箱回测，也是试验账本里的一条 trial**：搜索结束后，最优点按包含全部评估点的账本重新计算 DSR，因此搜得越多、门槛越高。结果里的 `ga_generations` 记录每代新增评估数、累计评估数和当前最优夏普；walk-forward 同样按每折重新选参（在全部已评估点中选）。仪表盘"参数扫描"页同时显示 `sweep` 和 `ga` 两类运行。

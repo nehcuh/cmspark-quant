@@ -273,5 +273,8 @@ async fn process_backend_caps_out_file_count() {
     assert_eq!(r.outcome, Outcome::QuotaExceeded, "{}", r.stderr);
     let n = std::fs::read_dir(out.path()).unwrap().count();
     assert!(n < 20_000, "watchdog stopped the flood early: {n} files");
-    assert!(r.policy["out_quota_exceeded"].as_str().unwrap().contains("entries"));
+    assert!(r.policy["out_quota_exceeded"]
+        .as_str()
+        .unwrap()
+        .contains("entries"));
 }

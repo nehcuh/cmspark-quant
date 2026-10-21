@@ -2105,7 +2105,7 @@ impl Dashboard {
                 .map(|s| s.title.clone())
                 .unwrap_or_default();
             let what = match r.kind.as_str() {
-                "sweep" => format!(
+                "sweep" | "ga" => format!(
                     "{} · {} points · grid {}",
                     r.spec["symbol"].as_str().unwrap_or(""),
                     r.spec["points"],
@@ -2144,7 +2144,7 @@ impl Dashboard {
                             .items_center()
                             .child(chip(
                                 r.kind.clone(),
-                                if r.kind == "sweep" {
+                                if r.kind == "sweep" || r.kind == "ga" {
                                     c_accent()
                                 } else {
                                     rgb(0xa371f7).into()
@@ -2186,7 +2186,7 @@ impl Dashboard {
     fn run_detail(&self, r: &cmsq_core::store::ResearchRun) -> Div {
         let res = r.result.clone().unwrap_or_default();
         let mut d = div().flex().flex_col().gap_2();
-        if r.kind == "sweep" {
+        if r.kind == "sweep" || r.kind == "ga" {
             let best = &res["best"];
             d = d.child(section(&format!("参数扫描 Sweep {} · {}", &r.id[..8], r.spec["symbol"].as_str().unwrap_or(""))))
                 .child(div().text_xs().text_color(c_muted()).child("每个扫描点都是一次独立试验，计入全库 DSR 试验账本；最优点按最终账本 N 重新计算 DSR。Every point is a trial in the library ledger; the best point is re-deflated against the final N."))
