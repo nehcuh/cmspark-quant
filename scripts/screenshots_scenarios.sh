@@ -33,3 +33,9 @@ fi
 shot "$D" jobs    06-vault-job-log.png vn.py 0 X=1
 shot "$D" library 23-vault-passed-timeline.png vn.py 13 X=1
 shot "$D" library 08-equity-with-vault.png vn.py 26 X=1
+# 07: vault rejection, in its own DEMO workspace V7_HOME (ma_crossover on SAMPLE_REGIME
+# passes dev with CMSQ_DSR_MIN_TRIALS=1, then fails the holdout: -10.50%)
+if [ -n "${V7_HOME:-}" ]; then
+  [ -f "$V7_HOME/DEMO" ] || { echo "refusing: $V7_HOME has no DEMO marker"; exit 2; }
+  shot "$V7_HOME" library 07-vault-rejected-timeline.png 双均线 9 X=1
+fi
