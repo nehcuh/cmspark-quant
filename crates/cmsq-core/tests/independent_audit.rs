@@ -707,7 +707,10 @@ mod roll_ledger {
 #[test]
 fn impossible_ohlc_is_rejected() {
     let bad = "date,open,high,low,close,volume\n2024-01-02,1,5,20,10,100\n";
-    assert!(cmsq_core::market::parse_csv(bad).unwrap_err().to_string().contains("impossible OHLC"));
+    assert!(cmsq_core::market::parse_csv(bad)
+        .unwrap_err()
+        .to_string()
+        .contains("impossible OHLC"));
     let ok = "date,open,high,low,close,volume\n2024-01-02,10,12,9,11,100\n";
     assert_eq!(cmsq_core::market::parse_csv(ok).unwrap().len(), 1);
 }
