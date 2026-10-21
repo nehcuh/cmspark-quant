@@ -11,4 +11,3 @@ test pg_trial_ledger_n_is_distinct_and_monotone ... ok
 test pg_audit_concurrent_appends_stay_linear ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.24s
-

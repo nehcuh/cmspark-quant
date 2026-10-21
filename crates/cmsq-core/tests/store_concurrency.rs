@@ -117,6 +117,8 @@ fn ledger_monotone(mk: Factory) {
             symbol: "X",
             dataset_sha: "d",
             bars: 10,
+            score_start: "2024-01-02",
+            score_end: "2024-01-15",
             sharpe_daily: 0.01 * i as f64,
             positions: &pos,
             lookahead: false,

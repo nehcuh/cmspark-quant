@@ -12,4 +12,3 @@ live budget outcome=QuotaExceeded, duration=75ms
 test docker_inode_and_live_log_limits_hold ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.74s
-

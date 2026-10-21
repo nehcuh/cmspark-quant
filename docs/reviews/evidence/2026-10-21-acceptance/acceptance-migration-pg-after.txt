@@ -1,0 +1,9 @@
+   Compiling cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+    Finished `test` profile [unoptimized] target(s) in 0.48s
+     Running tests/reviewer_boundaries.rs (/workspace/baseline/target/debug/deps/reviewer_boundaries-2f0b0a8969cb7d5d)
+
+running 1 test
+PostgreSQL v3 -> v4 window migration preserves two legacy rows and append-only runtime privileges
+test pg_legacy_window_migration_preserves_append_only_rows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.08s

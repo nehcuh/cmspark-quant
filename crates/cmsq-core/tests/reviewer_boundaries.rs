@@ -3,6 +3,80 @@ use cmsq_core::futures::{self, Fee, FutBar, FuturesCosts};
 use cmsq_core::sandbox::*;
 use cmsq_core::{Home, Orchestrator};
 
+#[test]
+fn legacy_sqlite_trials_migrate_without_inventing_or_merging_windows() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("old.db");
+    let old = rusqlite::Connection::open(&path).unwrap();
+    old.execute_batch(cmsq_core::store::SQLITE_SCHEMA).unwrap();
+    for job in ["old-a", "old-b"] {
+        old.execute("INSERT INTO trials(strategy_id,job_id,idea_key,params_hash,symbol,dataset_sha,bars,sharpe_daily,positions_json,created_at) VALUES('s',?1,'idea','params','S','sha',500,0.02,'[]','2024-01-01')", [job]).unwrap();
+    }
+    drop(old);
+    let migrated =
+        cmsq_core::store::Store::open(&path, cmsq_core::audit::AuditConfig::insecure_test())
+            .unwrap();
+    let trials = migrated.trials().unwrap();
+    assert_eq!(trials.len(), 2);
+    assert!(trials
+        .iter()
+        .all(|r| r.score_start.is_empty() && r.score_end.is_empty()));
+    assert_ne!(
+        trials[0].selection_key(),
+        trials[1].selection_key(),
+        "unknown legacy windows count conservatively, never dedupe"
+    );
+    assert!(
+        migrated
+            .raw_exec("UPDATE trials SET score_start='2020-01-01' WHERE id=1", &[])
+            .is_err(),
+        "migration must keep trials append-only"
+    );
+    drop(migrated);
+    let reopened =
+        cmsq_core::store::Store::open(&path, cmsq_core::audit::AuditConfig::insecure_test())
+            .unwrap();
+    assert_eq!(
+        reopened.trials().unwrap().len(),
+        2,
+        "migration is idempotent"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL: CMSQ_TEST_DB_ENV"]
+fn pg_legacy_window_migration_preserves_append_only_rows() {
+    use cmsq_core::{audit::AuditConfig, store::Store};
+    let settings = std::fs::read_to_string(std::env::var("CMSQ_TEST_DB_ENV").unwrap()).unwrap();
+    let value = |key: &str| {
+        settings
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .unwrap()
+            .to_string()
+    };
+    let app = value("CMSQ_DATABASE_URL");
+    let owner = value("CMSQ_DATABASE_MIGRATE_URL");
+    let schema = format!("review_upgrade_{}", uuid::Uuid::new_v4().simple());
+    let cfg = AuditConfig::insecure_test();
+    let original = Store::open_pg(&owner, Some(&owner), Some(&schema), 4, cfg.clone()).unwrap();
+    // Simulate the prior schema in this test-owned namespace only. Production
+    // migration never drops columns or rewrites the append-only ledger.
+    original.raw_batch("ALTER TABLE trials DROP COLUMN score_start; ALTER TABLE trials DROP COLUMN score_end; DELETE FROM _sqlx_migrations WHERE version=4; INSERT INTO trials(strategy_id,job_id,idea_key,params_hash,symbol,dataset_sha,bars,sharpe_daily,positions_json,created_at) VALUES('s','a','i','p','S','sha',500,0.02,'[]','2024-01-01'),('s','b','i','p','S','sha',500,0.02,'[]','2024-01-01');").unwrap();
+    drop(original);
+    let upgraded = Store::open_pg(&app, Some(&owner), Some(&schema), 4, cfg).unwrap();
+    let rows = upgraded.trials().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .all(|r| r.score_start.is_empty() && r.score_end.is_empty()));
+    assert_ne!(rows[0].selection_key(), rows[1].selection_key());
+    assert!(upgraded
+        .raw_exec("UPDATE trials SET score_start='2020-01-01'", &[])
+        .is_err());
+    println!("PostgreSQL v3 -> v4 window migration preserves two legacy rows and append-only runtime privileges");
+}
+
 #[tokio::test]
 async fn signed_source_change_without_hmac_is_refused() {
     let d = tempfile::tempdir().unwrap();

@@ -1,0 +1,255 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling cmsq-core v0.2.0 (/workspace/acceptance/crates/cmsq-core)
+    Finished `test` profile [unoptimized] target(s) in 2.44s
+     Running unittests src/lib.rs (/workspace/baseline/target/debug/deps/cmsq_core-e6ff990e79f24b64)
+
+running 89 tests
+test data::ratelimit::tests::backoff_grows ... ok
+test data::ratelimit::tests::bucket_limits_burst_and_rate ... ok
+test ctp::md::tests::no_trading_api_anywhere_in_ctp_module ... ok
+test calendars::tests::instrument_exchange_lookup ... ok
+test data::tushare::tests::limits_and_codes ... ok
+test audit::tests::mac_changes_with_any_field_and_key ... ok
+test data::pyhelper::tests::helper_env_is_scrubbed ... ok
+test ctp::md::tests::sentinel_quotes_become_none ... ok
+test calendars::tests::outside_snapshot_range_falls_back_to_weekdays ... ok
+test ctp::md::tests::probe_rejects_garbage ... ok
+test calendars::tests::night_session_maps_across_holiday ... ok
+test ctp::md::tests::exchange_calendar_labels_holiday_eve_night_ticks ... ok
+test ctp::md::tests::demo_feed_rejects_every_malformed_record ... ok
+test extract::idea_tests::idea_key_ignores_numbers_comments_whitespace ... ok
+test futures::tests::cffex_partial_reduce_hits_close_today_first ... ok
+test futures::tests::close_order_decides_which_lots_are_closed ... ok
+test futures::tests::fees_per_lot_and_ratio_and_roll_pays_both_legs ... ok
+test futures::tests::limit_up_open_blocks_buys_and_limit_down_blocks_sells ... ok
+test futures::tests::intraday_round_trip_pays_close_today_tier ... ok
+test futures::tests::daily_bars_never_pay_close_today ... ok
+test data::tushare::tests::token_from_file_never_debug_printed ... ok
+test futures::tests::night_session_belongs_to_next_trading_day ... ok
+test futures::tests::margin_caps_leverage ... ok
+test futures::tests::main_series_rolls_on_confirmed_oi_lead_without_lookahead ... ok
+test futures::tests::short_profits_when_price_falls_and_uses_multiplier ... ok
+test extract::tests::no_code_is_high_risk ... ok
+test extract::tests::extracts_ma_crossover ... ok
+test futures::tests::specs_and_symbols ... ok
+test gate::tests::passes_good ... ok
+test ingest::tests::parses_fixture ... ok
+test gate::tests::synthetic_and_capacity_checks ... ok
+test ingest::tests::rejects_bad_spec_url_and_size ... ok
+test market::tests::symbols ... ok
+test gate::tests::walk_forward_and_cost_stress_and_dsr ... ok
+test audit::tests::anchor_roundtrip ... ok
+test probe::tests::cuts_are_random_per_seed_and_cover_the_tail ... ok
+test probe::tests::positions_validation ... ok
+test qifi::tests::futures_short_account_snapshot ... ok
+test gate::tests::fails_closed_on_runner_status_probe_and_data ... ok
+test sandbox::docker::tests::frame_roundtrip_takes_the_last_record ... ok
+test qifi::tests::ashare_flat_account ... ok
+test replay::tests::player_never_exposes_future ... ok
+test sandbox::docker::tests::host_config_is_hardened ... ok
+test sandbox::docker::tests::out_is_a_capped_tmpfs_and_logs_are_capped ... ok
+test sandbox::tests::default_request_ok ... ok
+test sandbox::tests::rejects_socket_network_and_writable_data ... ok
+test scorer::tests::adj_factor_keeps_wealth_on_adjusted_path ... ok
+test scorer::tests::capacity_is_p10_of_fill_sizes_vs_daily_value ... ok
+test scorer::tests::dsr_cheater_excluded_from_variance_but_counted ... ok
+test scorer::tests::dsr_falls_as_trials_grow ... ok
+test scorer::tests::chinext_limit_is_20pct_after_reform ... ok
+test probe::tests::plan_is_shuffled_and_resamples_respect_limits ... ok
+test scorer::tests::fills_at_next_open_not_same_close ... ok
+test scorer::tests::limit_up_open_blocks_buy_and_limit_down_blocks_sell ... ok
+test scorer::tests::lots_min_commission_and_dated_stamp_duty ... ok
+test scorer::tests::normal_functions ... ok
+test scorer::tests::robust_pool_ignores_planted_outliers ... ok
+test scorer::tests::suspension_blocks_trade ... ok
+test replay::tests::calendar_check ... ok
+test scrape::tests::scores_follow_downstream_evidence ... ok
+test scrape::tests::http_fetcher_refuses_other_hosts ... ok
+test state::tests::cannot_skip_backtest_gate_or_promote_from_rejected ... ok
+test scorer::tests::single_leg_portfolio_matches_single_symbol_sim ... ok
+test state::tests::happy_path_is_valid ... ok
+test state::tests::rerun_paths_exist ... ok
+test store::sql::tests::placeholders_rewritten_outside_strings ... ok
+test data::router::tests::divergence_blocks_and_missing_validator_blocks ... ok
+test scorer::tests::portfolio_shares_cash_and_never_overspends ... ok
+test extract::idea_tests::vnpy_cta_strategy_is_a_valid_contract ... ok
+test scorer::tests::inverse_vol_tilts_to_the_calm_leg_without_lookahead ... ok
+test tradestats::tests::empty_and_roll_costs ... ok
+test tradestats::tests::fifo_round_trips_and_ratios ... ok
+test scrape::tests::filter_and_quota ... ok
+test tradestats::tests::window_keeps_trade_opened_before_it ... ok
+test tradestats::tests::gate_never_uses_trade_stats ... ok
+test tradestats::tests::short_and_flip_with_multiplier ... ok
+test data::router::tests::fallback_validation_and_cooldown ... ok
+test scrape::tests::search_and_repo_sources_yield_only_cta_strategies ... ok
+test extract::tests::flags_lookahead_and_network ... ok
+test market::tests::sample_roundtrip ... ok
+test extract::idea_tests::static_peek_patterns ... ok
+test store::tests::audit_chain_verifies_and_is_append_only ... ok
+test store::tests::signals_are_observe_only_by_schema ... ok
+test store::tests::tampering_is_detected_even_if_triggers_dropped ... ok
+test store::tests::attack_rechain_with_key_is_detected_by_anchor ... ok
+test store::tests::missing_anchor_with_entries_fails ... ok
+test store::tests::attack_tail_truncation_is_detected_by_anchor ... ok
+test store::tests::attack_rechain_without_key_is_detected ... ok
+test store::tests::attack_rollback_to_old_copy_is_detected ... ok
+
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/independent_audit.rs (/workspace/baseline/target/debug/deps/independent_audit-ef05cca06177f6ba)
+
+running 17 tests
+test pg_observer_does_not_reap_active_backtest ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_observer_does_not_reap_active_sweep ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test data_class_comes_only_from_signed_source ... ok
+test roll_ledger::same_price_roll_still_pays_both_legs ... ok
+test roll_ledger::unexecutable_old_leg_fails_closed ... ok
+test roll_ledger::roll_short_and_gap_variants ... ok
+test roll_ledger::reviewer_case_fails_closed_never_books_new_leg_gain ... ok
+test roll_ledger::ratio_fee_uses_each_legs_price ... ok
+test roll_ledger::gate_blocks_unpriced_rolls ... ok
+test impossible_ohlc_is_rejected ... ok
+test trial_identity_dedupes_only_exact_reruns ... ok
+test cross_symbol_trials_count_in_dsr_n ... ok
+test observer_does_not_reap_active_backtest ... ok
+test recovery_only_reaps_dead_owners ... ok
+test observer_does_not_reap_active_sweep ... ok
+test probe_covers_the_whole_scored_domain ... ok
+test sample_metadata_edit_cannot_bypass_real_data_check ... ok
+
+test result: ok. 15 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.88s
+
+     Running tests/pipeline.rs (/workspace/baseline/target/debug/deps/pipeline-344fa2411b9f957f)
+
+running 8 tests
+test dev_backend_results_can_never_be_promoted ... ignored, requires bubblewrap: scripts/test_docker.sh
+test docker_pipeline_gate_then_vault_promote ... ignored, requires docker: scripts/test_docker.sh
+test docker_reviewer_attacks_never_pass ... ignored, requires docker: scripts/test_docker.sh
+test audit_key_and_anchor_live_outside_home ... ok
+test ingest_dedupes_rejects_invalid_and_symlinks ... ok
+test crash_recovery_reaps_stuck_backtests ... ok
+test qifi_export_of_promoted_paper_account ... ok
+test data_tampering_is_refused ... ok
+
+test result: ok. 5 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/reviewer_acceptance.rs (/workspace/baseline/target/debug/deps/reviewer_acceptance-654b371c35765bec)
+
+running 8 tests
+test docker_output_mount_accepts_more_than_positions_cap ... ignored, bounded Docker check; uses existing python:3.12-slim image
+test continuous_futures_roll_uses_unheld_contract_overnight_return ... ok
+test impossible_ohlc_is_accepted_and_not_cross_checked ... ok
+test probe_has_a_deterministic_early_scoring_blind_region ... ok
+test cross_symbol_trials_are_collapsed_in_dsr_n ... ok
+test sample_metadata_edit_bypasses_real_data_check ... ok
+test opening_observer_reaps_active_pre_job_backtest ... ok
+test different_windows_with_same_bar_count_are_not_deduped ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/reviewer_boundaries.rs (/workspace/baseline/target/debug/deps/reviewer_boundaries-38205202ad9367be)
+
+running 8 tests
+test docker_cancellation_cleans_container ... ignored, bounded Docker cancellation acceptance
+test docker_host_copy_error_cleans_container ... ignored, bounded Docker cleanup acceptance
+test docker_inode_and_live_log_limits_hold ... ignored, bounded Docker acceptance
+test pg_legacy_window_migration_preserves_append_only_rows ... ignored, requires disposable PostgreSQL: CMSQ_TEST_DB_ENV
+test unpriced_roll_is_rejected_by_actual_gate ... ok
+test new_roll_leg_must_be_executable ... ok
+test legacy_sqlite_trials_migrate_without_inventing_or_merging_windows ... ok
+test signed_source_change_without_hmac_is_refused ... ok
+
+test result: ok. 4 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/sandbox_integration.rs (/workspace/baseline/target/debug/deps/sandbox_integration-efc7d804691a2ba4)
+
+running 7 tests
+test docker_enforces_isolation ... ignored, requires docker: scripts/test_docker.sh
+test docker_identity_comes_from_image_inspect ... ignored, requires docker: scripts/test_docker.sh
+test docker_memory_limit ... ignored, requires docker: scripts/test_docker.sh
+test docker_out_budget_is_enforced_while_running ... ignored, requires docker: scripts/test_docker.sh
+test docker_output_flood_is_capped ... ignored, requires docker: scripts/test_docker.sh
+test docker_timeout_kills ... ignored, requires docker: scripts/test_docker.sh
+test process_backend_isolation ... ignored, requires bubblewrap: scripts/test_docker.sh
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scrape_cycle.rs (/workspace/baseline/target/debug/deps/scrape_cycle-064324e921fe1d97)
+
+running 2 tests
+test backlog_left_by_the_cap_is_backtested_next_cycle ... ok
+test scrape_cycle_end_to_end_and_dedupes_on_rerun ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/store_concurrency.rs (/workspace/baseline/target/debug/deps/store_concurrency-cb2f3745a3b736d4)
+
+running 11 tests
+test pg_app_role_cannot_rewrite_or_unprotect_evidence ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_audit_concurrent_appends_stay_linear ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_bars_go_to_a_timescale_hypertable ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_owner_tamper_is_detected_by_chain ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_status_cas_has_one_winner ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_trial_ledger_n_is_distinct_and_monotone ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test pg_vault_cannot_be_double_spent ... ignored, requires PostgreSQL: scripts/test_pg.sh
+test sqlite_status_cas_has_one_winner ... ok
+test sqlite_vault_cannot_be_double_spent ... ok
+test sqlite_trial_ledger_n_is_distinct_and_monotone ... ok
+test sqlite_audit_concurrent_appends_stay_linear ... ok
+
+test result: ok. 4 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+     Running unittests src/lib.rs (/workspace/baseline/target/debug/deps/cmsq_paper-a37ed7299aa0781a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/engine.rs (/workspace/baseline/target/debug/deps/engine-510051dfe2ce47af)
+
+running 12 tests
+test margin_check_rejects_oversized_orders ... ok
+test only_promoted_strategies_trade ... ok
+test suspended_rejects_and_never_fills ... ok
+test day_orders_expire_and_unfreeze ... ok
+test no_buy_at_limit_up_no_sell_at_limit_down ... ok
+test futures_margin_close_today_and_daily_settlement ... ok
+test ashare_lots_participation_t1_fees ... ok
+test limit_trade_through_vs_touch_queue ... ok
+test marketable_limit_takes_the_ask ... ok
+test qifi_export_is_marked_simulated ... ok
+test dce_close_fee_today_first_and_no_close_today_instruction ... ok
+test deterministic_replay ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/no_order_path.rs (/workspace/baseline/target/debug/deps/no_order_path-54a81abd10a4a113)
+
+running 2 tests
+test no_broker_or_network_dependency ... ok
+test no_trading_api_symbols_in_sources ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/session.rs (/workspace/baseline/target/debug/deps/session-4fe5bddccb0c41f9)
+
+running 3 tests
+test pg_paper_lifecycle ... ignored
+test persist_resume_verify_and_tamper_detection ... ok
+test signal_driver_trades_next_day_and_replays_identically ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests cmsq_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cmsq_paper
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

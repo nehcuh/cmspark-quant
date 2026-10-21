@@ -19,4 +19,3 @@ test sample_metadata_edit_bypasses_real_data_check ... ok
 test opening_observer_reaps_active_pre_job_backtest ... ok
 
 test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.14s
-

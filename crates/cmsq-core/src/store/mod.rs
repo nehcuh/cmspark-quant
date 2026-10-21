@@ -108,6 +108,8 @@ const SQLITE_COLUMNS: &[(&str, &str, &str)] = &[
     ("trials", "lookahead", "INTEGER NOT NULL DEFAULT 0"),
     ("trials", "run_kind", "TEXT NOT NULL DEFAULT 'single'"),
     ("trials", "group_id", "TEXT"),
+    ("trials", "score_start", "TEXT NOT NULL DEFAULT ''"),
+    ("trials", "score_end", "TEXT NOT NULL DEFAULT ''"),
     ("strategies", "run_owner", "TEXT"),
 ];
 const SQLITE_LATE_TRIGGERS: &str = r#"
@@ -202,6 +204,9 @@ pub struct TrialRow {
     pub dataset_sha: String,
     /// evaluation bars (fixes the scoring window on that snapshot)
     pub bars: i64,
+    /// Inclusive dates of the actual scored returns, not the warm-up window.
+    pub score_start: String,
+    pub score_end: String,
 }
 
 impl TrialRow {
@@ -211,16 +216,23 @@ impl TrialRow {
     /// selection dimension (symbol, data, window, allocation, params) is a new trial.
     /// No correlation discount is applied: the count is the conservative upper bound.
     pub fn selection_key(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{}|{}",
-            self.idea_key,
-            self.params_hash,
-            self.symbol,
-            self.dataset_sha,
+        // An old row cannot prove which dates were scored. Preserve it and
+        // count conservatively instead of inventing a window or deduping it.
+        if self.score_start.is_empty() || self.score_end.is_empty() {
+            return format!("legacy-trial:{}", self.id);
+        }
+        serde_json::to_string(&(
+            &self.idea_key,
+            &self.params_hash,
+            &self.symbol,
+            &self.dataset_sha,
             self.bars,
-            self.run_kind,
-            self.group_id.as_deref().unwrap_or("-")
-        )
+            &self.score_start,
+            &self.score_end,
+            &self.run_kind,
+            &self.group_id,
+        ))
+        .expect("a tuple of strings and integers serializes")
     }
 }
 
@@ -252,6 +264,8 @@ pub struct NewTrial<'a> {
     pub symbol: &'a str,
     pub dataset_sha: &'a str,
     pub bars: usize,
+    pub score_start: &'a str,
+    pub score_end: &'a str,
     pub sharpe_daily: f64,
     pub positions: &'a [f64],
     pub lookahead: bool,
@@ -327,7 +341,7 @@ pub fn lease_alive(lease: &str) -> Option<bool> {
 const ACOLS: &str = "seq,ts,actor,action,target,details,success,prev_hash,hash";
 const SCOLS: &str = "id,title,source_site,source_url,author,scraped_at,ingested_at,raw_path,content_sha256,sample,status,attempts,last_reason,extracted_json,updated_at";
 const JCOLS: &str = "id,strategy_id,backend,image,symbol,data_source,status,exit_code,started_at,finished_at,duration_ms,job_dir,error,result_json,owner_pid,runner_identity,kind,owner_host";
-const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead,run_kind,group_id,dataset_sha,bars";
+const TCOLS: &str = "id,strategy_id,idea_key,params_hash,symbol,sharpe_daily,positions_json,lookahead,run_kind,group_id,dataset_sha,bars,score_start,score_end";
 
 fn audit_row(r: &R) -> AuditEntry {
     let d = r.s(5);
@@ -411,6 +425,8 @@ fn trial_row(r: &R) -> TrialRow {
         group_id: r.os(9),
         dataset_sha: r.s(10),
         bars: r.i(11),
+        score_start: r.s(12),
+        score_end: r.s(13),
     }
 }
 
@@ -884,8 +900,8 @@ impl Store {
     pub fn record_trial(&self, t: &NewTrial) -> Result<Vec<TrialRow>> {
         let pos = serde_json::to_string(t.positions)?;
         self.db.tx(Some(Lock::Ledger), |e| {
-            e.exec("INSERT INTO trials(strategy_id,job_id,idea_key,params_hash,symbol,dataset_sha,bars,sharpe_daily,positions_json,created_at,lookahead,run_kind,group_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                p![t.strategy_id, t.job_id, t.idea_key, t.params_hash, t.symbol, t.dataset_sha, t.bars, t.sharpe_daily, pos.as_str(), now(), t.lookahead, t.run_kind, t.group_id])?;
+            e.exec("INSERT INTO trials(strategy_id,job_id,idea_key,params_hash,symbol,dataset_sha,bars,sharpe_daily,positions_json,created_at,lookahead,run_kind,group_id,score_start,score_end) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                p![t.strategy_id, t.job_id, t.idea_key, t.params_hash, t.symbol, t.dataset_sha, t.bars, t.sharpe_daily, pos.as_str(), now(), t.lookahead, t.run_kind, t.group_id, t.score_start, t.score_end])?;
             Ok(e.query(&format!("SELECT {TCOLS} FROM trials ORDER BY id"), &[])?.iter().map(trial_row).collect())
         })
     }
@@ -912,6 +928,8 @@ impl Store {
             symbol,
             dataset_sha,
             bars,
+            score_start: "",
+            score_end: "",
             sharpe_daily: sr,
             positions,
             lookahead,

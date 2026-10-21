@@ -208,6 +208,8 @@ fn trial(o: &Orchestrator, job: &str, sym: &str, sha: &str, bars: usize, params:
             symbol: sym,
             dataset_sha: sha,
             bars,
+            score_start: "2010-01-01",
+            score_end: "2013-12-31",
             sharpe_daily: 0.02,
             positions: &[],
             lookahead: false,

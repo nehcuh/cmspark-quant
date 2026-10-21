@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized] target(s) in 0.17s
+     Running tests/reviewer_acceptance.rs (/workspace/baseline/target/debug/deps/reviewer_acceptance-10991b1728cc4a6c)
+
+running 8 tests
+test docker_output_mount_accepts_more_than_positions_cap ... ignored, bounded Docker check; uses existing python:3.12-slim image
+impossible OHLC refused: impossible OHLC on line 2 (open 1 high 5 low 20 close 10)
+roll at next open: synthetic scorer equity=1100000, old-contract ledger equity=900000
+executable old -3% leg ledger equity=970000
+test impossible_ohlc_is_accepted_and_not_cross_checked ... ok
+test continuous_futures_roll_uses_unheld_contract_overnight_return ... ok
+early future-dependent positions at scoring bars 200..299 are detected for all 50 seeds using production mirror plan; static scanner remains clean
+test probe_has_a_deterministic_early_scoring_blind_region ... ok
+sample signed source="sample", mutable source=tushare, real_market_data={"detail":"signed data source is not an independent real-market fetch (sample/csv/unknown): cannot pass the gate","name":"real_market_data","ok":false}
+test sample_metadata_edit_bypasses_real_data_check ... ok
+100 distinct symbols: {"configurations":1,"counting_rule":"N = distinct (idea, params, symbol, snapshot, scoring bars, score start/end, run kind, group); exact reruns dedupe; unknown legacy windows count per row; no correlation discount (conservative)","excluded_implausible":0,"excluded_lookahead":0,"idea_clusters":1,"library_trials":100,"n_effective":100,"n_floor":20,"selections":100,"variance_pool":100}, DSR(actual N)=0.896231641309124, DSR(N=100)=0.896231641309124
+active backtest after observer open: Ok(BacktestSummary { strategy_id: "5d317cba-643a-4525-b46d-8cbc5b0a113a", job_id: "2aba3f29-ed74-47a8-8768-99a3cb1b38aa", status: Rejected, job_status: "succeeded", reasons: ["runner_pinned: runner identity \"sha256:audit-test-double|cmsq.runner.version=2.2.2\"; expected image <not recorded: run scripts/build_runner.sh> with cmsq.runner.version=2.2.2", "real_market_data: signed data source is not an independent real-market fetch (sample/csv/unknown): cannot pass the gate", "deflated_sharpe: DSR 0.913 (min 0.95) over N=20 library trials, SR0/day 0.0680"], oos: Some(Object {"annual_return": Number(0.252661286838457), "bars": Number(781), "end": String("2019-01-02"), "exposure": Number(0.46856225255683315), "kurtosis": Number(6.538225352881623), "max_drawdown": Number(-0.08463742669852015), "sharpe": Number(1.8525395620760003), "sharpe_daily": Number(0.11669902321813334), "skew": Number(0.19044287560497375), "start": String("2015-10-26"), "total_return": Number(1.0100491984961466)}) })
+test cross_symbol_trials_are_collapsed_in_dsr_n ... ok
+test opening_observer_reaps_active_pre_job_backtest ... ok
+A=2015-10-26..2019-01-02, B=2016-04-22..2019-07-03, both bars=781, trial info={"configurations":1,"counting_rule":"N = distinct (idea, params, symbol, snapshot, scoring bars, score start/end, run kind, group); exact reruns dedupe; unknown legacy windows count per row; no correlation discount (conservative)","excluded_implausible":0,"excluded_lookahead":0,"idea_clusters":1,"library_trials":2,"n_effective":20,"n_floor":20,"selections":2,"variance_pool":2}
+test different_windows_with_same_bar_count_are_not_deduped ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.20s

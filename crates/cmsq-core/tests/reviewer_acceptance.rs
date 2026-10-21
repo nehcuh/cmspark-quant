@@ -181,6 +181,8 @@ async fn cross_symbol_trials_are_collapsed_in_dsr_n() {
                 symbol: &format!("SH{:06}", 600000 + i),
                 dataset_sha: "snapshot",
                 bars: 500,
+                score_start: "2010-01-01",
+                score_end: "2013-12-31",
                 sharpe_daily: 0.02,
                 positions: &[],
                 lookahead: false,
@@ -413,7 +415,6 @@ fn continuous_futures_roll_uses_unheld_contract_overnight_return() {
 }
 
 #[tokio::test]
-#[ignore = "Known issue #7: different date windows of equal length collapse; run explicitly to reproduce"]
 async fn different_windows_with_same_bar_count_are_not_deduped() {
     let (_d, mut o, id) = setup().await;
     let (bars, meta, att) = o.load_dataset("SAMPLE_REGIME").await.unwrap();
@@ -457,5 +458,26 @@ async fn different_windows_with_same_bar_count_are_not_deduped() {
     assert_eq!(
         info["selections"], 2,
         "different date windows are different research selections"
+    );
+    let all = o.store.trials().unwrap();
+    assert_eq!(
+        (&all[0].score_start, &all[0].score_end),
+        (&a.dm.start, &a.dm.end)
+    );
+    assert_eq!(
+        (&all[1].score_start, &all[1].score_end),
+        (&b.dm.start, &b.dm.end)
+    );
+    let RunOutcome::Scored(c) = o
+        .evaluate_once(&s, e, code, &ds, &json!({}), &mock, "single", None)
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let (_, after_exact_rerun) = o.dsr_for(&o.store.trials().unwrap(), &c.dm);
+    assert_eq!(
+        after_exact_rerun["selections"], 2,
+        "exact dated reruns still dedupe"
     );
 }
