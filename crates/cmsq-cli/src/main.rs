@@ -1819,9 +1819,17 @@ fn paper_cmd(
             let hot = cmsq_core::hot::global();
             let mut n = 0usize;
             if let Some(file) = &from_bars {
-                let qs = bars_to_quotes(file, &inst)?;
+                let cal = cmsq_core::calendars::FuturesCalendars::load(&o.home.data_dir())
+                    .for_instrument(&inst);
+                let (qs, dropped) = bars_to_quotes(file, &inst, &cal)?;
+                if dropped > 0 {
+                    eprintln!(
+                        "  · dropped {dropped} bars on evenings without a night session ({})",
+                        cal.source()
+                    );
+                }
                 anyhow::ensure!(!qs.is_empty(), "no bars in {}", file.display());
-                o.store.audit("paper", "paper_bar_replay", Some(&id), serde_json::json!({"file": file.display().to_string(), "sha256": cmsq_core::calendars::sha256_hex(&std::fs::read(file)?), "quotes": qs.len(), "first": qs[0].ts, "last": qs[qs.len()-1].ts}), true)?;
+                o.store.audit("paper", "paper_bar_replay", Some(&id), serde_json::json!({"file": file.display().to_string(), "sha256": cmsq_core::calendars::sha256_hex(&std::fs::read(file)?), "quotes": qs.len(), "dropped_no_night_session": dropped, "calendar": cal.source(), "first": qs[0].ts, "last": qs[qs.len()-1].ts}), true)?;
                 for q in qs {
                     for f in drv.on_quote(&mut ps, &s, &q)? {
                         hot.publish(
@@ -1971,10 +1979,15 @@ fn read_limits(
 }
 
 /// Real 1-minute bars -> quotes (O, H/L in path order, C), volume split in quarters,
-/// cumulative per trading day. Night-session bars (>= 21:00 or < 03:00) belong to the next
-/// weekday's trading day (holidays are not modelled here; see docs/PAPER_TRADING.md).
-fn bars_to_quotes(file: &std::path::Path, inst: &str) -> Result<Vec<cmsq_paper::Quote>> {
+/// cumulative per trading day. The trading day comes from the instrument's exchange
+/// calendar (`cmsq data calendar --exchange futures`; weekdays if none is stored).
+fn bars_to_quotes(
+    file: &std::path::Path,
+    inst: &str,
+    cal: &cmsq_core::calendars::ExchangeCalendar,
+) -> Result<(Vec<cmsq_paper::Quote>, usize)> {
     let txt = std::fs::read_to_string(file)?;
+    let mut dropped = 0usize;
     let mut out = vec![];
     let mut cum: f64 = 0.0;
     let mut day_seen = String::new();
@@ -2006,21 +2019,20 @@ fn bars_to_quotes(file: &std::path::Path, inst: &str) -> Result<Vec<cmsq_paper::
             ln + 1
         );
         let (date, time) = (&dt[..10], &dt[11..16]);
-        let night = !("03:00".."21:00").contains(&time);
-        let td = if night {
-            let p = |a: usize, b: usize| date[a..b].parse::<i64>().unwrap_or(0);
-            let mut n = days_from_civil(p(0, 4), p(5, 7), p(8, 10));
-            if time >= "21:00" {
-                n += 1;
+        let ts = chrono::NaiveDateTime::parse_from_str(
+            &format!("{date} {time}:00"),
+            "%Y-%m-%d %H:%M:%S",
+        )
+        .with_context(|| format!("line {}: bad datetime {dt}", ln + 1))?;
+        // trading day from the exchange calendar (night session -> next open day,
+        // holidays included); bars on an evening WITHOUT a night session are dropped
+        if let Some(ev) = cmsq_core::calendars::ExchangeCalendar::night_evening(ts) {
+            if !cal.has_night_session(ev) {
+                dropped += 1;
+                continue;
             }
-            // 1970-01-01 was a Thursday: (n + 4) % 7 == 0 is Sunday, 6 is Saturday
-            while matches!((n + 4).rem_euclid(7), 0 | 6) {
-                n += 1;
-            }
-            civil_from_days(n)
-        } else {
-            date.to_string()
-        };
+        }
+        let td = cal.trading_day(ts).format("%Y-%m-%d").to_string();
         if td != day_seen {
             day_seen = td.clone();
             cum = 0.0;
@@ -2043,30 +2055,7 @@ fn bars_to_quotes(file: &std::path::Path, inst: &str) -> Result<Vec<cmsq_paper::
             });
         }
     }
-    Ok(out)
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn civil_from_days(days: i64) -> String {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}-{m:02}-{d:02}")
+    Ok((out, dropped))
 }
 
 fn chrono_today() -> String {
@@ -2087,4 +2076,49 @@ fn chrono_today() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+#[cfg(test)]
+mod bar_replay_tests {
+    use super::*;
+
+    #[test]
+    fn night_session_uses_exchange_calendar_and_drops_holiday_eves() {
+        let d = tempfile::tempdir().unwrap();
+        // SHFE around the 2026 National Day holiday: open 09-30, closed 10-01..10-07
+        let days = [
+            "2026-09-29",
+            "2026-09-30",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-12",
+        ];
+        std::fs::write(
+            d.path().join("_calendar_SHFE.txt"),
+            format!(
+                "# SHFE trade calendar 2026-09-29..2026-10-12 (open days only)\n{}\n",
+                days.join("\n")
+            ),
+        )
+        .unwrap();
+        let cal = cmsq_core::calendars::FuturesCalendars::load(d.path()).for_instrument("rb2601");
+        let f = d.path().join("b.csv");
+        std::fs::write(
+            &f,
+            "datetime,open,high,low,close,volume\n\
+             2026-09-29 21:01:00,3000,3001,2999,3000,100\n\
+             2026-09-30 21:01:00,3000,3001,2999,3000,100\n\
+             2026-10-08 09:01:00,3000,3001,2999,3000,100\n\
+             2026-10-09 21:01:00,3000,3001,2999,3000,100\n",
+        )
+        .unwrap();
+        let (q, dropped) = bars_to_quotes(&f, "rb2601", &cal).unwrap();
+        assert_eq!(dropped, 1, "no night session on the holiday eve 09-30");
+        let td: Vec<&str> = q
+            .iter()
+            .step_by(4)
+            .map(|x| x.trading_day.as_str())
+            .collect();
+        assert_eq!(td, ["2026-09-30", "2026-10-08", "2026-10-12"]);
+    }
 }
