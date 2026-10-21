@@ -1821,6 +1821,10 @@ fn paper_cmd(
             if let Some(file) = &from_bars {
                 let cal = cmsq_core::calendars::FuturesCalendars::load(&o.home.data_dir())
                     .for_instrument(&inst);
+                if let Some(e) = &cal.invalid {
+                    o.store.audit("paper", "calendar_invalid", Some(&id), serde_json::json!({"exchange": cal.exchange, "error": e, "demo": o.home.is_demo()}), !o.home.is_demo())?;
+                }
+                cal.ensure_valid(!o.home.is_demo())?;
                 let (qs, dropped) = bars_to_quotes(file, &inst, &cal)?;
                 if dropped > 0 {
                     eprintln!(
@@ -1864,6 +1868,9 @@ fn paper_cmd(
                 feed.start(&mcfg)?;
                 let mut agg = Aggregator::new(&mcfg.instruments);
                 agg.calendars = cmsq_core::calendars::FuturesCalendars::load(&o.home.data_dir());
+                for c in agg.calendars.by_exchange.values() {
+                    c.ensure_valid(!o.home.is_demo())?;
+                }
                 let end = std::time::Instant::now() + mcfg.duration;
                 while std::time::Instant::now() < end && !feed.finished() {
                     if let Some(FeedEvent::Tick(r)) =

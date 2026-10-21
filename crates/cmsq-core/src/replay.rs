@@ -41,17 +41,40 @@ impl Calendar {
     pub fn load(p: &Path) -> Result<Self> {
         let s = std::fs::read_to_string(p)
             .with_context(|| format!("no calendar at {}; run `cmsq data calendar`", p.display()))?;
+        Self::parse(&s).with_context(|| format!("malformed calendar {}", p.display()))
+    }
+    /// Strict: header `# <EX> trade calendar A..B ...` with valid dates, every
+    /// other line a YYYY-MM-DD open day inside A..B. A malformed file must never
+    /// silently degrade into the weekday fallback.
+    pub fn parse(s: &str) -> Result<Self> {
+        let valid =
+            |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok() && d.len() == 10;
         let head = s.lines().next().unwrap_or("");
-        let range = head.split_whitespace().nth(4).unwrap_or("..");
-        let (a, b) = range.split_once("..").unwrap_or(("", ""));
+        anyhow::ensure!(head.starts_with('#'), "missing `#` header line");
+        let range = head.split_whitespace().nth(4).unwrap_or("");
+        let (a, b) = range
+            .split_once("..")
+            .filter(|(a, b)| valid(a) && valid(b) && a <= b)
+            .ok_or_else(|| anyhow::anyhow!("header has no valid A..B date range: {head:?}"))?;
+        let mut open = BTreeSet::new();
+        for (i, l) in s.lines().enumerate().skip(1) {
+            let l = l.trim();
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
+            anyhow::ensure!(valid(l), "line {}: not a YYYY-MM-DD date: {l:?}", i + 1);
+            anyhow::ensure!(
+                l >= a && l <= b,
+                "line {}: {l} outside header range {a}..{b}",
+                i + 1
+            );
+            open.insert(l.to_string());
+        }
+        anyhow::ensure!(!open.is_empty(), "no open days");
         Ok(Self {
             first: a.into(),
             last: b.into(),
-            open: s
-                .lines()
-                .filter(|l| !l.starts_with('#') && !l.is_empty())
-                .map(String::from)
-                .collect(),
+            open,
         })
     }
     pub fn is_open(&self, d: &str) -> bool {
