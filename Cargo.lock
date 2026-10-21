@@ -1049,11 +1049,13 @@ name = "cmsq-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "cmsq-core",
  "cmsq-paper",
  "futures-util",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
