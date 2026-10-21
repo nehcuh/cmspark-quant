@@ -278,3 +278,29 @@ async fn process_backend_caps_out_file_count() {
         .unwrap()
         .contains("entries"));
 }
+
+#[tokio::test]
+#[ignore = "requires docker: scripts/test_docker.sh"]
+async fn docker_pinned_input_mtimes_survive_raw_stat() {
+    let d = docker().await;
+    let (ro, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let code = r#"
+import ctypes, json, struct
+libc = ctypes.CDLL(None, use_errno=True)
+def raw_mtime(p):
+    buf = ctypes.create_string_buffer(256)
+    r = libc.syscall(262, -100, p.encode(), buf, 0)  # newfstatat, bypasses libfaketime
+    assert r == 0, ctypes.get_errno()
+    return struct.unpack_from("q", buf.raw, 88)[0]     # st_mtime (x86_64 struct stat)
+open("/out/positions.csv", "w").write(json.dumps({"file": raw_mtime("/data/probe.py"), "dir": raw_mtime("/data")}))
+"#;
+    let r = req(code, ro.path(), out.path(), 60);
+    cmsq_core::sandbox::pin_times(&[ro.path().join("probe.py"), ro.path().to_path_buf()]);
+    let res = d.execute(&r).await.unwrap();
+    assert_eq!(res.exit_code, 0, "{}", res.stderr);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path().join("positions.csv")).unwrap())
+            .unwrap();
+    assert_eq!(v["file"], cmsq_core::sandbox::FAKE_EPOCH_SECS, "{v}");
+    assert_eq!(v["dir"], cmsq_core::sandbox::FAKE_EPOCH_SECS, "{v}");
+}
