@@ -24,7 +24,7 @@ jobs:
       - name: tests
         run: cargo test -p cmsq-core -p cmsq-cli -p cmsq-paper
       - name: optional Redis hot layer (live)
-        run: CMSQ_TEST_REDIS_URL=redis://127.0.0.1:6379/0 cargo test -p cmsq-core --lib hot:: -- --include-ignored
+        run: "CMSQ_TEST_REDIS_URL=redis://127.0.0.1:6379/0 cargo test -p cmsq-core --lib hot:: -- --include-ignored"
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: vn.py shim
