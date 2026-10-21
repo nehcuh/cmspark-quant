@@ -83,6 +83,8 @@ pub struct GateInput<'a> {
     pub synthetic: bool,
     /// capacity estimate (CNY); None = no trades to estimate from
     pub capacity: Option<f64>,
+    /// futures: rolls held through without an executable old-leg price (issue #10)
+    pub roll_unpriced: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,6 +333,7 @@ mod tests {
             high_risks: &f.risks,
             synthetic: false,
             capacity: Some(5e7),
+            roll_unpriced: 0,
         }
     }
     #[test]

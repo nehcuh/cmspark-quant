@@ -114,6 +114,7 @@ fn real_check(o: &Orchestrator, sc: &cmsq_core::orchestrator::Scored) -> serde_j
             buy_hold: &sc.bhm,
             synthetic: sc.synthetic,
             capacity: sc.capacity,
+            roll_unpriced: sc.roll_unpriced,
         },
         &o.gate,
     );
@@ -502,4 +503,202 @@ async fn recovery_only_reaps_dead_owners() {
     let j = &o2.store.list_jobs(Some(&id2)).unwrap()[0];
     assert!(!o2.store.abandon_job(&j.id, "late recovery").unwrap());
     assert_eq!(o2.store.list_jobs(Some(&id2)).unwrap()[0].status, j.status);
+}
+
+mod roll_ledger {
+    use cmsq_core::futures::{self, Fee, FutBar, FuturesCosts};
+    use cmsq_core::scorer::CostModel;
+
+    /// 3 days, 2 contracts; roll decided at day-2 close, effective day-3 open.
+    fn fixture(old3: (f64, f64), new3: (f64, f64), new12: f64, old_vol3: f64) -> Vec<FutBar> {
+        let mut all = vec![];
+        for (day, (oo, oc), (no, nc), noi, ov) in [
+            (2, (100.0, 100.0), (new12, new12), 100.0, 1e6),
+            (3, (100.0, 100.0), (new12, new12), 300.0, 1e6),
+            (4, old3, new3, 300.0, old_vol3),
+        ] {
+            for (c, o, cl, oi, v) in [("RB2401", oo, oc, 200.0, ov), ("RB2405", no, nc, noi, 1e6)] {
+                all.push(FutBar {
+                    contract: c.into(),
+                    date: format!("2024-01-{day:02}"),
+                    open: o,
+                    high: o.max(cl),
+                    low: o.min(cl),
+                    close: cl,
+                    settle: Some(cl),
+                    volume: v,
+                    oi,
+                });
+            }
+        }
+        all
+    }
+    fn zero_cost() -> CostModel {
+        CostModel {
+            commission: 0.0,
+            min_commission: 0.0,
+            slippage: 0.0,
+            multiplier: 1.0,
+        }
+    }
+    fn run(all: &[FutBar], pos: f64, fee: Fee) -> (cmsq_core::scorer::SimResult, f64) {
+        let (bars, rolls, held) = futures::build_main_series(all, 1);
+        assert_eq!(held, vec!["RB2401", "RB2401", "RB2405"]);
+        let mut spec = futures::spec_for("FUT_RB").unwrap();
+        spec.fee = fee;
+        let sim = futures::simulate_with_rolls(
+            &spec,
+            &bars,
+            &rolls,
+            &[pos; 3],
+            &FuturesCosts {
+                slippage_ticks: 0.0,
+                leverage: 1.0,
+            },
+            &zero_cost(),
+        );
+        (sim, spec.multiplier)
+    }
+    const NOFEE: Fee = Fee::PerLot {
+        open: 0.0,
+        close: 0.0,
+        close_today: 0.0,
+    };
+
+    /// #10 reviewer case: old leg 100 -> 90 (-10%) at the roll-day open, new leg
+    /// 200 -> 210. On RB a -10% open is beyond the daily limit, so a long cannot
+    /// exit the old leg there: the run fails closed instead of booking +10%.
+    #[test]
+    fn reviewer_case_fails_closed_never_books_new_leg_gain() {
+        let (sim, _) = run(
+            &fixture((90.0, 90.0), (210.0, 210.0), 200.0, 1e6),
+            1.0,
+            NOFEE,
+        );
+        assert_eq!(sim.roll_unpriced, 1);
+        // within the limit: the held old leg's -3% is booked, the new leg's +5% is not
+        let (sim, mult) = run(
+            &fixture((97.0, 97.0), (210.0, 210.0), 200.0, 1e6),
+            1.0,
+            NOFEE,
+        );
+        let lots = sim.fills.iter().find(|f| f.kind == "open").unwrap().qty;
+        assert_eq!(sim.roll_unpriced, 0);
+        assert_eq!(sim.equity[2], 1_000_000.0 + lots * mult * (97.0 - 100.0));
+        assert_eq!(sim.equity[2], 970_000.0);
+        let rc = sim.fills.iter().find(|f| f.kind == "roll_close").unwrap();
+        assert_eq!(rc.price, 97.0, "old leg closes at ITS open");
+    }
+    /// short side, opposite gaps, no gap
+    #[test]
+    fn roll_short_and_gap_variants() {
+        let (s, _) = run(
+            &fixture((97.0, 97.0), (210.0, 210.0), 200.0, 1e6),
+            -1.0,
+            NOFEE,
+        );
+        assert_eq!(s.equity[2], 1_030_000.0, "short gains the old leg's drop");
+        let (s, _) = run(
+            &fixture((103.0, 103.0), (190.0, 190.0), 200.0, 1e6),
+            1.0,
+            NOFEE,
+        );
+        assert_eq!(s.equity[2], 1_030_000.0, "old up, new down");
+        let (s, _) = run(
+            &fixture((100.0, 100.0), (200.0, 200.0), 200.0, 1e6),
+            1.0,
+            NOFEE,
+        );
+        assert_eq!(s.equity[2], 1_000_000.0, "no gap: no P/L");
+    }
+    /// same price, different contract: still a roll with both legs' costs
+    #[test]
+    fn same_price_roll_still_pays_both_legs() {
+        let fee = Fee::PerLot {
+            open: 3.0,
+            close: 3.0,
+            close_today: 3.0,
+        };
+        let (s, _) = run(
+            &fixture((100.0, 100.0), (100.0, 100.0), 100.0, 1e6),
+            1.0,
+            fee,
+        );
+        assert!(
+            s.fills.iter().any(|f| f.kind == "roll_close")
+                && s.fills.iter().any(|f| f.kind == "roll_open")
+        );
+    }
+    /// ratio fees: the old leg's fee uses the OLD price, the new leg's the new
+    #[test]
+    fn ratio_fee_uses_each_legs_price() {
+        let fee = Fee::Ratio {
+            open: 1e-4,
+            close: 1e-4,
+            close_today: 1e-4,
+        };
+        let (s, mult) = run(&fixture((97.0, 97.0), (210.0, 210.0), 200.0, 1e6), 1.0, fee);
+        let lots = s.fills.iter().find(|f| f.kind == "roll_open").unwrap().qty;
+        let rc = s.fills.iter().find(|f| f.kind == "roll_close").unwrap();
+        let ro = s.fills.iter().find(|f| f.kind == "roll_open").unwrap();
+        assert!(
+            (rc.cost - lots * 97.0 * mult * 1e-4).abs() < 1e-6,
+            "{}",
+            rc.cost
+        );
+        assert!(
+            (ro.cost - lots * 210.0 * mult * 1e-4).abs() < 1e-6,
+            "{}",
+            ro.cost
+        );
+    }
+    /// old leg untradeable (volume 0, limit-locked) or legacy data without legs: fail closed
+    #[test]
+    fn unexecutable_old_leg_fails_closed() {
+        let (s, _) = run(
+            &fixture((97.0, 97.0), (210.0, 210.0), 200.0, 0.0),
+            1.0,
+            NOFEE,
+        );
+        assert_eq!(s.roll_unpriced, 1, "volume 0");
+        let (s, _) = run(
+            &fixture((80.0, 80.0), (210.0, 210.0), 200.0, 1e6),
+            1.0,
+            NOFEE,
+        );
+        assert_eq!(
+            s.roll_unpriced, 1,
+            "limit-down locked: long cannot exit the old leg"
+        );
+        let (bars, mut rolls, _) =
+            futures::build_main_series(&fixture((97.0, 97.0), (210.0, 210.0), 200.0, 1e6), 1);
+        rolls[0].old_open = None;
+        let spec = futures::spec_for("FUT_RB").unwrap();
+        let fx = FuturesCosts::default();
+        assert_eq!(
+            futures::simulate_with_rolls(&spec, &bars, &rolls, &[1.0; 3], &fx, &zero_cost())
+                .roll_unpriced,
+            1,
+            "old leg missing"
+        );
+        assert_eq!(
+            futures::simulate(&spec, &bars, &[1.0; 3], &fx, &zero_cost()).roll_unpriced,
+            1,
+            "legacy series without legs"
+        );
+        // flat through the roll: nothing to price
+        assert_eq!(
+            futures::simulate(&spec, &bars, &[0.0; 3], &fx, &zero_cost()).roll_unpriced,
+            0
+        );
+    }
+    /// gate: an unpriced roll can never pass
+    #[test]
+    fn gate_blocks_unpriced_rolls() {
+        let rolls = serde_json::json!([{"date":"2024-01-04","from":"RB2401","to":"RB2405","factor":0.5,"old_open":90.0,"old_volume":1.0}]);
+        let r =
+            cmsq_core::orchestrator::signed_rolls(&serde_json::json!({ "rolls": rolls })).unwrap();
+        assert_eq!(r[0].old_open, Some(90.0));
+        assert!(cmsq_core::orchestrator::signed_rolls(&serde_json::json!({})).is_none());
+    }
 }
