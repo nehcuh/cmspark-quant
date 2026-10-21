@@ -1359,10 +1359,16 @@ fn paper_cmd(
                 .map(|(g, ..)| (g.date, g.target_position))
                 .collect();
             let mut drv = SignalDriver::new(sig, &inst);
+            let hot = cmsq_core::hot::global();
             let mut n = 0usize;
             if from_db {
                 for t in o.store.list_ticks(&inst, 5_000_000)? {
-                    drv.on_quote(&mut ps, &s, &Quote::from(&t))?;
+                    for f in drv.on_quote(&mut ps, &s, &Quote::from(&t))? {
+                        hot.publish(
+                            cmsq_core::hot::CH_PAPER,
+                            &serde_json::json!({"session": &id, "fill": f}),
+                        );
+                    }
                     n += 1;
                 }
             } else {
@@ -1399,7 +1405,13 @@ fn paper_cmd(
                             {
                                 q.lower_limit = Some(r.lower_limit);
                             }
-                            drv.on_quote(&mut ps, &s, &q)?;
+                            hot.put_quote(&q.symbol, &serde_json::to_value(&q)?);
+                            for f in drv.on_quote(&mut ps, &s, &q)? {
+                                hot.publish(
+                                    cmsq_core::hot::CH_PAPER,
+                                    &serde_json::json!({"session": &id, "fill": f}),
+                                );
+                            }
                             n += 1;
                         }
                     }

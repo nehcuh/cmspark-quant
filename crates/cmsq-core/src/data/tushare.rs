@@ -154,6 +154,14 @@ impl Tushare {
                 }
                 tokio::time::sleep(w).await;
             }
+            // shared budget across processes when the optional Redis layer is on
+            while let Some(w) = crate::hot::global().take_token(&format!("tushare:{api}"), self.rpm)
+            {
+                if w.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(w).await;
+            }
             self.calls.fetch_add(1, Relaxed);
             let body =
                 json!({"api_name": api, "token": self.token, "params": params, "fields": fields});

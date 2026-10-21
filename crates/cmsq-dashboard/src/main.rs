@@ -123,6 +123,9 @@ struct Progress {
     /// Some(true) = Docker reachable, Some(false) = not, None = still probing
     docker: Option<bool>,
     docker_detail: String,
+    /// live messages from the optional Redis hot layer (quotes / paper fills), newest last
+    live: std::collections::VecDeque<(String, serde_json::Value)>,
+    redis: String,
 }
 
 struct Dashboard {
@@ -384,6 +387,35 @@ impl Dashboard {
                 g.docker = Some(r.is_ok());
                 g.docker_detail = r.err().map(|e| e.to_string()).unwrap_or_default();
                 g.version += 1;
+            });
+        }
+        {
+            // optional Redis pub/sub: live quotes + simulated paper fills
+            let p = progress.clone();
+            std::thread::spawn(move || {
+                let hot = cmsq_core::hot::global();
+                p.lock().unwrap().redis = hot.describe();
+                if !hot.enabled() {
+                    return;
+                }
+                loop {
+                    let r = hot.subscribe(
+                        &[cmsq_core::hot::CH_QUOTES, cmsq_core::hot::CH_PAPER],
+                        |ch, v| {
+                            let mut g = p.lock().unwrap();
+                            g.live.push_back((ch.to_string(), v));
+                            while g.live.len() > 50 {
+                                g.live.pop_front();
+                            }
+                            g.version += 1;
+                            true
+                        },
+                    );
+                    if let Err(e) = r {
+                        p.lock().unwrap().redis = format!("{} (reconnecting: {e})", hot.describe());
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                }
             });
         }
         let poll = cx.spawn(

@@ -32,6 +32,7 @@ rstdx = { path = "../../third_party/rstdx", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "chrono", "macros"] }
 libc = "0.2.191"
+redis = { version = "0.27", default-features = false, features = ["script"] }
 
 ctp2rs = { version = "=0.1.11-alpha1", optional = true }
 

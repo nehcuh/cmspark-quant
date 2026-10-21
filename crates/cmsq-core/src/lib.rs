@@ -8,6 +8,7 @@ pub mod extract;
 pub mod futures;
 pub mod gate;
 pub mod home;
+pub mod hot;
 pub mod ingest;
 pub mod market;
 pub mod models;
