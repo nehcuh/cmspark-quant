@@ -179,6 +179,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DataCmd,
     },
+    /// Audit signer: holds the audit key in a separate process (see docs/AUDIT_KEY.md)
+    Signer {
+        #[command(subcommand)]
+        cmd: SignerCmd,
+    },
     /// Audit log
     Audit {
         #[command(subcommand)]
@@ -301,8 +306,51 @@ enum JobsCmd {
 }
 
 #[derive(Subcommand)]
+enum SignerCmd {
+    /// Run the audit signer (as its own OS user). The key directory must be mode 0700.
+    Serve {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        socket: std::path::PathBuf,
+        /// only these peer uids may connect (SO_PEERCRED); default: socket permissions only
+        #[arg(long, value_delimiter = ',')]
+        allow_uid: Vec<u32>,
+    },
+    /// Add a new key (rotation); new entries use it, old entries keep verifying
+    Rotate {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
+    /// Import an existing in-process audit.key as key 0 (migration), then delete the original
+    Import {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        key_file: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum AuditCmd {
     Verify,
+    /// Publish the audit chain head to a git repository (signed commit with --sign), optionally push / loop
+    AnchorGit {
+        #[arg(long)]
+        repo: std::path::PathBuf,
+        #[arg(long)]
+        sign: bool,
+        #[arg(long)]
+        push: bool,
+        /// repeat, e.g. 1h
+        #[arg(long)]
+        every: Option<String>,
+    },
+    /// Check every anchor ever committed to the git repository against the database
+    VerifyGit {
+        #[arg(long)]
+        repo: std::path::PathBuf,
+    },
     Tail {
         #[arg(long, default_value_t = 20)]
         n: i64,
@@ -350,6 +398,28 @@ async fn main() -> Result<()> {
         .clone()
         .map(Home::new)
         .unwrap_or_else(Home::from_env);
+    if let Cmd::Signer { cmd } = &cli.cmd {
+        match cmd {
+            SignerCmd::Serve {
+                dir,
+                socket,
+                allow_uid,
+            } => cmsq_core::signer::serve(dir, socket, allow_uid)?,
+            SignerCmd::Rotate { dir } => {
+                let id = cmsq_core::signer::SignerCore::open(dir)?.rotate()?;
+                println!("new audit key {id}; restart the signer; new entries start epoch {id}");
+            }
+            SignerCmd::Import { dir, key_file } => {
+                cmsq_core::signer::SignerCore::import(dir, &std::fs::read_to_string(key_file)?)?;
+                println!(
+                    "imported as key 0 into {}; now delete {} and set CMSQ_AUDIT_SIGNER",
+                    dir.display(),
+                    key_file.display()
+                );
+            }
+        }
+        return Ok(());
+    }
     let mut o = Orchestrator::open(home)?;
     if !cli.json {
         o.progress = Some(std::sync::Arc::new(|m: &str| eprintln!("  · {m}")));
@@ -1207,6 +1277,63 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::Audit {
+            cmd:
+                AuditCmd::AnchorGit {
+                    repo,
+                    sign,
+                    push,
+                    every,
+                },
+        } => loop {
+            let r = o.store.verify_audit()?;
+            anyhow::ensure!(
+                r.ok,
+                "refusing to anchor a broken chain: {}",
+                r.problem.unwrap_or_default()
+            );
+            let c = cmsq_core::gitanchor::publish(
+                &repo,
+                o.store.audit_chain_id(),
+                r.entries,
+                &r.head_hash,
+                sign,
+                push,
+            )?;
+            out(
+                serde_json::json!({"chain": o.store.audit_chain_id(), "seq": r.entries, "head": r.head_hash, "commit": c}),
+                match &c {
+                    Some(c) => format!(
+                        "anchored seq {} head {} in commit {}",
+                        r.entries,
+                        &r.head_hash[..16],
+                        &c[..12]
+                    ),
+                    None => "head already anchored".into(),
+                },
+            );
+            match &every {
+                Some(e) => tokio::time::sleep(parse_every(e)?).await,
+                None => break,
+            }
+        },
+        Cmd::Audit {
+            cmd: AuditCmd::VerifyGit { repo },
+        } => {
+            let (n, bad) = o.store.verify_git_anchors(&repo)?;
+            out(
+                serde_json::json!({"anchors": n, "problems": bad}),
+                if bad.is_empty() {
+                    format!("{n} git anchors match the database")
+                } else {
+                    format!("GIT ANCHOR MISMATCH:\n{}", bad.join("\n"))
+                },
+            );
+            if !bad.is_empty() {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Signer { .. } => unreachable!(),
         Cmd::Audit {
             cmd: AuditCmd::Tail { n },
         } => {

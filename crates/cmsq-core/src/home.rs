@@ -70,6 +70,38 @@ impl Home {
     /// Load (or create, 0600) the audit HMAC key; refuse a key inside $CMSQ_HOME.
     pub fn audit_config(&self) -> Result<crate::audit::AuditConfig> {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let anchor0 = self.anchor_file();
+        let chain = anchor0
+            .file_stem()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // 1) separate signer process (key held by another OS user): the app never sees the key
+        if let Ok(sock) = std::env::var("CMSQ_AUDIT_SIGNER") {
+            if let Some(p) = anchor0.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            return Ok(crate::audit::AuditConfig {
+                key: Vec::new(),
+                anchor: Some(anchor0),
+                signer: Some(std::sync::Arc::new(crate::signer::SocketSigner::new(sock))),
+                chain,
+            });
+        }
+        // 2) key from the environment (e.g. systemd-creds / container secret injection)
+        if let Ok(k) = std::env::var("CMSQ_AUDIT_KEY") {
+            let key = hex::decode(k.trim()).context("CMSQ_AUDIT_KEY must be hex")?;
+            anyhow::ensure!(key.len() >= 16, "CMSQ_AUDIT_KEY too short");
+            if let Some(p) = anchor0.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            return Ok(crate::audit::AuditConfig {
+                key,
+                anchor: Some(anchor0),
+                signer: None,
+                chain,
+            });
+        }
+        // 3) key file outside CMSQ_HOME (default)
         let kf = self.key_file();
         let root = self.abs();
         let kabs = kf
@@ -118,6 +150,8 @@ impl Home {
         Ok(crate::audit::AuditConfig {
             key,
             anchor: Some(anchor),
+            signer: None,
+            chain,
         })
     }
     pub fn from_env() -> Self {

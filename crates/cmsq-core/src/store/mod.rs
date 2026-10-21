@@ -343,9 +343,8 @@ fn audit_row(r: &R) -> AuditEntry {
         hash: r.s(8),
     }
 }
-fn audit_mac(key: &[u8], r: &R) -> String {
-    audit::entry_hash(
-        key,
+fn audit_msg(r: &R) -> Vec<u8> {
+    audit::entry_message(
         &r.s(7),
         r.i(0),
         &r.s(1),
@@ -588,13 +587,13 @@ impl Store {
             Some(a) => Some(FileLock::acquire(a)?),
             None => None,
         };
-        let key = self.cfg.key.clone();
+        let cfg = self.cfg.clone();
         let (seq, ts, prev_hash, hash) = self.db.tx(Some(Lock::Audit), |e| {
             let (prev_seq, prev_hash) = e.one("SELECT seq, hash FROM audit ORDER BY seq DESC LIMIT 1", &[])?
                 .map(|r| (r.i(0), r.s(1))).unwrap_or((0, GENESIS.to_string()));
             let seq = prev_seq + 1;
             let ts = now();
-            let hash = audit::entry_hash(&key, &prev_hash, seq, &ts, actor, action, target, &d, success);
+            let hash = cfg.mac_next(seq, &prev_hash, &audit::entry_message(&prev_hash, seq, &ts, actor, action, target, &d, success))?;
             e.exec("INSERT INTO audit(seq,ts,actor,action,target,details,success,prev_hash,hash) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 p![seq, ts.as_str(), actor, action, target, d.as_str(), success, prev_hash.as_str(), hash.as_str()])?;
             Ok((seq, ts, prev_hash, hash))
@@ -658,10 +657,12 @@ impl Store {
             if prev_hash != prev {
                 return Ok(bad("prev_hash does not link to previous entry".into()));
             }
-            if audit_mac(&self.cfg.key, r) != hash {
+            if !self.cfg.check(seq, &audit_msg(r), &hash)? {
                 if seq == 1 {
                     let why = "this workspace's audit chain was not signed with the current key: it was created by an older cmsq (unkeyed sha256 chain) or with a different audit.key / CMSQ_SECRETS_DIR. Use a fresh CMSQ_HOME, or point CMSQ_SECRETS_DIR at the key that created it";
-                    return Ok(bad(format!("HMAC mismatch at the first entry — {why}")));
+                    return Ok(bad(format!(
+                        "HMAC mismatch at the first entry: entry 1 was modified, or {why}"
+                    )));
                 }
                 return Ok(bad(
                     "HMAC mismatch (entry modified or chain re-computed without the key)".into(),
@@ -715,7 +716,46 @@ impl Store {
                 }
             }
         }
+        // the separate signer remembers its own head: a second, independent anchor
+        if rep.ok {
+            if let Some((sseq, smac)) = self.cfg.signer_head()? {
+                let at = rows
+                    .get((sseq - 1).max(0) as usize)
+                    .filter(|r| r.i(0) == sseq)
+                    .map(|r| r.s(8));
+                if head_seq < sseq - 1 || (head_seq >= sseq && at.as_deref() != Some(smac.as_str()))
+                {
+                    rep.ok = false;
+                    rep.first_bad_seq = Some(sseq.min(head_seq + 1));
+                    rep.problem = Some(format!("audit signer head seq {sseq} does not match the database (truncated or rewritten)"));
+                }
+            }
+        }
         Ok(rep)
+    }
+
+    /// Check external git anchors against the database: every anchored (seq, mac) must
+    /// still be in the log. Returns (anchors checked, problems).
+    pub fn verify_git_anchors(&self, repo: &Path) -> Result<(usize, Vec<String>)> {
+        let hist = crate::gitanchor::history(repo, &self.cfg.chain)?;
+        let mut bad = vec![];
+        for (seq, mac, ts, commit) in &hist {
+            let r = self
+                .db
+                .run(|e| e.one("SELECT hash FROM audit WHERE seq=?1", p![*seq]))?;
+            match r.map(|r| r.s(0)) {
+                Some(h) if &h == mac => {}
+                Some(_) => bad.push(format!("seq {seq} anchored at {ts} (commit {}) has a different MAC now: history rewritten", &commit[..8])),
+                None => bad.push(format!("seq {seq} anchored at {ts} (commit {}) is missing: log truncated", &commit[..8])),
+            }
+        }
+        Ok((hist.len(), bad))
+    }
+    pub fn audit_chain_id(&self) -> &str {
+        &self.cfg.chain
+    }
+    pub fn audit_key_source(&self) -> String {
+        self.cfg.key_source()
     }
 
     // ---------- strategies ----------
@@ -1010,7 +1050,7 @@ impl Store {
         let r = self.db.run(|e| e.one(&format!("SELECT {ACOLS} FROM audit WHERE action='market_data_fetch' AND target=?1 AND success=1 ORDER BY seq DESC LIMIT 1"), p![symbol]))?;
         let Some(r) = r else { return Ok(None) };
         anyhow::ensure!(
-            audit_mac(&self.cfg.key, &r) == r.s(8),
+            self.cfg.check(r.i(0), &audit_msg(&r), &r.s(8))?,
             crate::error::CoreError::AuditIntegrity(format!(
                 "data attestation entry seq {} fails its HMAC",
                 r.i(0)
@@ -1341,6 +1381,8 @@ mod tests {
 
     fn anchored(dir: &Path) -> (Store, AuditConfig) {
         let cfg = AuditConfig {
+            signer: None,
+            chain: String::new(),
             key: b"secret-key-outside-db".to_vec(),
             anchor: Some(dir.join("anchors/h.anchor")),
         };
