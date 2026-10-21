@@ -733,21 +733,16 @@ impl Orchestrator {
             json!({"params": params, "position_min": lo, "pricetick": tick}).to_string(),
         )
         .map_err(io)?;
-        // no real timestamps reach the sandbox: pin input mtimes to the fake epoch
-        let epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800); // 2000-01-01
-        for f in [
+        // no real mtimes/atimes reach the sandbox: pin every input file AND the
+        // mounted directories themselves to the fake epoch (see sandbox::pin_times)
+        crate::sandbox::pin_times(&[
             vin.join("bars.csv"),
             vjob.join("strategy.py"),
             vjob.join("job.json"),
-        ] {
-            let _ = std::fs::File::options().write(true).open(&f).and_then(|h| {
-                h.set_times(
-                    std::fs::FileTimes::new()
-                        .set_accessed(epoch)
-                        .set_modified(epoch),
-                )
-            });
-        }
+            vin.clone(),
+            vjob.clone(),
+            vout.clone(),
+        ]);
         let abs = |p: &Path| std::fs::canonicalize(p).map_err(io);
         let mut mounts = vec![
             Mount {

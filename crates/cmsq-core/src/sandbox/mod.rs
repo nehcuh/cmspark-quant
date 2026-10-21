@@ -225,3 +225,39 @@ mod tests {
         assert!(validate(&r).is_err());
     }
 }
+
+/// The fake wall-clock epoch inside the sandbox (libfaketime: 2000-01-01 00:00:00 UTC).
+pub const FAKE_EPOCH_SECS: u64 = 946_684_800;
+
+/// Set atime+mtime of files and directories to [`FAKE_EPOCH_SECS`] before they are
+/// mounted, so even a raw `statx` from the strategy sees no real date on them.
+/// (ctime cannot be set by any user-space call; see docs/STATUS.md.) Directories
+/// must be pinned after their contents are written.
+pub fn pin_times(paths: &[std::path::PathBuf]) {
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(FAKE_EPOCH_SECS);
+    let times = std::fs::FileTimes::new().set_accessed(t).set_modified(t);
+    for p in paths {
+        let f = if p.is_dir() {
+            std::fs::File::open(p)
+        } else {
+            std::fs::File::options().write(true).open(p)
+        };
+        let _ = f.and_then(|h| h.set_times(times));
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    #[test]
+    fn pins_files_and_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("x");
+        std::fs::write(&f, "1").unwrap();
+        super::pin_times(&[f.clone(), d.path().to_path_buf()]);
+        for p in [&f, &d.path().to_path_buf()] {
+            let m = std::fs::metadata(p).unwrap().modified().unwrap();
+            let s = m.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            assert_eq!(s, super::FAKE_EPOCH_SECS, "{}", p.display());
+        }
+    }
+}
