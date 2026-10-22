@@ -28,7 +28,7 @@ scripts/deploy.sh                 # 若提示 Docker 权限：sg docker -c "scri
 ```
 
 它会依次：编译 `cmsq` 命令并装到 `~/.local/bin`；启动 PostgreSQL+TimescaleDB（只监听 127.0.0.1:55432）；
-第一次运行时构建回测沙箱镜像 `cmsq-runner:2.2.2`；启动审计签名进程；创建工作区（默认 `~/cmsq-home`）；
+第一次运行时构建回测沙箱镜像 `cmsq-runner:2.2.3`；启动审计签名进程；创建工作区（默认 `~/cmsq-home`）；
 写出环境文件 `~/.config/cmsq/cmsq.env`。可以重复执行，不会丢数据。
 
 看到 `部署完成。` 即成功。之后**每开一个新终端**先加载环境：
@@ -194,6 +194,7 @@ sg docker -c "scripts/kronos_e2e.sh SH600519"   # 用临时工作区在真实行
 |---|---|
 | `当前用户无法访问 Docker` | 把自己加进 docker 组并重新登录，或用 `sg docker -c "<命令>"` |
 | `cargo` 编译报错、版本不是 1.99.1 | PATH 里系统自带的旧 cargo 在前面；`export PATH=~/.cargo/bin:$PATH` |
+| 侧栏 `审计链异常 ✗ HMAC mismatch at the first entry` | 工作区的审计链不是用当前密钥签的：多半是删了工作区和密钥目录、又在**同一路径**重建（旧版本会复用同名 PostgreSQL schema 里的旧记录）。新版本建工作区时写入 `.cmsq_workspace_id`，重建会得到新 schema；老工作区用新路径重建即可 |
 | `cmsq: command not found` | 没加载环境：`set -a; . ~/.config/cmsq/cmsq.env; set +a` |
 | `cross-validation: unvalidated … no independent source reachable` | 没装 akshare 或没设 `CMSQ_PYTHON`（见第 2 步）。数据源失败后会冷却约 1 分钟，装好后等一分钟再 `data fetch` |
 | `cmsq data sources` 里 rstdx/baostock 失败 | 常见于海外网络，不影响 tushare+akshare 主流程 |

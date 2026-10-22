@@ -93,8 +93,8 @@
 | `scripts/deploy.sh [--hot] [--anchor-repo URL] [--home DIR]` | 一键部署（可重复执行），见 QUICKSTART |
 | `scripts/db_up.sh` | 只启动/修复 PostgreSQL（口令自愈） |
 | `scripts/redis_up.sh` | 只启动 Redis 热层 |
-| `scripts/build_runner.sh` | 构建沙箱镜像 `cmsq-runner:2.2.2` 并记录 digest |
-| `scripts/build_runner_kronos.sh` | **可选**：构建 Kronos 镜像 `cmsq-runner-kronos:2.2.2`（torch CPU + Kronos-mini/small 权重，按 `runner/kronos/SHA256SUMS` 校验，约 1 GB），记录 digest 到 `runner_kronos_image_id` |
+| `scripts/build_runner.sh` | 构建沙箱镜像 `cmsq-runner:2.2.3` 并记录 digest |
+| `scripts/build_runner_kronos.sh` | **可选**：构建 Kronos 镜像 `cmsq-runner-kronos:2.2.3`（torch CPU + Kronos-mini/small 权重，按 `runner/kronos/SHA256SUMS` 校验，约 1 GB），记录 digest 到 `runner_kronos_image_id` |
 | `scripts/kronos_e2e.sh [SYMBOL]` | **可选**：真实行情上用 Docker 沙箱跑 Kronos 示例策略（临时工作区） |
 | `scripts/dashboard_demo.sh` | 合成样本工作区 `/tmp/cmsq-demo` + 打开看板 |
 | `scripts/paper_demo.sh` | DEMO 工作区完整流程（晋升 → 信号 → 模拟盘） |
@@ -163,7 +163,7 @@
 |---|---|
 | `job_succeeded` | 沙箱任务成功 |
 | `hardened_sandbox` | Docker 后端（DEV 后端永不通过） |
-| `runner_pinned` | 镜像标签 `cmsq.runner.version=2.2.2` 且 digest 与记录一致 |
+| `runner_pinned` | 镜像标签 `cmsq.runner.version=2.2.3` 且 digest 与记录一致 |
 | `min_bars` | ≥ 250 根 |
 | `no_lookahead` | 所有前视探针变体一致 |
 | `model_lookahead` | 未用预训练模型；或所有评分窗口（开发段/各折/vault/组合）起点在模型训练截止日后 ≥ `CMSQ_GATE_MODEL_GAP_DAYS` 个交易日 |

@@ -22,7 +22,7 @@ impl SandboxExecutor for Mock {
         true
     }
     async fn runner_identity(&self, _: &str) -> Option<String> {
-        Some("sha256:t|cmsq.runner.version=2.2.2".into())
+        Some("sha256:t|cmsq.runner.version=2.2.3".into())
     }
     async fn execute(&self, q: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
         let input = &q

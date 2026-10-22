@@ -60,7 +60,7 @@ impl SandboxExecutor for MockSignal {
         true
     }
     async fn runner_identity(&self, _: &str) -> Option<String> {
-        Some("sha256:audit-test-double|cmsq.runner.version=2.2.2".into())
+        Some("sha256:audit-test-double|cmsq.runner.version=2.2.3".into())
     }
     async fn execute(&self, q: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
         let input = &q
@@ -400,7 +400,7 @@ impl SandboxExecutor for Observer {
             );
         }
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Some("sha256:audit-test-double|cmsq.runner.version=2.2.2".into())
+        Some("sha256:audit-test-double|cmsq.runner.version=2.2.3".into())
     }
     async fn execute(&self, q: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
         MockSignal.execute(q).await

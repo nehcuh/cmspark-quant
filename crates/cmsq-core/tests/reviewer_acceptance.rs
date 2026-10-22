@@ -62,7 +62,7 @@ impl SandboxExecutor for MockSignal {
                 );
             }
         }
-        Some("sha256:audit-test-double|cmsq.runner.version=2.2.2".into())
+        Some("sha256:audit-test-double|cmsq.runner.version=2.2.3".into())
     }
     async fn execute(&self, q: &SandboxRequest) -> Result<SandboxResult, SandboxError> {
         let input = &q

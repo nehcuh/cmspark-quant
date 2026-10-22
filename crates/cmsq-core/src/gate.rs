@@ -7,7 +7,7 @@ use crate::scorer::{Dsr, Metrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const RUNNER_VERSION: &str = "2.2.2";
+pub const RUNNER_VERSION: &str = "2.2.3";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
@@ -110,7 +110,7 @@ impl Default for GateConfig {
 pub struct GateInput<'a> {
     pub job_status: &'a str,
     pub hardened: bool,
-    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.2.2"
+    /// from the backend (docker image inspect), e.g. "sha256:…|cmsq.runner.version=2.2.3"
     pub runner_identity: Option<&'a str>,
     pub dev: &'a Metrics,
     pub dev_cost_2x: &'a Metrics,
@@ -479,7 +479,7 @@ mod tests {
         GateInput {
             job_status: "succeeded",
             hardened: true,
-            runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.2"),
+            runner_identity: Some("sha256:abc|cmsq.runner.version=2.2.3"),
             expected_runner: Some("sha256:abc"),
             buy_hold: &f.bh,
             dev: &f.dev,

@@ -169,12 +169,30 @@ impl Home {
     pub fn db_config(&self) -> crate::store::DbConfig {
         let mut c = crate::store::DbConfig::resolve(&self.secrets);
         if c.schema.is_none() {
-            c.schema = Some(format!(
-                "ws_{}",
-                hex::encode(&Sha256::digest(self.abs().display().to_string().as_bytes())[..6])
-            ));
+            c.schema = Some(self.schema_name());
         }
         c
+    }
+
+    /// Random id written once when a workspace is first created. It is part of the
+    /// PostgreSQL schema name, so deleting a workspace and re-creating it at the
+    /// SAME path gets a fresh schema instead of inheriting the old rows (whose
+    /// audit chain was signed with a key that no longer exists).
+    pub fn workspace_id_file(&self) -> PathBuf {
+        self.root.join(".cmsq_workspace_id")
+    }
+
+    /// `ws_<hash(path)>` for legacy workspaces (no id file: their data stays
+    /// reachable); `ws_<hash(path + id)>` for every workspace created since.
+    pub fn schema_name(&self) -> String {
+        let mut key = self.abs().display().to_string();
+        if let Ok(id) = std::fs::read_to_string(self.workspace_id_file()) {
+            let id = id.trim();
+            if !id.is_empty() {
+                key = format!("{key}\n{id}");
+            }
+        }
+        format!("ws_{}", hex::encode(&Sha256::digest(key.as_bytes())[..6]))
     }
     pub fn db(&self) -> PathBuf {
         self.root.join("cmsq.db")
@@ -203,6 +221,8 @@ impl Home {
 
     /// Create layout and write pinned read-only assets. Idempotent.
     pub fn init(&self) -> Result<()> {
+        // a brand-new workspace (nothing created yet) gets its own schema identity
+        let fresh = !self.root.join("strategies").exists();
         for d in [
             self.drop_dir().join("processed"),
             self.drop_dir().join("rejected"),
@@ -226,6 +246,9 @@ impl Home {
         write_readonly(&self.runner_dir().join("signal_runner.py"), RUNNER_PY)?;
         write_readonly(&self.runner_dir().join("vnpy_shim.py"), VNPY_SHIM_PY)?;
         let _ = std::fs::remove_file(self.runner_dir().join("run_backtest.py"));
+        if fresh && !self.workspace_id_file().exists() {
+            std::fs::write(self.workspace_id_file(), uuid::Uuid::new_v4().to_string())?;
+        }
         Ok(())
     }
 }
@@ -245,4 +268,41 @@ fn write_readonly(p: &Path, content: &str) -> Result<()> {
     perm.set_readonly(true);
     std::fs::set_permissions(p, perm)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod workspace_schema_tests {
+    use super::*;
+
+    #[test]
+    fn recreated_workspace_at_same_path_gets_a_new_schema() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("ws");
+        let h = Home::new(&root);
+        h.init().unwrap();
+        let first = h.schema_name();
+        assert!(h.workspace_id_file().exists());
+        h.init().unwrap(); // idempotent: same schema
+        assert_eq!(h.schema_name(), first);
+        std::fs::remove_dir_all(&root).unwrap();
+        let h2 = Home::new(&root);
+        h2.init().unwrap();
+        assert_ne!(
+            h2.schema_name(),
+            first,
+            "stale schema reused after re-create"
+        );
+    }
+
+    #[test]
+    fn legacy_workspace_without_id_keeps_its_schema() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("legacy");
+        std::fs::create_dir_all(root.join("strategies")).unwrap();
+        let h = Home::new(&root);
+        let before = h.schema_name();
+        h.init().unwrap();
+        assert!(!h.workspace_id_file().exists());
+        assert_eq!(h.schema_name(), before);
+    }
 }

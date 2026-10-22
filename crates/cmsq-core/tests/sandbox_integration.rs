@@ -20,7 +20,7 @@ fn req(code: &str, ro: &std::path::Path, out: &std::path::Path, timeout: u64) ->
     std::fs::write(ro.join("probe.py"), code).unwrap();
     SandboxRequest {
         id: uuid::Uuid::new_v4().to_string(),
-        image: "cmsq-runner:2.2.2".into(),
+        image: "cmsq-runner:2.2.3".into(),
         command: vec!["python3".into(), "-I".into(), "/data/probe.py".into()],
         env: vec![],
         mounts: vec![
@@ -179,11 +179,11 @@ async fn process_backend_isolation() {
 async fn docker_identity_comes_from_image_inspect() {
     let d = docker().await;
     let id = d
-        .runner_identity("cmsq-runner:2.2.2")
+        .runner_identity("cmsq-runner:2.2.3")
         .await
         .expect("runner image missing: run scripts/build_runner.sh");
     assert!(
-        id.starts_with("sha256:") && id.ends_with("|cmsq.runner.version=2.2.2"),
+        id.starts_with("sha256:") && id.ends_with("|cmsq.runner.version=2.2.3"),
         "{id}"
     );
 }

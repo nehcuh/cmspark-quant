@@ -23,7 +23,7 @@ hr "build"
 cargo build -q -p cmsq-cli
 if docker info >/dev/null 2>&1; then
   BACKEND=docker
-  docker image inspect cmsq-runner:2.2.2 >/dev/null 2>&1 || scripts/build_runner.sh
+  docker image inspect cmsq-runner:2.2.3 >/dev/null 2>&1 || scripts/build_runner.sh
 elif [ $ALLOW_DEV = 1 ]; then
   BACKEND=process; echo "!!! DEV backend (--allow-dev): nothing may pass the gate"
 else
@@ -33,7 +33,7 @@ fi
 mkdir -p "$CMSQ_SECRETS_DIR" && chmod 700 "$CMSQ_SECRETS_DIR"
 if [ "${CMSQ_DB:-postgres}" != sqlite ]; then
   [ -s "$REAL_SECRETS/db.env" ] || CMSQ_SECRETS_DIR=$REAL_SECRETS scripts/db_up.sh
-  install -m 600 "$REAL_SECRETS/db.env" "$CMSQ_SECRETS_DIR/db.env"   # each run gets its own schema ws_<hash(home)>
+  install -m 600 "$REAL_SECRETS/db.env" "$CMSQ_SECRETS_DIR/db.env"   # each run gets its own schema ws_<hash(home + workspace id)>
   DBK=postgres
 else
   DBK=sqlite

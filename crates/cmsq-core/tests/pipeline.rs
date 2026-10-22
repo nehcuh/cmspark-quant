@@ -231,7 +231,7 @@ async fn docker_pipeline_gate_then_vault_promote() {
         .runner_identity
         .as_deref()
         .unwrap()
-        .contains("cmsq.runner.version=2.2.2"));
+        .contains("cmsq.runner.version=2.2.3"));
     // typed confirmation: id prefix alone is not enough
     let e = o.promote(&id, "test", &id[..8], &d).await.unwrap_err();
     assert!(matches!(
