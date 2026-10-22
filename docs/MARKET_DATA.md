@@ -74,7 +74,7 @@ Evaluated `/workspace/huquant` @ `928aff4`:
   生成两套口令并写入 `~/.config/cmsq/db.env`（0600，不在仓库/工作区内）。
 * `cmsq_owner` 只用于迁移；运行时用 `cmsq_app`：对 audit/trials/signals/evaluations/bars/ticks 只有
   INSERT/SELECT，无 UPDATE/DELETE/TRUNCATE，也不能删/停触发器（`tests/store_concurrency.rs` 验证）。
-* 每个工作区一个 schema `ws_<hash(home)>`；`bars`（日线快照镜像）与 `ticks`（CTP 行情）是 TimescaleDB hypertable。
+* 每个工作区一个 schema `ws_<hash(home + 工作区 id)>`（新建工作区时写入随机 id 到 `.cmsq_workspace_id`；删掉工作区在同一路径重建会得到新 schema，不会继承旧的审计链；没有 id 文件的老工作区仍用 `ws_<hash(home)>`）；`bars`（日线快照镜像）与 `ticks`（CTP 行情）是 TimescaleDB hypertable。
 * `CMSQ_DB=sqlite` 走离线 SQLite（同一套 SQL、同一套审计/账本语义），仅用于测试和无数据库环境。
 
 ### 期货主力连续（`FUT_<品种>`，如 `FUT_RB`）

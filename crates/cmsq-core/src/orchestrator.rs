@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 
 pub use crate::scorer::CostModel;
 
-pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.2";
+pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.3";
 /// Optional Kronos variant (torch CPU + pinned weights); torch never runs on the host.
-pub const RUNNER_KRONOS_IMAGE: &str = "cmsq-runner-kronos:2.2.2";
+pub const RUNNER_KRONOS_IMAGE: &str = "cmsq-runner-kronos:2.2.3";
 
 /// Image a strategy runs in: chosen by the trusted host-side scan of its code.
 pub fn image_for(code: &str) -> &'static str {

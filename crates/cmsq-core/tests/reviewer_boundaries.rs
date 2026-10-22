@@ -223,7 +223,7 @@ fn unpriced_roll_is_rejected_by_actual_gate() {
     let mut i = gate::GateInput {
         job_status: "succeeded",
         hardened: true,
-        runner_identity: Some("sha256:test|cmsq.runner.version=2.2.2"),
+        runner_identity: Some("sha256:test|cmsq.runner.version=2.2.3"),
         expected_runner: Some("sha256:test"),
         dev: &m,
         dev_cost_2x: &m,

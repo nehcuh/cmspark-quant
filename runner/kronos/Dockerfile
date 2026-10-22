@@ -1,7 +1,7 @@
 # Kronos variant of the signal runner (UNTRUSTED side). Same contract, same
 # sandbox, same frozen clock: positions only. torch lives ONLY in this image,
 # never in the trusted host process. Build: scripts/build_runner_kronos.sh
-FROM cmsq-runner:2.2.2
+FROM cmsq-runner:2.2.3
 USER root
 ENV LD_PRELOAD=
 COPY requirements.lock /runner/kronos/requirements.lock

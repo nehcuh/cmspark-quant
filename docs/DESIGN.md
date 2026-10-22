@@ -94,6 +94,8 @@ flowchart LR
 - **DSR 计数**：模型配置（尺寸、lookback、预测长度、采样、阈值）多半写在代码字面量里，而 idea_key 会把数字抹掉；所以用模型的策略按**完整代码文本**区分试验，每种配置都单独计入 N（宁可多算）。
 - **训练数据泄漏**：见第 3 节 `model_lookahead`。目前截至 2026-10 只有约一年“干净”数据，Kronos 策略在长历史上会被这一项直接拒绝，这是预期结果。
 - **基线（`beats_kronos_baseline`）**：`cmsq baseline kronos --symbols …` 在 Docker 沙箱里跑固定的零样本策略（`examples/kronos_direction.py`），指标由宿主计算并存进任务记录。之后同一数据快照（按 sha256 匹配）上的候选策略，Sharpe 必须高于它。基线本身可能受训练数据泄漏而偏高，这只会抬高门槛，不会帮任何策略通过。看板策略详情的门槛区会并排显示“基线”和“候选 vs 基线”两张卡。
+
+  ![Kronos 基线对比卡（真实行情 SH600519）](screenshots/23-kronos-baseline-gate.png)
 - **波动率特征**：`cmsq_kronos.rolling_forecast` 同时给出预测收益 `exp_ret` 和多路径离散度 `vol`；`examples/kronos_vol_target.py` 用它做波动率目标仓位（仍在沙箱内，只输出仓位）。
 - **合成压力测试（`cmsq stress kronos`）**：Kronos 生成器在沙箱里只拿开发段数据（vault 永不作为上下文），输出 N 条合成未来；宿主逐行校验（OHLC 一致、有限、单根跳动 ≤ ±50%、条数准确），日期由宿主分配，价格按最后一根的复权因子换回原始价格。候选策略在每条“开发段 + 合成段”上各跑一个新容器，只给合成段打分。结果处处标注 SYNTHETIC，不进 DSR 账本、不进 `real_market_data`、不产生信号；**只能加拒绝**：多数路径破底时 GatePassed → Rejected，通过则不改变任何状态。
 - 许可：镜像内保留 Kronos 的 LICENSE（`/runner/kronos/kronos_code/LICENSE`），镜像标签注明版权。

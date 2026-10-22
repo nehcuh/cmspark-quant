@@ -137,6 +137,9 @@ struct Snapshot {
     runs: Vec<cmsq_core::store::ResearchRun>,
     ticks: i64,
     backend: String,
+    /// per strategy: latest gate evaluation and its audit timeline, read from the
+    /// SAME configured store as everything else (PostgreSQL or SQLite)
+    details: std::collections::HashMap<String, (Option<Evaluation>, Vec<AuditEntry>)>,
 }
 
 /// Shared between the UI thread and the background job thread.
@@ -246,7 +249,18 @@ fn kronos_baseline_row(checks: &serde_json::Value) -> Option<Div> {
                         } else {
                             "does not beat baseline ✗".into()
                         },
-                        c["detail"].as_str().unwrap_or("").to_string(),
+                        format!(
+                            "candidate Sharpe {} vs baseline {}",
+                            checks["kronos_baseline"]["candidate_sharpe"]
+                                .as_f64()
+                                .map(|x| format!("{x:.2}"))
+                                .unwrap_or_else(|| c["detail"]
+                                    .as_str()
+                                    .and_then(|d| d.split_whitespace().nth(1))
+                                    .unwrap_or("-")
+                                    .to_string()),
+                            num(dev, "sharpe")
+                        ),
                         if ok { tok().ok } else { tok().err },
                     )),
             )
@@ -666,8 +680,23 @@ impl Dashboard {
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
+            let strategies = st.list_strategies(None)?;
+            let details: std::collections::HashMap<String, (Option<Evaluation>, Vec<AuditEntry>)> =
+                strategies
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.id.clone(),
+                            (
+                                st.latest_evaluation(&s.id).ok().flatten(),
+                                st.audit_entries(Some(&s.id), 200).unwrap_or_default(),
+                            ),
+                        )
+                    })
+                    .collect();
             Ok(Snapshot {
-                strategies: st.list_strategies(None)?,
+                details,
+                strategies,
                 jobs: st.list_jobs(None)?,
                 signals: st.list_signals()?,
                 paper: st
@@ -1228,18 +1257,10 @@ impl Dashboard {
             .iter()
             .filter(|j| j.strategy_id == s.id)
             .collect();
-        let st = self
-            .home
-            .audit_config()
-            .ok()
-            .and_then(|c| Store::open_readonly(&self.home.db(), c).ok());
-        let ev: Option<Evaluation> = st
-            .as_ref()
-            .and_then(|st| st.latest_evaluation(&s.id).ok().flatten());
-        let timeline: Vec<AuditEntry> = st
-            .as_ref()
-            .and_then(|st| st.audit_entries(Some(&s.id), 200).ok())
-            .unwrap_or_default();
+        // the detail pane used to open the SQLite file directly, so on PostgreSQL
+        // workspaces the gate section and timeline were silently empty
+        let (ev, timeline): (Option<Evaluation>, Vec<AuditEntry>) =
+            self.snap.details.get(&s.id).cloned().unwrap_or_default();
         let id = s.id.clone();
         let url = s.source_url.clone();
         let raw = s.raw_path.clone();

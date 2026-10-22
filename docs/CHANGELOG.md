@@ -1,5 +1,7 @@
 # 开发日志（CHANGELOG）
 
+* 2026-10-22：runner 镜像升到 2.2.3（含 Kronos 确定性钩子与 sys.path 修正，host pin/文档/脚本同步）；修复同一路径重建工作区会复用旧 PostgreSQL schema、导致审计链首条 HMAC 不匹配（新增 `.cmsq_workspace_id`）；修复看板详情页在 PostgreSQL 工作区读 SQLite 文件、门槛区和时间线为空；新增截图 23-kronos-baseline-gate.png。
+
 * 2026-10-22：Kronos P3：`cmsq stress kronos` 合成路径压力测试（只能加拒绝、标注 SYNTHETIC）、波动率特征示例 `examples/kronos_vol_target.py`。
 
 * 2026-10-22：Kronos P2：`cmsq baseline kronos`、门槛 `beats_kronos_baseline`（同快照对比，可选强制）、看板基线对比卡片。
