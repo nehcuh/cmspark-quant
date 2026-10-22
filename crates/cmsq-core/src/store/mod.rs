@@ -1221,10 +1221,16 @@ impl Store {
         Ok(self.db.run(|e| e.query("SELECT seq,state_json FROM paper_snapshots WHERE session_id=?1 ORDER BY seq DESC LIMIT 1", p![session]))?
             .first().map(|r| (r.i(0), serde_json::from_str(&r.s(1)).unwrap_or_default())))
     }
-    /// equity curve: (seq, trading_day, equity)
-    pub fn paper_equity_curve(&self, session: &str) -> Result<Vec<(i64, Option<String>, f64)>> {
-        Ok(self.db.run(|e| e.query("SELECT seq,trading_day,equity FROM paper_snapshots WHERE session_id=?1 ORDER BY seq", p![session]))?
-            .iter().map(|r| (r.i(0), r.os(1), r.f(2))).collect())
+    /// Raw snapshot rows `(seq, trading_day, equity, state)`. **Unauthenticated**:
+    /// `trading_day`/`equity` are derived columns a DB owner can edit (issue #38).
+    /// Display code must go through `cmsq_paper::session::verified_equity_curve`.
+    #[allow(clippy::type_complexity)]
+    pub fn paper_snapshot_rows(
+        &self,
+        session: &str,
+    ) -> Result<Vec<(i64, Option<String>, f64, serde_json::Value)>> {
+        Ok(self.db.run(|e| e.query("SELECT seq,trading_day,equity,state_json FROM paper_snapshots WHERE session_id=?1 ORDER BY seq", p![session]))?
+            .iter().map(|r| (r.i(0), r.os(1), r.f(2), serde_json::from_str(&r.s(3)).unwrap_or_default())).collect())
     }
 
     pub fn list_runs(&self, kind: Option<&str>) -> Result<Vec<ResearchRun>> {

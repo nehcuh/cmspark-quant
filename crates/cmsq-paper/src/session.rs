@@ -228,6 +228,68 @@ pub fn verify_snapshot_binding(
     Ok(())
 }
 
+/// One equity-curve point. `authenticated` = this row's own state digest is bound
+/// in the HMAC audit chain AND its derived equity/trading_day columns equal what the
+/// authenticated state implies. `equity` is always recomputed from the state when
+/// authenticated; for an unauthenticated point it is the raw (untrusted) column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurvePoint {
+    pub seq: i64,
+    pub trading_day: Option<String>,
+    pub equity: f64,
+    pub authenticated: bool,
+}
+
+/// Rebuild the equity curve from per-snapshot authenticated state (issue #38 follow-up).
+/// Legacy (unbound) or edited points come back with `authenticated = false`; callers
+/// must not display them as account history.
+pub fn verified_equity_curve(store: &Store, id: &str) -> Result<Vec<CurvePoint>> {
+    let audit_ok = store.verify_audit()?.ok;
+    let mut bound = std::collections::HashMap::new();
+    if audit_ok {
+        for a in store.audit_entries(Some(&snapshot_target(id)), 1_000_000)? {
+            if a.action == "paper_snapshot" && a.details["session"] == id {
+                if let (Some(seq), Some(d)) = (
+                    a.details["seq"].as_i64(),
+                    a.details["state_sha256"].as_str(),
+                ) {
+                    bound.entry(seq).or_insert_with(|| d.to_string());
+                }
+            }
+        }
+    }
+    Ok(store
+        .paper_snapshot_rows(id)?
+        .into_iter()
+        .map(|(seq, day, col_eq, state)| {
+            let auth_state = bound
+                .get(&seq)
+                .is_some_and(|d| *d == state_digest(id, seq, &state))
+                .then(|| serde_json::from_value::<PaperEngine>(state).ok())
+                .flatten()
+                .filter(|e| e.event_seq as i64 == seq);
+            match auth_state {
+                Some(e) => {
+                    let eq = e.equity();
+                    let ok = (eq - col_eq).abs() < 1e-6 && e.account.trading_day == day;
+                    CurvePoint {
+                        seq,
+                        trading_day: if ok { e.account.trading_day } else { day },
+                        equity: if ok { eq } else { col_eq },
+                        authenticated: ok,
+                    }
+                }
+                None => CurvePoint {
+                    seq,
+                    trading_day: day,
+                    equity: col_eq,
+                    authenticated: false,
+                },
+            }
+        })
+        .collect())
+}
+
 fn chain_at(store: &Store, id: &str, seq: i64) -> Result<String> {
     if seq == 0 {
         return Ok(String::new());

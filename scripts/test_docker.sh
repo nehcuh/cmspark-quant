@@ -9,7 +9,7 @@ docker image inspect cmsq-runner:2.2.2 >/dev/null 2>&1 && [ -s ~/.config/cmsq/ru
 python3 scripts/test_vnpy_shim.py
 cargo test -p cmsq-core --test sandbox_integration --test pipeline -- --ignored --test-threads=2
 docker image inspect python:3.12-slim >/dev/null 2>&1 || docker pull -q python:3.12-slim
-cargo test -p cmsq-core --test reviewer_boundaries -- --ignored docker_ cancellation_before_create_response --test-threads=2
+cargo test -p cmsq-core --test reviewer_boundaries -- --ignored docker_ cancellation_before_create_response cancel_after_create_sent --test-threads=2
 # PostgreSQL tests are separate: scripts/test_pg.sh
 # vendored rstdx: the empty-bars regression test
 (cd third_party/rstdx && CARGO_TARGET_DIR=../../target/rstdx cargo test --lib security_bars)

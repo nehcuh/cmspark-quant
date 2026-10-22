@@ -257,9 +257,14 @@ impl SandboxExecutor for DockerSandboxExecutor {
                 };
                 match r {
                     Ok(c) => {
-                        if let Err(Ok(c)) = tx.send(Ok(c)) {
-                            let _ = docker.remove_container(&c.id, Some(rm)).await;
-                        }
+                        // The message itself carries an ARMED guard (#19 follow-up): if the
+                        // send fails, or succeeds but the receiver is dropped before it is
+                        // polled, dropping the guard removes exactly this container.
+                        let _ = tx.send(Ok(ContainerCleanup {
+                            docker: docker.clone(),
+                            id: c.id,
+                            armed: true,
+                        }));
                     }
                     Err(e) => {
                         let unknown =
@@ -273,16 +278,12 @@ impl SandboxExecutor for DockerSandboxExecutor {
                 }
             });
         }
-        let created = rx
+        // ownership of the armed guard moves to this future only when it is taken
+        let mut cleanup = rx
             .await
             .map_err(|_| SandboxError::Execution("create: task lost".into()))?
             .map_err(|e| SandboxError::Execution(format!("create: {e}")))?;
-        let id = created.id;
-        let mut cleanup = ContainerCleanup {
-            docker: self.docker.clone(),
-            id: id.clone(),
-            armed: true,
-        };
+        let id = cleanup.id.clone();
         let t0 = Instant::now();
         let budget = req.limits.log_bytes as usize;
         let (mut out_b, mut err_b): (Vec<u8>, Vec<u8>) = (vec![], vec![]);
