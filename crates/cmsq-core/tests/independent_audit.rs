@@ -116,6 +116,7 @@ fn real_check(o: &Orchestrator, sc: &cmsq_core::orchestrator::Scored) -> serde_j
             capacity: sc.capacity,
             roll_unpriced: sc.roll_unpriced,
             regimes: &sc.regimes,
+            model_use: &sc.model_use,
         },
         &o.gate,
     );

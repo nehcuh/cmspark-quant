@@ -1173,6 +1173,24 @@ impl Orchestrator {
             })
             .collect();
         let bhm = scorer::metrics(dev, &bh, warm, dev_end);
+        // pretrained-model look-ahead: host-side scan + every scored window start
+        let model_use = {
+            let mut windows = vec![("dev".to_string(), dev[warm].date.to_string())];
+            for k in 0..self.folds {
+                windows.push((
+                    format!("fold {}", k + 1),
+                    dev[warm + k * fold_len].date.to_string(),
+                ));
+            }
+            if dev_end < bars.len() {
+                windows.push(("vault".to_string(), bars[dev_end].date.to_string()));
+            }
+            crate::pretrained::ModelUse {
+                models: crate::pretrained::detect(code),
+                windows,
+                calendar: bars.iter().map(|b| b.date.to_string()).collect(),
+            }
+        };
         let regimes = scorer::regime_slices(&bh.equity, &sim.equity, warm, dev_end);
         Self::write_equity(&jd.join("equity.csv"), dev, &full, &sim, &sim2)?;
 
@@ -1287,6 +1305,7 @@ impl Orchestrator {
             capacity,
             roll_unpriced: sim.roll_unpriced,
             regimes,
+            model_use,
         })))
     }
 
@@ -1349,6 +1368,7 @@ impl Orchestrator {
                 capacity: sc.capacity,
                 roll_unpriced: sc.roll_unpriced,
                 regimes: &sc.regimes,
+                model_use: &sc.model_use,
             },
             &self.gate,
         )
@@ -1998,6 +2018,25 @@ impl Orchestrator {
             group_id: Some(&run_id),
         })?;
         let (dsr, info) = self.dsr_for(&all, &pm);
+        // every leg's model scan + windows; the portfolio window itself is scored too
+        let model_use = {
+            let mut u = crate::pretrained::ModelUse::default();
+            for x in scored.iter() {
+                for m in &x.model_use.models {
+                    if !u.models.contains(m) {
+                        u.models.push(m.clone());
+                    }
+                }
+                for (l, d) in &x.model_use.windows {
+                    u.windows.push((format!("{} {l}", x.symbol), d.clone()));
+                }
+                u.calendar.extend(x.model_use.calendar.iter().cloned());
+            }
+            u.windows.push(("portfolio".into(), pm.start.clone()));
+            u.calendar.sort();
+            u.calendar.dedup();
+            u
+        };
         let probe = ProbeReport {
             detected: false,
             variants: scored.iter().map(|x| x.probe.variants).sum(),
@@ -2040,6 +2079,7 @@ impl Orchestrator {
                     .and_then(|v| v.into_iter().reduce(f64::min)),
                 roll_unpriced: scored.iter().map(|x| x.roll_unpriced).sum(),
                 regimes: &regimes,
+                model_use: &model_use,
             },
             &self.gate,
         );
@@ -2738,6 +2778,7 @@ pub struct Scored {
     pub capacity: Option<f64>,
     pub roll_unpriced: usize,
     pub regimes: Vec<scorer::RegimeSlice>,
+    pub model_use: crate::pretrained::ModelUse,
 }
 
 pub enum RunOutcome {

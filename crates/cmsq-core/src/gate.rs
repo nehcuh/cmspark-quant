@@ -43,6 +43,14 @@ pub struct GateConfig {
     /// regime stability: no qualifying regime may lose more than this
     #[serde(default = "default_regime_max_loss")]
     pub regime_max_loss: f64,
+    /// pretrained-model embargo: every scored window must start at least this
+    /// many trading days after the model's training cutoff
+    #[serde(default = "default_model_gap_days")]
+    pub model_gap_days: usize,
+}
+
+fn default_model_gap_days() -> usize {
+    crate::pretrained::DEFAULT_GAP_DAYS
 }
 
 /// Environment override for a gate threshold; unparsable values are ignored (default kept).
@@ -87,6 +95,7 @@ impl Default for GateConfig {
             regime_min_bars: env_or("CMSQ_GATE_REGIME_MIN_BARS", default_regime_min_bars()),
             regime_max_losing: env_or("CMSQ_GATE_REGIME_MAX_LOSING", default_regime_max_losing()),
             regime_max_loss: env_or("CMSQ_GATE_REGIME_MAX_LOSS", default_regime_max_loss()),
+            model_gap_days: env_or("CMSQ_GATE_MODEL_GAP_DAYS", default_model_gap_days()),
         }
     }
 }
@@ -117,6 +126,8 @@ pub struct GateInput<'a> {
     pub roll_unpriced: usize,
     /// strategy return per market regime ([`crate::scorer::regime_slices`])
     pub regimes: &'a [crate::scorer::RegimeSlice],
+    /// pretrained models detected by the host-side scan + scored window starts
+    pub model_use: &'a crate::pretrained::ModelUse,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +198,10 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
             )
         },
     );
+    {
+        let r = crate::pretrained::check(i.model_use, cfg.model_gap_days);
+        check("model_lookahead", r.is_ok(), r.unwrap_or_else(|e| e));
+    }
     check(
         "static_risks",
         i.high_risks.is_empty(),
@@ -394,6 +409,7 @@ mod tests {
         risks: Vec<String>,
         bh: Metrics,
         regimes: Vec<crate::scorer::RegimeSlice>,
+        mu: crate::pretrained::ModelUse,
     }
     fn rg(name: &str, bars: usize, ret: f64) -> crate::scorer::RegimeSlice {
         crate::scorer::RegimeSlice {
@@ -426,6 +442,7 @@ mod tests {
                 rg("vol_high", 250, 0.04),
                 rg("vol_low", 250, 0.08),
             ],
+            mu: Default::default(),
         }
     }
     fn input(f: &Fx) -> GateInput<'_> {
@@ -447,6 +464,7 @@ mod tests {
             capacity: Some(5e7),
             roll_unpriced: 0,
             regimes: &f.regimes,
+            model_use: &f.mu,
         }
     }
     #[test]
@@ -604,6 +622,26 @@ mod tests {
             o.reasons.iter().any(|r| r.starts_with("deflated_sharpe")),
             "{:?}",
             f.dsr
+        );
+    }
+    #[test]
+    fn pretrained_model_inside_training_window_is_rejected() {
+        let mut f = fx();
+        assert!(evaluate(&input(&f), &GateConfig::default())
+            .reasons
+            .iter()
+            .all(|r| !r.starts_with("model_lookahead")));
+        f.mu = crate::pretrained::ModelUse {
+            models: crate::pretrained::detect("Kronos.from_pretrained('NeoQuasar/Kronos-mini')"),
+            windows: vec![("dev".into(), "2025-06-02".into())],
+            calendar: vec!["2025-06-02".into()],
+        };
+        let o = evaluate(&input(&f), &GateConfig::default());
+        assert!(!o.passed);
+        assert!(
+            o.reasons.iter().any(|r| r.starts_with("model_lookahead")),
+            "{:?}",
+            o.reasons
         );
     }
 }
