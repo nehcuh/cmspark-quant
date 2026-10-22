@@ -1342,6 +1342,7 @@ impl Orchestrator {
             regimes,
             model_use,
             image: image_for(code).into(),
+            code: code.to_string(),
         })))
     }
 
@@ -1384,7 +1385,57 @@ impl Orchestrator {
         )
     }
 
+    /// Latest host-scored Kronos baseline run on exactly this dataset snapshot.
+    /// Read from trusted job records (metrics computed by the Rust scorer).
+    pub fn kronos_baseline_for(&self, dataset_sha: &str) -> Option<crate::pretrained::Baseline> {
+        if dataset_sha.is_empty() {
+            return None;
+        }
+        let ids: Vec<String> = self
+            .store
+            .list_strategies(None)
+            .ok()?
+            .into_iter()
+            .filter(|s| {
+                Self::code_of(s)
+                    .map(|(_, c)| crate::pretrained::is_kronos_baseline(&c))
+                    .unwrap_or(false)
+            })
+            .map(|s| s.id)
+            .collect();
+        let mut best: Option<(chrono::DateTime<Utc>, crate::pretrained::Baseline)> = None;
+        for id in ids {
+            for j in self.store.list_jobs(Some(&id)).ok()? {
+                let Some(r) = j.result.as_ref() else { continue };
+                if j.status != "succeeded"
+                    || j.kind != "dev"
+                    || r["dataset_sha256"].as_str() != Some(dataset_sha)
+                {
+                    continue;
+                }
+                let Ok(dev) = serde_json::from_value::<Metrics>(r["development"].clone()) else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|(t, _)| j.started_at > *t) {
+                    best = Some((
+                        j.started_at,
+                        crate::pretrained::Baseline {
+                            job_id: j.id.clone(),
+                            dev,
+                        },
+                    ));
+                }
+            }
+        }
+        best.map(|(_, b)| b)
+    }
+
     fn gate_scored(&self, sc: &Scored) -> gate::GateOutcome {
+        let baseline = if crate::pretrained::is_kronos_baseline(&sc.code) {
+            None // the baseline is not compared with itself
+        } else {
+            self.kronos_baseline_for(sc.result["dataset_sha256"].as_str().unwrap_or(""))
+        };
         gate::evaluate(
             &gate::GateInput {
                 job_status: "succeeded",
@@ -1405,6 +1456,7 @@ impl Orchestrator {
                 roll_unpriced: sc.roll_unpriced,
                 regimes: &sc.regimes,
                 model_use: &sc.model_use,
+                kronos_baseline: baseline.as_ref(),
             },
             &self.gate,
         )
@@ -2119,6 +2171,7 @@ impl Orchestrator {
                 roll_unpriced: scored.iter().map(|x| x.roll_unpriced).sum(),
                 regimes: &regimes,
                 model_use: &model_use,
+                kronos_baseline: None, // portfolios: per-leg baselines are not combined
             },
             &self.gate,
         );
@@ -2820,6 +2873,8 @@ pub struct Scored {
     pub model_use: crate::pretrained::ModelUse,
     /// runner image the strategy ran in (base or Kronos variant)
     pub image: String,
+    /// exact strategy code that was scored (host copy)
+    pub code: String,
 }
 
 pub enum RunOutcome {

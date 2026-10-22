@@ -47,6 +47,10 @@ pub struct GateConfig {
     /// many trading days after the model's training cutoff
     #[serde(default = "default_model_gap_days")]
     pub model_gap_days: usize,
+    /// `CMSQ_GATE_REQUIRE_KRONOS_BASELINE=1`: a missing Kronos baseline fails
+    /// `beats_kronos_baseline` (default: missing baseline is reported, not blocking)
+    #[serde(default)]
+    pub require_kronos_baseline: bool,
 }
 
 fn default_model_gap_days() -> usize {
@@ -96,6 +100,8 @@ impl Default for GateConfig {
             regime_max_losing: env_or("CMSQ_GATE_REGIME_MAX_LOSING", default_regime_max_losing()),
             regime_max_loss: env_or("CMSQ_GATE_REGIME_MAX_LOSS", default_regime_max_loss()),
             model_gap_days: env_or("CMSQ_GATE_MODEL_GAP_DAYS", default_model_gap_days()),
+            require_kronos_baseline: std::env::var("CMSQ_GATE_REQUIRE_KRONOS_BASELINE")
+                .is_ok_and(|v| v == "1"),
         }
     }
 }
@@ -128,6 +134,9 @@ pub struct GateInput<'a> {
     pub regimes: &'a [crate::scorer::RegimeSlice],
     /// pretrained models detected by the host-side scan + scored window starts
     pub model_use: &'a crate::pretrained::ModelUse,
+    /// host-scored dev metrics of the Kronos zero-shot baseline on the SAME
+    /// dataset snapshot (None = baseline not run for this snapshot)
+    pub kronos_baseline: Option<&'a crate::pretrained::Baseline>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,10 +387,29 @@ pub fn evaluate(i: &GateInput, cfg: &GateConfig) -> GateOutcome {
         i.dev.exposure >= cfg.min_exposure,
         format!("avg exposure {:.1}%", i.dev.exposure * 100.0),
     );
+    match i.kronos_baseline {
+        Some(b) => check(
+            "beats_kronos_baseline",
+            i.dev.sharpe > b.dev.sharpe,
+            format!(
+                "Sharpe {:.2} vs Kronos zero-shot baseline {:.2} (return {:+.1}% vs {:+.1}%, baseline job {})",
+                i.dev.sharpe,
+                b.dev.sharpe,
+                i.dev.total_return * 100.0,
+                b.dev.total_return * 100.0,
+                &b.job_id[..8.min(b.job_id.len())]
+            ),
+        ),
+        None => check(
+            "beats_kronos_baseline",
+            !cfg.require_kronos_baseline,
+            "Kronos baseline not run for this snapshot (cmsq baseline kronos --symbol …)".into(),
+        ),
+    }
     GateOutcome {
         passed: reasons.is_empty(),
         reasons,
-        checks: json!({"checks": checks, "config": cfg, "dsr": i.dsr}),
+        checks: json!({"checks": checks, "config": cfg, "dsr": i.dsr, "kronos_baseline": i.kronos_baseline}),
     }
 }
 
@@ -410,6 +438,7 @@ mod tests {
         bh: Metrics,
         regimes: Vec<crate::scorer::RegimeSlice>,
         mu: crate::pretrained::ModelUse,
+        kb: Option<crate::pretrained::Baseline>,
     }
     fn rg(name: &str, bars: usize, ret: f64) -> crate::scorer::RegimeSlice {
         crate::scorer::RegimeSlice {
@@ -443,6 +472,7 @@ mod tests {
                 rg("vol_low", 250, 0.08),
             ],
             mu: Default::default(),
+            kb: None,
         }
     }
     fn input(f: &Fx) -> GateInput<'_> {
@@ -465,6 +495,7 @@ mod tests {
             roll_unpriced: 0,
             regimes: &f.regimes,
             model_use: &f.mu,
+            kronos_baseline: f.kb.as_ref(),
         }
     }
     #[test]
@@ -624,6 +655,45 @@ mod tests {
             f.dsr
         );
     }
+    #[test]
+    fn kronos_baseline_must_be_beaten_when_present() {
+        let mut f = fx();
+        let cfg = GateConfig::default();
+        let o = evaluate(&input(&f), &cfg);
+        assert!(o
+            .reasons
+            .iter()
+            .all(|r| !r.starts_with("beats_kronos_baseline")));
+        f.kb = Some(crate::pretrained::Baseline {
+            job_id: "baseline-job".into(),
+            dev: m(0.5, 2.0),
+        });
+        let o = evaluate(&input(&f), &cfg);
+        assert!(
+            o.reasons
+                .iter()
+                .any(|r| r.starts_with("beats_kronos_baseline")),
+            "{:?}",
+            o.reasons
+        );
+        assert_eq!(o.checks["kronos_baseline"]["dev"]["sharpe"], 2.0);
+        f.kb.as_mut().unwrap().dev = m(0.01, 0.1);
+        let o = evaluate(&input(&f), &cfg);
+        assert!(o
+            .reasons
+            .iter()
+            .all(|r| !r.starts_with("beats_kronos_baseline")));
+        f.kb = None;
+        let req = GateConfig {
+            require_kronos_baseline: true,
+            ..GateConfig::default()
+        };
+        assert!(evaluate(&input(&f), &req)
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("beats_kronos_baseline")));
+    }
+
     #[test]
     fn pretrained_model_inside_training_window_is_rejected() {
         let mut f = fx();

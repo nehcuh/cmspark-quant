@@ -16,7 +16,7 @@
   "content": {
     "title": "Kronos 零样本方向策略（示例）",
     "format": "markdown",
-    "body": "用 Kronos-mini 预测未来 5 根 K 线收盘价，预测上涨则持有。\n\n```python\n# Kronos 零样本方向策略（示例 / 门槛基线）。\n# 需要 cmsq-runner-kronos 镜像（scripts/build_runner_kronos.sh）。\n# 每 stride 根 K 线用过去 lookback 根预测未来 pred_len 根，预测收益 > 阈值则持仓。\n# 只用当根及以前的数据；随机种子由 bar 序号决定，截断/改动未来不会改变过去的仓位。\nfrom cmsq_kronos import rolling_forecast\n\n\ndef generate_signals(df, lookback=64, pred_len=5, stride=10, samples=2, threshold=0.0):\n    f = rolling_forecast(df, model=\"mini\", lookback=lookback, pred_len=pred_len,\n                         samples=samples, stride=stride)\n    return (f[\"exp_ret\"] > threshold).astype(float).fillna(0.0)\n```\n"
+    "body": "用 Kronos-mini 预测未来 5 根 K 线收盘价，预测上涨则持有（门槛基线）。\n\n```python\n# Kronos 零样本方向策略（示例 / 门槛基线）。\n# 需要 cmsq-runner-kronos 镜像（scripts/build_runner_kronos.sh）。\n# 每 stride 根 K 线用过去 lookback 根预测未来 pred_len 根，预测收益 > 阈值则持仓。\n# 只用当根及以前的数据；随机种子由 bar 序号决定，截断/改动未来不会改变过去的仓位。\nfrom cmsq_kronos import rolling_forecast\n\n\ndef generate_signals(df, lookback=64, pred_len=5, stride=5, samples=4, threshold=0.0):\n    f = rolling_forecast(df, model=\"mini\", lookback=lookback, pred_len=pred_len,\n                         samples=samples, stride=stride)\n    return (f[\"exp_ret\"] > threshold).astype(float).fillna(0.0)\n```\n"
   },
   "labels": [
     "sample",

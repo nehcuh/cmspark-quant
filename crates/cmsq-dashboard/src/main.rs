@@ -205,6 +205,60 @@ fn num(v: &serde_json::Value, k: &str) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
+/// Candidate vs Kronos zero-shot baseline on the same snapshot (P2). Both sides
+/// are host-scored; the baseline is a comparison bar, never a signal source.
+fn kronos_baseline_row(checks: &serde_json::Value) -> Option<Div> {
+    let b = checks.get("kronos_baseline").filter(|b| b.is_object())?;
+    let c = checks["checks"]
+        .as_array()?
+        .iter()
+        .find(|c| c["name"] == "beats_kronos_baseline")?;
+    let ok = c["ok"].as_bool().unwrap_or(false);
+    let dev = &b["dev"];
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(card(
+                        "Kronos 零样本基线 baseline (same snapshot)",
+                        format!("Sharpe {}", num(dev, "sharpe")),
+                        format!(
+                            "return {} · job {}",
+                            pct(dev, "total_return"),
+                            b["job_id"]
+                                .as_str()
+                                .unwrap_or("")
+                                .chars()
+                                .take(8)
+                                .collect::<String>()
+                        ),
+                        tok().vault,
+                    ))
+                    .child(card(
+                        "候选 vs 基线 Candidate vs baseline",
+                        if ok {
+                            "beats baseline ✓".into()
+                        } else {
+                            "does not beat baseline ✗".into()
+                        },
+                        c["detail"].as_str().unwrap_or("").to_string(),
+                        if ok { tok().ok } else { tok().err },
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tok().muted)
+                    .child("基线可能受训练数据泄漏而偏高，只会抬高门槛，不会帮策略通过"),
+            ),
+    )
+}
+
 fn card(title: &str, value: String, sub: String, color: Hsla) -> Div {
     div()
         .flex_1()
@@ -1450,6 +1504,9 @@ impl Dashboard {
                     "FAILED ✗"
                 }
             )));
+            if let Some(row) = kronos_baseline_row(&ev.checks) {
+                d = d.child(row);
+            }
             if let Some(cs) = ev.checks["checks"].as_array() {
                 for c in cs {
                     let ok = c["ok"].as_bool().unwrap_or(false);
