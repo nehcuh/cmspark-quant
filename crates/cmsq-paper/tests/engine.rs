@@ -589,3 +589,77 @@ fn exchange_published_limits_override_rule_band_but_not_quote_limits() {
     e.on_quote(&lq);
     assert!(buy(&mut e, 10.8).is_ok());
 }
+
+// ---- issue #37: displayed L1 depth is one shared budget per quote ----
+#[test]
+fn l1_depth_is_one_shared_liquidity_budget_per_quote() {
+    let s = strat(StrategyStatus::Promoted);
+    let mut e = fut("FUT_RB");
+    let mut first = q("FUT_RB", D1, "09:00:00", 3500., 100., 3499., 3501.);
+    first.ask_vol1 = Some(5.);
+    e.on_quote(&first);
+    for _ in 0..2 {
+        e.submit(
+            &s,
+            "FUT_RB",
+            Side::Buy,
+            Offset::Open,
+            OrderKind::Market,
+            5,
+            "09:00:00",
+        )
+        .unwrap();
+    }
+    let mut next = first.clone();
+    next.ts = "09:00:01".into();
+    next.cum_volume = 1100.;
+    let fills = e.on_quote(&next);
+    let total: i64 = fills.iter().map(|f| f.qty).sum();
+    assert_eq!(
+        total, 5,
+        "displayed liquidity cannot be reused per order: {fills:?}"
+    );
+    // depth replenishes on the next quote
+    let mut third = next.clone();
+    third.ts = "09:00:02".into();
+    third.cum_volume = 1200.;
+    let total2: i64 = e.on_quote(&third).iter().map(|f| f.qty).sum();
+    assert_eq!(
+        total2, 5,
+        "remaining order fills against the next quote's depth"
+    );
+}
+
+#[test]
+fn l1_depth_shared_between_market_and_marketable_limit_sell_side() {
+    let s = strat(StrategyStatus::Promoted);
+    let mut e = fut("FUT_RB");
+    let mut first = q("FUT_RB", D1, "09:00:00", 3500., 100., 3499., 3501.);
+    first.bid_vol1 = Some(3.);
+    e.on_quote(&first);
+    e.submit(
+        &s,
+        "FUT_RB",
+        Side::Sell,
+        Offset::Open,
+        OrderKind::Market,
+        2,
+        "09:00:00",
+    )
+    .unwrap();
+    e.submit(
+        &s,
+        "FUT_RB",
+        Side::Sell,
+        Offset::Open,
+        OrderKind::Limit { price: 3499. },
+        2,
+        "09:00:00",
+    )
+    .unwrap();
+    let mut next = first.clone();
+    next.ts = "09:00:01".into();
+    next.cum_volume = 1100.;
+    let total: i64 = e.on_quote(&next).iter().map(|f| f.qty).sum();
+    assert_eq!(total, 3, "bid depth 3 shared by market + marketable limit");
+}

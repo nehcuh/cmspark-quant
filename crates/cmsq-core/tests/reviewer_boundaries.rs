@@ -368,3 +368,91 @@ async fn docker_cancellation_cleans_container() {
         "dropping cancelled execution must remove container"
     );
 }
+
+/// Issue #19: the daemon commits `create` but the response is held; the caller is
+/// cancelled inside that window. A unix-socket proxy forwards to the real daemon and
+/// withholds only the create response until the test releases it (deterministic barrier).
+#[tokio::test]
+#[ignore = "bounded Docker create-window cancellation acceptance"]
+async fn cancellation_before_create_response_must_not_leave_container() {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio::sync::Notify;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("proxy.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let created = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let (created, release) = (created.clone(), release.clone());
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let (created, release) = (created.clone(), release.clone());
+                tokio::spawn(async move {
+                    let up = UnixStream::connect("/var/run/docker.sock").await.unwrap();
+                    let (mut cr, mut cw) = client.into_split();
+                    let (mut ur, mut uw) = up.into_split();
+                    let is_create = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let flag = is_create.clone();
+                    tokio::spawn(async move {
+                        let mut b = vec![0u8; 65536];
+                        while let Ok(n) = cr.read(&mut b).await {
+                            if n == 0 {
+                                break;
+                            }
+                            if String::from_utf8_lossy(&b[..n]).contains("/containers/create") {
+                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            if uw.write_all(&b[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    let mut b = vec![0u8; 65536];
+                    while let Ok(n) = ur.read(&mut b).await {
+                        if n == 0 {
+                            break;
+                        }
+                        if is_create.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            created.notify_one(); // daemon answered: the container exists
+                            release.notified().await; // hold the response
+                        }
+                        if cw.write_all(&b[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+    }
+    let d = cmsq_core::sandbox::docker::DockerSandboxExecutor::connect_unix(&sock)
+        .await
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut q = req("print('must never run')", out.path());
+    q.id = format!("acceptance-createwin-{}", uuid::Uuid::new_v4().simple());
+    let name = format!("cmsq-{}", q.id);
+    let h = tokio::spawn(async move { d.execute(&q).await });
+    tokio::time::timeout(std::time::Duration::from_secs(20), created.notified())
+        .await
+        .expect("create never reached the daemon");
+    assert!(exists(&name), "daemon should have created the container");
+    h.abort();
+    assert!(h.await.unwrap_err().is_cancelled());
+    release.notify_one();
+    let mut leaked = true;
+    for _ in 0..50 {
+        if !exists(&name) {
+            leaked = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    cleanup(&name);
+    assert!(
+        !leaked,
+        "container created before the response must be removed after cancel"
+    );
+}

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 cmsq-core = { path = "../cmsq-core" }
+cmsq-paper = { path = "../cmsq-paper" }
 gpui-kit = "0.7.3"
 anyhow = "1"
 serde_json = "1"

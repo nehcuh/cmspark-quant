@@ -1094,6 +1094,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "cmsq-core",
+ "cmsq-paper",
  "gpui-kit",
  "serde_json",
  "tokio",
