@@ -8,6 +8,7 @@ command -v bwrap >/dev/null || { echo "FAIL: bubblewrap (bwrap) not installed"; 
 docker image inspect cmsq-runner:2.2.2 >/dev/null 2>&1 && [ -s ~/.config/cmsq/runner_image_id ] || scripts/build_runner.sh
 python3 scripts/test_vnpy_shim.py
 cargo test -p cmsq-core --test sandbox_integration --test pipeline -- --ignored --test-threads=2
+docker image inspect python:3.12-slim >/dev/null 2>&1 || docker pull -q python:3.12-slim
 cargo test -p cmsq-core --test reviewer_boundaries -- --ignored docker_ cancellation_before_create_response --test-threads=2
 # PostgreSQL tests are separate: scripts/test_pg.sh
 # vendored rstdx: the empty-bars regression test
