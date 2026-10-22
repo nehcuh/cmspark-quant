@@ -1,9 +1,8 @@
 # 使用指南
 
-## 1. 系统做什么
-从社区抓取策略 → 结构化抽取 → 在断网的 Docker 沙箱里回测（容器只输出目标仓位，成交、成本、指标、前视检测和门槛都由宿主机 Rust 计算）→ 门槛（DSR、walk-forward、一次性留存样本、买入持有对比、市场状态稳定性、真实行情、资金容量）→ 人工确认晋升 → 只观察信号与模拟盘。**没有任何真实下单接口。**
+> 第一次使用请先读 [QUICKSTART.md](QUICKSTART.md)（上手）和 [DESIGN.md](DESIGN.md)（设计理念）；命令与环境变量速查见 [CONFIG.md](CONFIG.md)。本文只补充部署组件、运维和门槛实现细节。
 
-## 2. 部署
+## 1. 部署
 前置：Linux、Docker（当前用户能访问 daemon）、rustup（`rust-toolchain.toml` 固定版本，自动安装）。
 
 ```bash
@@ -21,30 +20,13 @@ scripts/deploy.sh [--hot] [--anchor-repo URL] [--home DIR]
 
 已有工作区若仍用应用侧 `audit.key`，部署会自动迁移：导入签名进程 → 按已验证链头登记 → 经签名进程全链验证 → 覆写删除旧密钥。新工作区通过显式登记（`cmsq audit signer-enroll`）接入签名进程，签名进程不接受未登记的链。
 
-## 3. 数据源
-真实行情需要 Tushare token：写入 `~/.config/cmsq/secrets.env`（`TUSHARE_TOKEN=...`，权限 600，切勿提交）。路由顺序 tushare → akshare → baostock → TDX，各源独立限流（tushare ≤400 次/分钟，akshare 串行且间隔 ≥1 秒）；启用 `--hot` 时限流计数在 Redis 中共享。多源收盘价逐日交叉校验，差异 >0.1% 的日子会被标记。
+## 2. 数据源与日常流程
+数据源配置、限流和日常命令见 [QUICKSTART.md §2/§6](QUICKSTART.md) 与 [CONFIG.md §4/§5](CONFIG.md)。
 
-```bash
-cmsq data calendar
-cmsq data fetch SH600519 --count 2500
-cmsq data sources
-```
+## 3. 看板
+`cargo run --release -p cmsq-dashboard`（GPUI）。总览、策略、试验、信号、模拟盘、审计等页面，截图见 [QUICKSTART.md §4](QUICKSTART.md#4-打开看板) 与 `docs/screenshots/`。
 
-## 4. 日常流程
-```bash
-cmsq scrape --every 6h                 # 抓取社区策略 → 摄入 → 抽取 → 沙箱回测（定时）
-cmsq list                              # 策略状态
-cmsq show <id>                         # 来源、评估、任务、审计
-cmsq sweep / portfolio                 # 参数扫描（每个点计入 DSR 试验账本）/ 多标的组合
-cmsq promote <id>                      # 需键入确认；运行一次性留存样本，通过才晋升
-cmsq signals                           # 已晋升策略的只观察信号
-cmsq paper ...                         # 模拟盘（见 docs/PAPER_TRADING.md）
-```
-
-## 5. 看板
-`cargo run --release -p cmsq-dashboard`（GPUI）。总览、策略、试验、信号、模拟盘、审计等页面，截图见 `docs/screenshots/`。
-
-## 6. 审计与运维
+## 4. 审计与运维
 ```bash
 cmsq audit verify                      # 全链 HMAC 校验 + 锚点
 cmsq audit anchor-git --repo DIR --sign --push
@@ -53,9 +35,9 @@ docker compose -f deploy/docker-compose.yml exec signer cmsq signer rotate --dir
 ```
 细节：`docs/AUDIT_KEY.md`、`docs/REDIS.md`、`docs/MARKET_DATA.md`、`docs/PAPER_TRADING.md`、`docs/STATUS.md`。
 
-## 7. 边界
+## 5. 边界
 - 不实盘、不接券商；CTP 只接行情接口。
-- 门槛很严格：真实数据上目前没有社区策略通过（见 `docs/STATUS.md`），这是预期内的诚实结果。
+- 门槛很严格：真实数据上目前没有社区策略通过（见 [STATUS.md](STATUS.md)），这是预期内的诚实结果。
 
 ## 门槛：市场状态（regime）稳定性
 
