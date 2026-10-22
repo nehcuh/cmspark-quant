@@ -81,6 +81,14 @@ Design reference: matching ideas only. No third-party code is used.
   is refused. **Legacy snapshots** written before this binding are refused, never
   re-authenticated: start a new session (its event log remains verifiable with `paper verify`'s
   chain check). Threat model: DB owner / offline file editor without the audit key.
+- **Authenticated equity history (#38 follow-up).** The `equity`/`trading_day` columns of
+  `paper_snapshots` are derived and untrusted. The curve is rebuilt by
+  `session::verified_equity_curve`: each point must have its own `paper_snapshot` audit
+  binding, and its columns must equal what the authenticated state implies; equity is
+  recomputed from that state. The dashboard shows only authenticated points (and a warning
+  with the count of excluded legacy/edited ones) and takes the equity card from the audited
+  latest state; `paper verify` fails if any point is unauthenticated; `paper show`/QIFI come
+  from the verified resume state.
 - **Quote-only state (#39).** If only quotes moved since the last snapshot (marks,
   cumulative volume), `checkpoint`/`stop` first emits a `marked` event so the state gets
   a new seq; stop → resume is bit-identical and the same subsequent tape yields the same fills.

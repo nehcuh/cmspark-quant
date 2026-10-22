@@ -111,7 +111,11 @@ struct PaperView {
     strategy: String,
     status: String,
     state: serde_json::Value,
+    /// authenticated curve points only (#38); `unauth` counts rejected/legacy points
     curve: Vec<(i64, Option<String>, f64)>,
+    unauth: usize,
+    /// equity recomputed from the audited latest state, never from a derived column
+    equity: Option<f64>,
     fills: Vec<serde_json::Value>,
 }
 
@@ -628,7 +632,18 @@ impl Dashboard {
                             })
                             .map(|x| x.1)
                             .unwrap_or_default();
-                        let curve = st.paper_equity_curve(&id).unwrap_or_default();
+                        let equity =
+                            serde_json::from_value::<cmsq_paper::PaperEngine>(state.clone())
+                                .ok()
+                                .map(|e| e.equity());
+                        let pts = cmsq_paper::session::verified_equity_curve(&st, &id)
+                            .unwrap_or_default();
+                        let unauth = pts.iter().filter(|p| !p.authenticated).count();
+                        let curve = pts
+                            .into_iter()
+                            .filter(|p| p.authenticated)
+                            .map(|p| (p.seq, p.trading_day, p.equity))
+                            .collect();
                         let fills = st
                             .list_paper_events(&id, 0, 100_000)
                             .unwrap_or_default()
@@ -644,6 +659,8 @@ impl Dashboard {
                             status,
                             state,
                             curve,
+                            unauth,
+                            equity,
                             fills,
                         }
                     })
@@ -2043,7 +2060,10 @@ impl Dashboard {
             let a = &p.state["account"];
             let cash = a["cash"].as_f64().unwrap_or(0.0);
             let margin = a["margin"].as_f64().unwrap_or(0.0);
-            let eq = p.curve.last().map(|x| x.2).unwrap_or(cash);
+            let eq_txt = match p.equity {
+                Some(e) => format!("{e:.2}"),
+                None => "UNVERIFIED".to_string(),
+            };
             let mut card = div()
                 .p_3()
                 .rounded_md()
@@ -2061,7 +2081,7 @@ impl Dashboard {
                     &p.strategy[..8.min(p.strategy.len())]
                 )))
                 .child(div().text_color(tok().fg).child(format!(
-                    "equity {eq:.2} · cash {cash:.2} · margin {margin:.2} · fees {:.2} · day {}",
+                    "equity {eq_txt} · cash {cash:.2} · margin {margin:.2} · fees {:.2} · day {}",
                     a["fees"].as_f64().unwrap_or(0.0),
                     a["trading_day"].as_str().unwrap_or("-")
                 )));
@@ -2078,6 +2098,12 @@ impl Dashboard {
                         x["short_cost"].as_f64().unwrap_or(0.0)
                     )));
                 }
+            }
+            if p.unauth > 0 {
+                card = card.child(div().text_color(tok().warn).child(format!(
+                    "⚠ {} snapshot point(s) not bound to the audit chain (legacy or edited) — excluded 未认证点已排除",
+                    p.unauth
+                )));
             }
             if p.curve.len() > 1 {
                 let pts: Vec<(String, f64)> = p

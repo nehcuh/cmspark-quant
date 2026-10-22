@@ -456,3 +456,111 @@ async fn cancellation_before_create_response_must_not_leave_container() {
         "container created before the response must be removed after cancel"
     );
 }
+
+/// #19 follow-up: the create result was delivered into the oneshot (send succeeded) but
+/// the owner future is dropped before polling the receiver again.
+#[tokio::test]
+#[ignore = "bounded Docker create-handoff cancellation acceptance"]
+async fn cancel_after_create_sent_but_before_receiver_is_polled() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio::sync::Notify;
+    struct Notice(AtomicBool);
+    impl Wake for Notice {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("proxy.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let created = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let (created, release) = (created.clone(), release.clone());
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let (created, release) = (created.clone(), release.clone());
+                tokio::spawn(async move {
+                    let up = UnixStream::connect("/var/run/docker.sock").await.unwrap();
+                    let (mut cr, mut cw) = client.into_split();
+                    let (mut ur, mut uw) = up.into_split();
+                    let is_create = Arc::new(AtomicBool::new(false));
+                    let flag = is_create.clone();
+                    tokio::spawn(async move {
+                        let mut b = vec![0u8; 65536];
+                        while let Ok(n) = cr.read(&mut b).await {
+                            if n == 0 {
+                                break;
+                            }
+                            if String::from_utf8_lossy(&b[..n]).contains("/containers/create") {
+                                flag.store(true, Ordering::SeqCst);
+                            }
+                            if uw.write_all(&b[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    let mut b = vec![0u8; 65536];
+                    while let Ok(n) = ur.read(&mut b).await {
+                        if n == 0 {
+                            break;
+                        }
+                        if is_create.swap(false, Ordering::SeqCst) {
+                            created.notify_one();
+                            release.notified().await;
+                        }
+                        if cw.write_all(&b[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+    }
+    let d = cmsq_core::sandbox::docker::DockerSandboxExecutor::connect_unix(&sock)
+        .await
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut q = req("print('must never run')", out.path());
+    q.id = format!("acceptance-handoff-{}", uuid::Uuid::new_v4().simple());
+    let name = format!("cmsq-{}", q.id);
+    let notice = Arc::new(Notice(AtomicBool::new(false)));
+    let waker = Waker::from(notice.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut future = Box::pin(d.execute(&q));
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+    tokio::time::timeout(std::time::Duration::from_secs(20), created.notified())
+        .await
+        .expect("create never reached the daemon");
+    release.notify_one();
+    for _ in 0..300 {
+        if notice.0.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(notice.0.load(Ordering::SeqCst), "receiver never woken");
+    assert!(exists(&name));
+    drop(future); // never poll the receiver again
+    let mut leaked = true;
+    for _ in 0..50 {
+        if !exists(&name) {
+            leaked = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    cleanup(&name);
+    assert!(
+        !leaked,
+        "delivered-but-untaken create result must still clean up"
+    );
+}

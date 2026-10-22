@@ -163,7 +163,14 @@ fn lifecycle(store: &Store) {
     assert_eq!(r.engine.event_log_hash(), head);
     assert!((r.engine.equity() - eq).abs() < 1e-9);
     assert_eq!(r.engine.account.positions["FUT_RB"].long_yd, 2);
-    assert!(store.paper_equity_curve("p1").unwrap().len() >= 2);
+    assert!(
+        cmsq_paper::session::verified_equity_curve(store, "p1")
+            .unwrap()
+            .iter()
+            .filter(|p| p.authenticated)
+            .count()
+            >= 2
+    );
     assert!(store.verify_audit().unwrap().ok);
     let acts: Vec<String> = store
         .audit_entries(None, 100)
@@ -389,4 +396,69 @@ fn resumed_session_replays_identically_to_uninterrupted_one() {
         "stale last_cum after resume would make volume reusable"
     );
     assert_eq!(r.engine.equity(), refe.equity());
+}
+
+// ---- #38 follow-up: every displayed curve point must be authenticated ----
+#[test]
+fn authenticated_account_must_not_display_forged_curve() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let s = strat(StrategyStatus::Promoted);
+    PaperSession::start(&store, "curve", &s, engine())
+        .unwrap()
+        .stop()
+        .unwrap();
+    let expected = PaperSession::resume(&store, "curve")
+        .unwrap()
+        .engine
+        .equity();
+    store
+        .raw_batch(
+            "DROP TRIGGER paper_snapshots_no_update;
+        UPDATE paper_snapshots SET equity=2000000 WHERE session_id='curve'",
+        )
+        .unwrap();
+    assert!(store.verify_audit().unwrap().ok);
+    assert_eq!(
+        PaperSession::resume(&store, "curve")
+            .unwrap()
+            .engine
+            .equity(),
+        expected
+    );
+    let c = cmsq_paper::session::verified_equity_curve(&store, "curve").unwrap();
+    assert!(!c.is_empty());
+    assert!(
+        c.iter().all(|p| !p.authenticated),
+        "forged equity column must not authenticate"
+    );
+    assert!(c
+        .iter()
+        .all(|p| (p.equity - expected).abs() > 1.0 || !p.authenticated));
+    assert!(c.iter().filter(|p| p.authenticated).count() == 0);
+}
+
+#[test]
+fn historical_points_each_need_their_own_binding() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let (mut ps, _) = traded(&store, "hist");
+    ps.flush().unwrap();
+    ps.engine
+        .on_quote(&q("2026-10-20", "09:00:00", 3500., 100.));
+    ps.flush().unwrap();
+    ps.stop().unwrap();
+    let c = cmsq_paper::session::verified_equity_curve(&store, "hist").unwrap();
+    assert!(c.len() >= 2 && c.iter().all(|p| p.authenticated), "{c:?}");
+    // forge an OLD point's state + equity (latest untouched): only that point is rejected
+    let first = c[0].seq;
+    store.raw_batch(&format!("DROP TRIGGER paper_snapshots_no_update;
+        UPDATE paper_snapshots SET equity=9e9, trading_day='1999-01-01' WHERE session_id='hist' AND seq={first}")).unwrap();
+    let c2 = cmsq_paper::session::verified_equity_curve(&store, "hist").unwrap();
+    assert!(!c2[0].authenticated);
+    assert!(c2[1..].iter().all(|p| p.authenticated));
+    assert!(
+        PaperSession::resume(&store, "hist").is_ok(),
+        "latest state still valid"
+    );
 }

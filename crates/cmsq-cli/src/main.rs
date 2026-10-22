@@ -1775,9 +1775,22 @@ fn paper_cmd(
                 .latest_paper_snapshot(&session)?
                 .context("session has no snapshot")?;
             cmsq_paper::session::verify_snapshot_binding(&o.store, &session, seq, &state)?;
+            // every historical equity point must be bound too (#38 follow-up)
+            let curve = cmsq_paper::session::verified_equity_curve(&o.store, &session)?;
+            let bad: Vec<i64> = curve
+                .iter()
+                .filter(|p| !p.authenticated)
+                .map(|p| p.seq)
+                .collect();
+            anyhow::ensure!(
+                bad.is_empty(),
+                "{} snapshot point(s) not bound to the audit chain (legacy or edited): seq {:?}",
+                bad.len(),
+                bad
+            );
             out(
-                serde_json::json!({"session": session, "events": n, "chain": h, "snapshot_seq": seq, "snapshot_bound": true, "ok": true}),
-                format!("{session}: {n} events, chain {h} verified; snapshot @{seq} bound to audit chain"),
+                serde_json::json!({"session": session, "events": n, "chain": h, "snapshot_seq": seq, "snapshot_bound": true, "curve_points": curve.len(), "ok": true}),
+                format!("{session}: {n} events, chain {h} verified; snapshot @{seq} and {} curve points bound to audit chain", curve.len()),
             );
         }
         PaperCmd::Show { session } => {
