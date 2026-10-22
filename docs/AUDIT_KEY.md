@@ -15,10 +15,10 @@ HSM and KMS fit the same trait: `sign_next`, `verify` (yes/no) and `head`.
 - Runs as its own OS user. The socket is mode 0660 (group `cmsq-sign`), with an optional `--allow-uid` check via SO_PEERCRED. The unit has no network.
 - **Append-only:**
   - It signs only the next entry of a chain (`seq == head+1`, `prev == head mac`), and checks that the message really encodes that seq and prev.
-  - It also allows one retry of the head, for the case where a DB commit failed after signing.
+  - It also allows a retry of the head seq (for when a DB commit failed after signing), but only with a byte-identical message, so the latest entry cannot be replaced.
   - `verify` answers only yes or no.
   - So even a fully compromised app cannot obtain MACs to rewrite past entries.
-- **Independent head:** the signer remembers each chain's head, and `audit verify` compares the database against it, which catches truncation even if the anchor file is wiped. A chain the signer has never seen is adopted on first use, so existing workspaces can migrate.
+- **Independent head:** the signer remembers each chain's head, and `audit verify` compares the database against it, which catches truncation even if the anchor file is wiped. A chain the signer has never seen is refused until an operator explicitly enrolls it (see "显式登记" below); there is no trust-on-first-use.
 - **Residual risk:** someone controlling the app *now* can append bogus new entries. They cannot alter what has already been anchored.
 
 ## Git anchors (`cmsq audit anchor-git --repo R [--sign] [--push] [--every 1h]`)
@@ -33,10 +33,7 @@ Each run appends `chain seq head-mac utc-ts` to `anchors/<chain>.log` and commit
 4. You may move an old key offline only after its segment's head is anchored and pushed. From then on, that segment's integrity rests on the git anchors.
 
 ## Migrating an existing workspace
-```
-cmsq signer import --dir /var/lib/cmsq-signer --key-file ~/.config/cmsq/audit.key
-```
-This imports the old key as key 0. Start the signer, set `CMSQ_AUDIT_SIGNER`, then delete the old key file. The signer adopts the chain at its next entry, and new entries use the newest key.
+Use `cmsq audit migrate-to-signer` as described in "显式登记（取代首次信任）与迁移" below. Do not delete `audit.key` by hand: the command imports it as key 0, enrolls the verified chain head, re-verifies the whole chain through the signer socket, and only then removes the app-side key.
 
 ## Tested
 - `signer::tests`: append-only, rotation, permission refusal
