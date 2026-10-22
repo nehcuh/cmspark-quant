@@ -105,6 +105,7 @@ cmsq list | show <id> | jobs | jobs reap | trials | signals | audit verify | aud
 * `scripts/e2e.sh`：全部符合预期，输出 `docs/e2e-output.txt`；单想法 vault 演示（独立工作区，DSR 下限设为 1）门禁通过、vault 亏损被拒，重发被拒；篡改快照 / 删除 sha 均被拒。
 * `scripts/e2e_real.sh`：6 只股票 × 6 帖 = 36 次 Docker 回测，**0 通过门禁、0 晋升**；交叉校验 5 个 ok、SH600519 为 ok_with_flags（1 天 0.112%）。输出 `docs/e2e-real-output.txt`。
 * 截图：`docs/screenshots/`（哪些已重拍、哪些是历史截图见其中的 README.md）；项目状态：`docs/STATUS.md`。审查修复映射：`docs/reviews/04-external-review-fixes.md`、`docs/reviews/05-round2-fixes.md`。
+* 面板设计规范：`docs/UI_DESIGN.md`（gpui-component 组件与主题 token、图标/动画规则、截图自查流程；重拍脚本 `scripts/ui_screenshots.sh`）。
 
 ## 已知局限
 fork bomb 的 `pids_exhausted` 标签是启发式；真实数据的价格形态仍可能泄露所处年代；直接系统调用可绕过 libfaketime（有假日期兜底）；

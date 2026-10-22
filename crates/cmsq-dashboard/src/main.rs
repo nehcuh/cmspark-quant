@@ -16,12 +16,19 @@ use cmsq_core::{
     extract, AuditEntry, Evaluation, Home, JobRecord, Orchestrator, Strategy, StrategyStatus,
 };
 use gpui_kit::base::Disableable;
+use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::chart::AreaChart;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::resizable::{resizable_panel, v_resizable};
+use gpui_kit::component::table::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow};
+use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+mod ui;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use ui::{callout, chip, tint, tok};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -66,6 +73,21 @@ impl Tab {
             "paper" => Tab::Paper,
             "audit" => Tab::Audit,
             _ => Tab::Overview,
+        }
+    }
+    /// Lucide icon from the gpui-component icon set (docs/UI_DESIGN.md#icons).
+    fn icon(&self) -> IconName {
+        match self {
+            Tab::Overview => IconName::LayoutDashboard,
+            Tab::Library => IconName::BookOpen,
+            Tab::Compare => IconName::ChartPie,
+            Tab::Data => IconName::HardDrive,
+            Tab::Jobs => IconName::SquareTerminal,
+            Tab::Signals => IconName::Bell,
+            Tab::Paper => IconName::FileText,
+            Tab::Research => IconName::Cpu,
+            Tab::Futures => IconName::Network,
+            Tab::Audit => IconName::CircleCheck,
         }
     }
     fn label(&self) -> &'static str {
@@ -144,37 +166,17 @@ struct Dashboard {
     _poll: Option<Task<()>>,
 }
 
-fn c_bg() -> Hsla {
-    rgb(0x0f1419).into()
-}
-fn c_panel() -> Hsla {
-    rgb(0x171d24).into()
-}
-fn c_border() -> Hsla {
-    rgb(0x2a323c).into()
-}
-fn c_text() -> Hsla {
-    rgb(0xe6e9ee).into()
-}
-fn c_muted() -> Hsla {
-    rgb(0x8a94a3).into()
-}
-fn c_accent() -> Hsla {
-    rgb(0x4ea1ff).into()
-}
-
 fn status_color(s: StrategyStatus) -> Hsla {
     match s {
-        StrategyStatus::Ingested => rgb(0x8a94a3),
-        StrategyStatus::Extracted => rgb(0x4ea1ff),
-        StrategyStatus::Backtesting => rgb(0xd29922),
-        StrategyStatus::Evaluated => rgb(0xa371f7),
-        StrategyStatus::GatePassed => rgb(0x2ea8a0),
-        StrategyStatus::Promoted => rgb(0x3fb950),
-        StrategyStatus::Rejected => rgb(0xf0883e),
-        StrategyStatus::Failed => rgb(0xf85149),
+        StrategyStatus::Ingested => tok().muted,
+        StrategyStatus::Extracted => tok().accent,
+        StrategyStatus::Backtesting => tok().warn,
+        StrategyStatus::Evaluated => tok().vault,
+        StrategyStatus::GatePassed => tok().cyan,
+        StrategyStatus::Promoted => tok().ok,
+        StrategyStatus::Rejected => tok().caution,
+        StrategyStatus::Failed => tok().err,
     }
-    .into()
 }
 
 /// Audit timestamps are stored in UTC; show local time (Asia/Shanghai on this box).
@@ -199,33 +201,21 @@ fn num(v: &serde_json::Value, k: &str) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn chip(text: impl Into<SharedString>, color: Hsla) -> Div {
-    div()
-        .px_2()
-        .py_0p5()
-        .rounded_md()
-        .border_1()
-        .border_color(color)
-        .text_color(color)
-        .text_xs()
-        .child(text.into())
-}
-
 fn card(title: &str, value: String, sub: String, color: Hsla) -> Div {
     div()
         .flex_1()
         .p_4()
         .rounded_lg()
-        .bg(c_panel())
+        .bg(tok().panel)
         .border_1()
-        .border_color(c_border())
+        .border_color(tok().border)
         .flex()
         .flex_col()
         .gap_1()
         .child(
             div()
                 .text_xs()
-                .text_color(c_muted())
+                .text_color(tok().muted)
                 .child(title.to_string()),
         )
         .child(
@@ -235,7 +225,7 @@ fn card(title: &str, value: String, sub: String, color: Hsla) -> Div {
                 .text_color(color)
                 .child(value),
         )
-        .child(div().text_xs().text_color(c_muted()).child(sub))
+        .child(div().text_xs().text_color(tok().muted).child(sub))
 }
 
 /// date,equity,... from a job's equity.csv (written by the trusted host scorer)
@@ -251,60 +241,87 @@ fn read_equity(job_dir: &str) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// Column-style equity chart built from plain divs. `split` = index where the
-/// vault (final holdout) begins; those columns are drawn in a different colour.
-fn equity_chart(pts: &[(String, f64)], split: Option<usize>, height: f32) -> Div {
+/// Equity curve as gpui-component `AreaChart`s. `split` = index where the vault
+/// (final holdout) begins; that segment is a second chart in the vault colour, on the
+/// same y scale, placed right after the development segment.
+fn equity_chart(key: &str, pts: &[(String, f64)], split: Option<usize>, height: f32) -> Div {
     if pts.len() < 2 {
         return div()
             .text_xs()
-            .text_color(c_muted())
+            .text_color(tok().muted)
             .child("no equity curve");
     }
-    const COLS: usize = 180;
-    let step = (pts.len() as f64 / COLS as f64).max(1.0);
-    let idx: Vec<usize> = (0..COLS.min(pts.len()))
-        .map(|i| ((i as f64 * step) as usize).min(pts.len() - 1))
-        .collect();
-    let (lo, hi) = idx
+    let (lo, hi) = pts
         .iter()
-        .map(|&i| pts[i].1)
-        .fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
-    let span = (hi - lo).max(1e-9);
+        .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    let pad = ((hi - lo) * 0.05).max(1.0);
     let base = pts[0].1;
-    let mut bars = div().flex().items_end().gap(px(1.)).h(px(height)).w_full();
-    for &i in &idx {
-        let v = pts[i].1;
-        let hgt = 4.0 + (height - 4.0) * ((v - lo) / span) as f32;
-        let vault = split.is_some_and(|s| i >= s);
-        let col: Hsla = if vault {
-            rgb(0xa371f7).into()
-        } else if v >= base {
-            rgb(0x3fb950).into()
-        } else {
-            rgb(0xf85149).into()
-        };
-        bars = bars.child(div().flex_1().h(px(hgt)).bg(col).opacity(0.8));
-    }
     let last = pts.last().unwrap();
-    div().flex().flex_col().gap_1().child(bars).child(
-        div()
-            .flex()
-            .text_xs()
-            .text_color(c_muted())
-            .child(div().flex_1().child(pts[0].0.clone()))
-            .child(div().child(format!(
-                "¥{:.0} → ¥{:.0} ({:+.1}%)  min ¥{lo:.0} max ¥{hi:.0}{}",
-                base,
-                last.1,
-                (last.1 / base - 1.0) * 100.0,
-                if split.is_some() {
-                    "  · purple = vault holdout"
-                } else {
-                    ""
-                }
-            )))
-            .child(div().flex_1().flex().justify_end().child(last.0.clone())),
-    )
+    let split = split.filter(|s| *s > 0 && *s + 1 < pts.len());
+    let seg =
+        |id: String, part: &[(String, f64)], color: Hsla, name: &'static str, x_axis: bool| {
+            const MAX_POINTS: usize = 200;
+            let step = (part.len() as f64 / MAX_POINTS as f64).max(1.0);
+            let mut idx: Vec<usize> = (0..MAX_POINTS.min(part.len()))
+                .map(|i| ((i as f64 * step) as usize).min(part.len() - 1))
+                .collect();
+            idx.push(part.len() - 1);
+            idx.dedup();
+            let n = idx.len();
+            let data: Vec<(String, f64)> = idx.into_iter().map(|i| part[i].clone()).collect();
+            AreaChart::new(data)
+                .id(ElementId::Name(id.into()))
+                .x(|d: &(String, f64)| SharedString::from(d.0.clone()))
+                .y(|d: &(String, f64)| d.1)
+                .stroke(color)
+                .fill(color.opacity(0.15))
+                .name(name)
+                .y_domain(lo - pad, hi + pad)
+                .x_axis(x_axis)
+                .tick_margin((n / 4).max(1))
+        };
+    let dev_color = if last.1 >= base { tok().ok } else { tok().err };
+    let row = match split {
+        None => div()
+            .size_full()
+            .child(seg(format!("{key}-dev"), pts, dev_color, "equity", true)),
+        Some(s) => {
+            let frac = s as f32 / (pts.len() - 1) as f32;
+            div()
+                .size_full()
+                .flex()
+                .child(div().h_full().w(relative(frac)).child(seg(
+                    format!("{key}-dev"),
+                    &pts[..=s],
+                    dev_color,
+                    "开发期 development",
+                    true,
+                )))
+                .child(div().h_full().flex_1().child(seg(
+                    format!("{key}-vault"),
+                    &pts[s..],
+                    tok().vault,
+                    "留存 vault holdout",
+                    false,
+                )))
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().h(px(height)).w_full().child(row))
+        .child(div().text_xs().text_color(tok().muted).child(format!(
+            "¥{:.0} → ¥{:.0} ({:+.1}%)  min ¥{lo:.0} max ¥{hi:.0}{}",
+            base,
+            last.1,
+            (last.1 / base - 1.0) * 100.0,
+            if split.is_some() {
+                "  · purple = vault holdout"
+            } else {
+                ""
+            }
+        )))
 }
 
 /// Display-only trade stats line (never part of the gate).
@@ -364,7 +381,7 @@ fn section(title: &str) -> Div {
     div()
         .text_sm()
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(c_text())
+        .text_color(tok().fg)
         .mt_2()
         .child(title.to_string())
 }
@@ -741,11 +758,12 @@ impl Dashboard {
     // ---------------- views ----------------
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
         let mut col = div()
-            .w(px(230.))
+            .w(px(256.))
+            .flex_none()
             .h_full()
-            .bg(c_panel())
+            .bg(tok().panel)
             .border_r_1()
-            .border_color(c_border())
+            .border_color(tok().border)
             .p_3()
             .flex()
             .flex_col()
@@ -754,13 +772,13 @@ impl Dashboard {
                 div()
                     .text_lg()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(c_text())
+                    .text_color(tok().fg)
                     .child("CMspark Quant"),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .mb_3()
                     .child("策略发现 · 沙箱验证 · 不接实盘"),
             );
@@ -774,9 +792,13 @@ impl Dashboard {
                     .rounded_md()
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(if active { c_text() } else { c_muted() })
-                    .when(active, |d| d.bg(rgb(0x22303f)))
-                    .hover(|d| d.bg(rgb(0x1d2733)))
+                    .text_color(if active { tok().fg } else { tok().muted })
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(active, |d| d.bg(tok().active))
+                    .hover(|d| d.bg(tok().hover))
+                    .child(Icon::new(t.icon()).small())
                     .child(t.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.tab = t;
@@ -791,28 +813,28 @@ impl Dashboard {
             .clone()
             .unwrap_or((false, 0, String::new()));
         let (badge, bcol): (String, Hsla) = match self.docker() {
-            Some(true) => ("sandbox: Docker (hardened) ✓".into(), rgb(0x3fb950).into()),
-            Some(false) => ("sandbox: NO DOCKER ✗".into(), rgb(0xf85149).into()),
-            None => ("sandbox: probing docker…".into(), c_muted()),
+            Some(true) => ("sandbox: Docker (hardened) ✓".into(), tok().ok),
+            Some(false) => ("sandbox: NO DOCKER ✗".into(), tok().err),
+            None => ("sandbox: probing docker…".into(), tok().muted),
         };
         col.child(div().flex_1())
             .child(div().text_xs().text_color(bcol).child(badge))
             .child(
                 div()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .child(format!("workspace: {}", self.home.abs().display())),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .child(format!("database: {}", self.snap.backend)),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) })
+                    .text_color(if ok { tok().ok } else { tok().err })
                     .child(if ok {
                         format!("审计链完整 ✓ {n} entries (HMAC + anchor)")
                     } else {
@@ -830,11 +852,12 @@ impl Dashboard {
             .gap_2()
             .p_3()
             .border_b_1()
-            .border_color(c_border())
-            .bg(c_panel())
+            .border_color(tok().border)
+            .bg(tok().panel)
             .child(
                 Button::new("ingest")
                     .primary()
+                    .icon(IconName::Inbox)
                     .disabled(self.busy())
                     .label("触发摄入 Ingest drop/")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -844,6 +867,7 @@ impl Dashboard {
             )
             .child(
                 Button::new("extract")
+                    .icon(IconName::FileText)
                     .disabled(self.busy())
                     .label("抽取 Extract")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -853,6 +877,7 @@ impl Dashboard {
             )
             .child(
                 Button::new("symbol")
+                    .icon(IconName::ChevronsUpDown)
                     .label(format!("数据集: {sym}"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.symbol_ix += 1;
@@ -860,7 +885,7 @@ impl Dashboard {
                     })),
             )
             .child(
-                div().text_xs().text_color(c_muted()).child(
+                div().text_xs().text_color(tok().muted).child(
                     ds.map(|d| format!("{} · {} bars · {}", d.source, d.bars, d.label))
                         .unwrap_or_default(),
                 ),
@@ -868,6 +893,7 @@ impl Dashboard {
             .child(div().flex_1())
             .child(
                 Button::new("refresh")
+                    .icon(IconName::RefreshCw)
                     .label("刷新 Refresh")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reload();
@@ -910,12 +936,12 @@ impl Dashboard {
         .enumerate()
         {
             if i > 0 {
-                flow = flow.child(div().text_color(c_muted()).child("→"));
+                flow = flow.child(div().text_color(tok().muted).child("→"));
             }
             flow = flow.child(chip(format!("{} {}", s, count(*s)), status_color(*s)));
         }
         flow = flow
-            .child(div().text_color(c_muted()).ml_4().child("归档 archive:"))
+            .child(div().text_color(tok().muted).ml_4().child("归档 archive:"))
             .child(chip(
                 format!("Rejected {}", count(StrategyStatus::Rejected)),
                 status_color(StrategyStatus::Rejected),
@@ -953,27 +979,28 @@ impl Dashboard {
                     .child(
                         div()
                             .w(px(44.))
-                            .text_color(c_muted())
+                            .text_color(tok().muted)
                             .child(format!("#{}", a.seq)),
                     )
-                    .child(div().w(px(150.)).text_color(c_muted()).child(local(&a.ts)))
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .text_color(tok().muted)
+                            .child(local(&a.ts)),
+                    )
                     .child(
                         div()
                             .w(px(90.))
-                            .text_color(c_accent())
+                            .text_color(tok().accent)
                             .child(a.actor.clone()),
                     )
                     .child(
                         div()
-                            .text_color(if a.success {
-                                c_text()
-                            } else {
-                                rgb(0xf85149).into()
-                            })
+                            .text_color(if a.success { tok().fg } else { tok().err })
                             .child(a.action.clone()),
                     )
                     .child(
-                        div().text_color(c_muted()).child(
+                        div().text_color(tok().muted).child(
                             a.target
                                 .clone()
                                 .map(|t| t.chars().take(8).collect::<String>())
@@ -984,14 +1011,14 @@ impl Dashboard {
         }
         div().flex().flex_col().gap_4().p_4()
             .child(div().flex().gap_3()
-                .child(card("策略总数 Strategies", self.snap.strategies.len().to_string(), format!("{} sample-labelled", self.snap.strategies.iter().filter(|s| s.sample).count()), c_text()))
-                .child(card("已晋升 Promoted", count(StrategyStatus::Promoted).to_string(), format!("{} GatePassed, awaiting typed confirmation + vault", self.snap.strategies.iter().filter(|s| s.status == StrategyStatus::GatePassed).count()), rgb(0x3fb950).into()))
-                .child(card("沙箱任务 Jobs", self.snap.jobs.len().to_string(), format!("{running} running · {failed_jobs} failed/blocked"), c_accent()))
-                .child(card("全库试验 Library trials", self.snap.trials.to_string(), format!("N in the Deflated Sharpe Ratio · {} runs", self.snap.total_attempts), rgb(0xd29922).into())))
+                .child(card("策略总数 Strategies", self.snap.strategies.len().to_string(), format!("{} sample-labelled", self.snap.strategies.iter().filter(|s| s.sample).count()), tok().fg))
+                .child(card("已晋升 Promoted", count(StrategyStatus::Promoted).to_string(), format!("{} GatePassed, awaiting typed confirmation + vault", self.snap.strategies.iter().filter(|s| s.status == StrategyStatus::GatePassed).count()), tok().ok))
+                .child(card("沙箱任务 Jobs", self.snap.jobs.len().to_string(), format!("{running} running · {failed_jobs} failed/blocked"), tok().accent))
+                .child(card("全库试验 Library trials", self.snap.trials.to_string(), format!("N in the Deflated Sharpe Ratio · {} runs", self.snap.total_attempts), tok().warn)))
             .child(section("状态流转 State machine"))
-            .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).child(flow))
+            .child(div().p_3().rounded_lg().bg(tok().panel).border_1().border_color(tok().border).child(flow))
             .child(section("最佳开发期 Best development-window result (host-scored, after A-share costs; excludes Failed and lookahead/integrity rejections)"))
-            .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).text_sm().text_color(c_text()).child(match best {
+            .child(div().p_3().rounded_lg().bg(tok().panel).border_1().border_color(tok().border).text_sm().text_color(tok().fg).child(match best {
                 Some((j, r, label)) => {
                     let title = self.snap.strategies.iter().find(|s| s.id == j.strategy_id).map(|s| s.title.clone()).unwrap_or_default();
                     format!("[{label}] {title} · {} · net return {} · Sharpe {} · DSR {} (N={}) · MaxDD {} · data: {}", j.symbol, pct(&r["development"], "total_return"), num(&r["development"], "sharpe"),
@@ -1000,7 +1027,7 @@ impl Dashboard {
                 None => "暂无诚实的回测结果 no honest completed backtest (lookahead / integrity / failed runs are excluded)".into(),
             }))
             .child(section("最近审计 Recent audit"))
-            .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).child(recent))
+            .child(div().p_3().rounded_lg().bg(tok().panel).border_1().border_color(tok().border).child(recent))
     }
 
     fn library(&self, cx: &mut Context<Self>) -> Div {
@@ -1010,7 +1037,7 @@ impl Dashboard {
             .h_full()
             .overflow_y_scroll()
             .border_r_1()
-            .border_color(c_border())
+            .border_color(tok().border)
             .flex()
             .flex_col();
         for s in &self.snap.strategies {
@@ -1022,10 +1049,10 @@ impl Dashboard {
                         .id(SharedString::from(format!("row-{}", s.id)))
                         .p_3()
                         .border_b_1()
-                        .border_color(c_border())
+                        .border_color(tok().border)
                         .cursor_pointer()
-                        .when(sel, |d| d.bg(rgb(0x1d2733)))
-                        .hover(|d| d.bg(rgb(0x1a222c)))
+                        .when(sel, |d| d.bg(tok().active))
+                        .hover(|d| d.bg(tok().hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.selected = Some(id.clone());
                             this.pending_promote = None;
@@ -1037,18 +1064,18 @@ impl Dashboard {
                                 .gap_2()
                                 .items_center()
                                 .child(chip(s.status.as_str(), status_color(s.status)))
-                                .child(div().text_xs().text_color(c_muted()).child(format!(
+                                .child(div().text_xs().text_color(tok().muted).child(format!(
                                     "{} · try {}",
                                     &s.id[..8],
                                     s.attempts
                                 )))
-                                .when(s.sample, |d| d.child(chip("SAMPLE", c_muted()))),
+                                .when(s.sample, |d| d.child(chip("SAMPLE", tok().muted))),
                         )
                         .child(
                             div()
                                 .mt_1()
                                 .text_sm()
-                                .text_color(c_text())
+                                .text_color(tok().fg)
                                 .child(s.title.clone()),
                         )
                         .child(
@@ -1056,7 +1083,7 @@ impl Dashboard {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(div().flex_1().text_xs().text_color(c_muted()).child(
+                                .child(div().flex_1().text_xs().text_color(tok().muted).child(
                                     format!(
                                         "{} · {}",
                                         s.source_site,
@@ -1073,8 +1100,8 @@ impl Dashboard {
                                         .border_1()
                                         .text_xs()
                                         .cursor_pointer()
-                                        .border_color(if on { c_accent() } else { c_border() })
-                                        .text_color(if on { c_accent() } else { c_muted() })
+                                        .border_color(if on { tok().accent } else { tok().border })
+                                        .text_color(if on { tok().accent } else { tok().muted })
                                         .child(if on { "✓ compare" } else { "+ compare" })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if let Some(p) =
@@ -1117,7 +1144,7 @@ impl Dashboard {
             .as_ref()
             .and_then(|id| self.snap.strategies.iter().find(|s| &s.id == id))
         else {
-            return base.child(div().text_color(c_muted()).child("select a strategy"));
+            return base.child(div().text_color(tok().muted).child("select a strategy"));
         };
         let jobs: Vec<&JobRecord> = self
             .snap
@@ -1151,11 +1178,11 @@ impl Dashboard {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(c_text())
+                            .text_color(tok().fg)
                             .child(s.title.clone()),
                     ),
             )
-            .child(div().text_xs().text_color(c_muted()).child(format!(
+            .child(div().text_xs().text_color(tok().muted).child(format!(
                 "id {} · ingested {} · scraped {} · attempts {}",
                 s.id,
                 s.ingested_at.format("%Y-%m-%d %H:%M"),
@@ -1171,9 +1198,13 @@ impl Dashboard {
                 div()
                     .p_2()
                     .rounded_md()
-                    .bg(if good { rgb(0x16261b) } else { rgb(0x2a1d1d) })
+                    .bg(if good {
+                        tint(tok().ok)
+                    } else {
+                        tint(tok().err)
+                    })
                     .text_sm()
-                    .text_color(if good { rgb(0x7ee2a8) } else { rgb(0xffb4a8) })
+                    .text_color(if good { tok().ok } else { tok().err })
                     .child(format!(
                         "{} {r}",
                         if good {
@@ -1209,7 +1240,7 @@ impl Dashboard {
                             cx.notify();
                         })),
                 )
-                .child(div().text_xs().text_color(c_muted()).child(format!(
+                .child(div().text_xs().text_color(tok().muted).child(format!(
                     "{} · {}",
                     s.source_site,
                     s.source_url.clone().unwrap_or_default()
@@ -1221,25 +1252,25 @@ impl Dashboard {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(c_text())
+                        .text_color(tok().fg)
                         .child(e.summary.clone()),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(c_muted())
+                        .text_color(tok().muted)
                         .child(format!("假设 assumptions: {}", e.assumptions.join(" | "))),
                 )
-                .child(div().text_xs().text_color(c_accent()).child(format!(
+                .child(div().text_xs().text_color(tok().accent).child(format!(
                     "参数 params: {}",
                     serde_json::Value::Object(e.parameters.clone())
                 )));
             let mut risks = div().flex().flex_wrap().gap_1();
             for r in &e.risks {
                 let col: Hsla = match r.severity {
-                    cmsq_core::Severity::High => rgb(0xf85149).into(),
-                    cmsq_core::Severity::Warn => rgb(0xd29922).into(),
-                    _ => c_muted(),
+                    cmsq_core::Severity::High => tok().err,
+                    cmsq_core::Severity::Warn => tok().warn,
+                    _ => tok().muted,
                 };
                 risks = risks.child(chip(format!("{}: {}", r.code, r.message), col));
             }
@@ -1249,12 +1280,12 @@ impl Dashboard {
                     div()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0x0b0f14))
+                        .bg(tok().sunken)
                         .border_1()
-                        .border_color(c_border())
+                        .border_color(tok().border)
                         .text_xs()
                         .font_family("monospace")
-                        .text_color(rgb(0xc9d1d9))
+                        .text_color(tok().fg)
                         .child(code.clone()),
                 );
             }
@@ -1323,12 +1354,12 @@ impl Dashboard {
             let typed = self.confirm.read(cx).value().to_string();
             let matches = typed.trim() == phrase;
             let id4 = id.clone();
-            d = d.child(div().p_3().rounded_lg().border_1().border_color(rgb(0xd29922)).bg(rgb(0x2a2412)).flex().flex_col().gap_2()
-                .child(div().text_sm().text_color(rgb(0xf2cc60)).child(format!("确认台 Confirmation desk — \"{}\" passed the gate on development data. Promoting runs the ONE-TIME vault holdout ({} bars never shown to the strategy); a vault failure rejects it permanently. Signals stay OBSERVE-ONLY (no broker). Audited as user:dashboard.", s.title, "last 20%")))
-                .child(div().text_sm().text_color(c_text()).child(format!("Type  {phrase}  to enable the button:")))
+            d = d.child(callout(tok().warn).rounded_lg().flex().flex_col().gap_2()
+                .child(div().text_sm().text_color(tok().warn).child(format!("确认台 Confirmation desk — \"{}\" passed the gate on development data. Promoting runs the ONE-TIME vault holdout ({} bars never shown to the strategy); a vault failure rejects it permanently. Signals stay OBSERVE-ONLY (no broker). Audited as user:dashboard.", s.title, "last 20%")))
+                .child(div().text_sm().text_color(tok().fg).child(format!("Type  {phrase}  to enable the button:")))
                 .child(div().flex().gap_2().items_center()
                     .child(div().w(px(260.)).child(Input::new(&self.confirm)))
-                    .child(div().text_xs().text_color(if matches { rgb(0x3fb950) } else { rgb(0xf85149) }).child(if matches { "✓ matches" } else { "does not match yet" })))
+                    .child(div().text_xs().text_color(if matches { tok().ok } else { tok().err }).child(if matches { "✓ matches" } else { "does not match yet" })))
                 .child(div().flex().gap_2()
                     .child(Button::new("confirm").primary().disabled(!matches).label("确认晋升并运行 vault  Confirm & run vault").on_click(cx.listener(move |this, _, _, cx| {
                         let typed = this.confirm.read(cx).value().to_string();
@@ -1345,7 +1376,7 @@ impl Dashboard {
             .gap_0p5()
             .pl_2()
             .border_l_2()
-            .border_color(c_border());
+            .border_color(tok().border);
         for a in timeline.iter().rev().filter(|a| {
             a.action.starts_with("transition")
                 || a.action.starts_with("vault")
@@ -1368,25 +1399,21 @@ impl Dashboard {
                         div()
                             .w(px(110.))
                             .flex_none()
-                            .text_color(c_muted())
+                            .text_color(tok().muted)
                             .child(local(&a.ts)),
                     )
                     .child(
                         div()
                             .w(px(90.))
                             .flex_none()
-                            .text_color(c_accent())
+                            .text_color(tok().accent)
                             .child(a.actor.clone()),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(if a.success {
-                                c_text()
-                            } else {
-                                rgb(0xf85149).into()
-                            })
+                            .text_color(if a.success { tok().fg } else { tok().err })
                             .child(format!("{label}{reason}")),
                     ),
             );
@@ -1407,7 +1434,7 @@ impl Dashboard {
                     d = d.child(
                         div()
                             .text_xs()
-                            .text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) })
+                            .text_color(if ok { tok().ok } else { tok().err })
                             .child(format!(
                                 "{} {} — {}",
                                 if ok { "✓" } else { "✗" },
@@ -1443,10 +1470,10 @@ impl Dashboard {
                     div()
                         .p_2()
                         .rounded_md()
-                        .bg(c_panel())
+                        .bg(tok().panel)
                         .border_1()
-                        .border_color(c_border())
-                        .child(equity_chart(&pts, split, 120.)),
+                        .border_color(tok().border)
+                        .child(equity_chart("detail-eq", &pts, split, 120.)),
                 );
         }
         d = d.child(section("回测与日志 Runs & logs"));
@@ -1457,27 +1484,27 @@ impl Dashboard {
             } else {
                 r["development"].clone()
             };
-            d = d.child(div().p_2().rounded_md().bg(c_panel()).border_1().border_color(c_border()).flex().flex_col().gap_1()
-                .child(div().text_xs().text_color(c_text()).child(format!("{} job {} · {} · {} · {} · {} ms · {}", j.kind, &j.id[..8], j.backend, j.status, j.symbol, j.duration_ms.unwrap_or(0), j.data_source)))
-                .child(div().text_xs().text_color(c_muted()).child(format!("runner (from backend): {}", j.runner_identity.clone().unwrap_or_else(|| "-".into()))))
+            d = d.child(div().p_2().rounded_md().bg(tok().panel).border_1().border_color(tok().border).flex().flex_col().gap_1()
+                .child(div().text_xs().text_color(tok().fg).child(format!("{} job {} · {} · {} · {} · {} ms · {}", j.kind, &j.id[..8], j.backend, j.status, j.symbol, j.duration_ms.unwrap_or(0), j.data_source)))
+                .child(div().text_xs().text_color(tok().muted).child(format!("runner (from backend): {}", j.runner_identity.clone().unwrap_or_else(|| "-".into()))))
                 .when(j.status == "succeeded" && j.kind == "dev", |x| x
-                    .child(div().text_xs().text_color(c_muted()).child(format!("dev window {}..{} ({} bars, {} warm-up) · vault {}..{} kept back",
+                    .child(div().text_xs().text_color(tok().muted).child(format!("dev window {}..{} ({} bars, {} warm-up) · vault {}..{} kept back",
                         r["split"]["development"]["start"].as_str().unwrap_or(""), r["split"]["development"]["end"].as_str().unwrap_or(""), r["split"]["development"]["bars"], r["split"]["development"]["warmup_bars"],
                         r["split"]["vault"]["start"].as_str().unwrap_or(""), r["split"]["vault"]["end"].as_str().unwrap_or(""))))
-                    .child(div().text_xs().text_color(c_accent()).child(format!("net return {} · Sharpe {} · MaxDD {} · DSR {} (N={}) · folds +{}/{} · 2x costs {} · buy&hold {}",
+                    .child(div().text_xs().text_color(tok().accent).child(format!("net return {} · Sharpe {} · MaxDD {} · DSR {} (N={}) · folds +{}/{} · 2x costs {} · buy&hold {}",
                         pct(&m, "total_return"), num(&m, "sharpe"), pct(&m, "max_drawdown"), r["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or_default(), r["dsr"]["trials"],
                         r["walk_forward_folds"].as_array().map(|f| f.iter().filter(|x| x["total_return"].as_f64().unwrap_or(0.0) > 0.0).count()).unwrap_or(0), r["walk_forward_folds"].as_array().map(|f| f.len()).unwrap_or(0),
                         pct(&r["development_cost_2x"], "total_return"), pct(&r["buy_and_hold"], "total_return"))))
-                    .child(div().text_xs().text_color(c_muted()).child(format!("{} · trades {} · blocked limit-up {} / limit-down {} / suspended {} · costs paid ¥{:.0} · probe: {} containers, {}",
+                    .child(div().text_xs().text_color(tok().muted).child(format!("{} · trades {} · blocked limit-up {} / limit-down {} / suspended {} · costs paid ¥{:.0} · probe: {} containers, {}",
                         r["execution"].as_str().unwrap_or(""), r["trades"], r["blocked"]["limit_up"], r["blocked"]["limit_down"], r["blocked"]["suspended"], r["costs_paid"].as_f64().unwrap_or(0.0),
                         r["lookahead_probe"]["containers"], if r["lookahead_probe"]["detected"].as_bool() == Some(false) { "clean" } else { "LOOK-AHEAD" })))
-                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(c_muted()).child(l))))
-                .when(j.status == "succeeded" && j.kind == "vault", |x| x.child(div().text_xs().text_color(rgb(0xa371f7)).child(format!("vault {}..{} · net return {} · Sharpe {} · {}",
+                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(tok().muted).child(l))))
+                .when(j.status == "succeeded" && j.kind == "vault", |x| x.child(div().text_xs().text_color(tok().vault).child(format!("vault {}..{} · net return {} · Sharpe {} · {}",
                     m["start"].as_str().unwrap_or(""), m["end"].as_str().unwrap_or(""), pct(&m, "total_return"), num(&m, "sharpe"), if r["passed"].as_bool() == Some(true) { "PASSED" } else { "FAILED" })))
-                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(c_muted()).child(l)))
-                    .when_some(qifi_line(&r).filter(|_| r["passed"] == true), |x, l| x.child(div().text_xs().text_color(rgb(0x7ee2a8)).child(l))))
-                .when(j.error.is_some(), |x| x.child(div().text_xs().font_family("monospace").text_color(rgb(0xffb4a8)).child(j.error.clone().unwrap_or_default())))
-                .child(div().text_xs().text_color(c_muted()).child(format!("logs: {}/variants/NN/{{stdout,stderr}}.log", j.job_dir))));
+                    .when_some(trade_stats_line(&r), |x, l| x.child(div().text_xs().text_color(tok().muted).child(l)))
+                    .when_some(qifi_line(&r).filter(|_| r["passed"] == true), |x, l| x.child(div().text_xs().text_color(tok().ok).child(l))))
+                .when(j.error.is_some(), |x| x.child(div().text_xs().font_family("monospace").text_color(tok().err).child(j.error.clone().unwrap_or_default())))
+                .child(div().text_xs().text_color(tok().muted).child(format!("logs: {}/variants/NN/{{stdout,stderr}}.log", j.job_dir))));
         }
         d
     }
@@ -1492,7 +1519,7 @@ impl Dashboard {
             .overflow_y_scroll()
             .size_full();
         if self.compare.is_empty() {
-            return d.child(div().text_color(c_muted()).child("在策略库中点击 “+ compare” 选择 2–4 个策略进行对比 · pick strategies with “+ compare” in the library"));
+            return d.child(div().text_color(tok().muted).child("在策略库中点击 “+ compare” 选择 2–4 个策略进行对比 · pick strategies with “+ compare” in the library"));
         }
         let cols = [
             "STRATEGY", "STATUS", "SYMBOL", "NET RET", "SHARPE", "DSR (N)", "FOLDS+", "MAX DD",
@@ -1503,10 +1530,10 @@ impl Dashboard {
             .flex()
             .gap_2()
             .text_xs()
-            .text_color(c_muted())
+            .text_color(tok().muted)
             .pb_1()
             .border_b_1()
-            .border_color(c_border());
+            .border_color(tok().border);
         for (c, w) in cols.iter().zip(w) {
             hdr = hdr.child(div().w(px(w)).flex_none().child(*c));
         }
@@ -1568,7 +1595,7 @@ impl Dashboard {
                         .text_color(if i == 1 {
                             status_color(s.status)
                         } else {
-                            c_text()
+                            tok().fg
                         })
                         .child(v.clone()),
                 );
@@ -1579,10 +1606,15 @@ impl Dashboard {
                     div()
                         .p_2()
                         .rounded_md()
-                        .bg(c_panel())
+                        .bg(tok().panel)
                         .border_1()
-                        .border_color(c_border())
-                        .child(equity_chart(&read_equity(&j.job_dir), None, 60.)),
+                        .border_color(tok().border)
+                        .child(equity_chart(
+                            &j.job_dir,
+                            &read_equity(&j.job_dir),
+                            None,
+                            60.,
+                        )),
                 );
             }
         }
@@ -1592,11 +1624,10 @@ impl Dashboard {
     fn log_panel(&self) -> Div {
         let g = self.progress.lock().unwrap();
         let mut p = div()
-            .h(px(132.))
-            .flex_none()
+            .size_full()
             .border_t_1()
-            .border_color(c_border())
-            .bg(rgb(0x0b0f14))
+            .border_color(tok().border)
+            .bg(tok().sunken)
             .p_2()
             .flex()
             .flex_col()
@@ -1606,9 +1637,9 @@ impl Dashboard {
                 div()
                     .text_xs()
                     .text_color(if g.running.is_some() {
-                        rgb(0xd29922).into()
+                        tok().warn
                     } else {
-                        c_muted()
+                        tok().muted
                     })
                     .child(match &g.running {
                         Some(l) => format!("● RUNNING (background thread, UI stays live): {l}"),
@@ -1628,7 +1659,7 @@ impl Dashboard {
                 div()
                     .text_xs()
                     .font_family("monospace")
-                    .text_color(rgb(0xc9d1d9))
+                    .text_color(tok().fg)
                     .child(l.clone()),
             );
         }
@@ -1649,10 +1680,10 @@ impl Dashboard {
                     .flex()
                     .gap_2()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .pb_2()
                     .border_b_1()
-                    .border_color(c_border())
+                    .border_color(tok().border)
                     .child(div().w(px(80.)).flex_none().child("JOB"))
                     .child(div().w(px(150.)).flex_none().child("BACKEND"))
                     .child(div().w(px(150.)).flex_none().child("STATUS"))
@@ -1677,12 +1708,12 @@ impl Dashboard {
                     .text_xs()
                     .py_1()
                     .border_b_1()
-                    .border_color(c_border())
+                    .border_color(tok().border)
                     .child(
                         div()
                             .w(px(80.))
                             .flex_none()
-                            .text_color(c_text())
+                            .text_color(tok().fg)
                             .child(format!("{} {}", &j.id[..6], j.kind)),
                     )
                     .child(
@@ -1690,9 +1721,9 @@ impl Dashboard {
                             .w(px(150.))
                             .flex_none()
                             .text_color(if j.backend == "docker" {
-                                c_accent()
+                                tok().accent
                             } else {
-                                rgb(0xd29922).into()
+                                tok().warn
                             })
                             .child(j.backend.clone()),
                     )
@@ -1700,25 +1731,25 @@ impl Dashboard {
                         div()
                             .w(px(150.))
                             .flex_none()
-                            .text_color(if ok { rgb(0x3fb950) } else { rgb(0xf85149) })
+                            .text_color(if ok { tok().ok } else { tok().err })
                             .child(j.status.clone()),
                     )
                     .child(
                         div()
                             .w(px(120.))
                             .flex_none()
-                            .text_color(c_text())
+                            .text_color(tok().fg)
                             .child(j.symbol.clone()),
                     )
                     .child(
                         div()
                             .w(px(80.))
                             .flex_none()
-                            .text_color(c_muted())
+                            .text_color(tok().muted)
                             .child(j.duration_ms.unwrap_or(0).to_string()),
                     )
                     .child(
-                        div().w(px(110.)).flex_none().text_color(c_text()).child(
+                        div().w(px(110.)).flex_none().text_color(tok().fg).child(
                             j.result
                                 .as_ref()
                                 .map(|r| {
@@ -1739,7 +1770,7 @@ impl Dashboard {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .text_color(c_muted())
+                            .text_color(tok().muted)
                             .child(format!(
                                 "{title}{}",
                                 j.error
@@ -1754,16 +1785,16 @@ impl Dashboard {
     }
 
     fn data_view(&self) -> Stateful<Div> {
-        let red: Hsla = rgb(0xf85149).into();
-        let green: Hsla = rgb(0x3fb950).into();
-        let amber: Hsla = rgb(0xd29922).into();
+        let red: Hsla = tok().err;
+        let green: Hsla = tok().ok;
+        let amber: Hsla = tok().warn;
         let mut d = div().id("data").p_4().flex().flex_col().gap_2().overflow_y_scroll().size_full()
             .child(section("数据源健康 Source health (router priority order; persisted in data/_sources_health.json)"));
         if self.snap.health.is_empty() {
             d = d.child(
                 div()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .child("no router fetches yet — `cmsq data fetch SH600519`"),
             );
         }
@@ -1780,15 +1811,15 @@ impl Dashboard {
             } else if h.ok > 0 {
                 ("HEALTHY", green)
             } else {
-                ("UNUSED", c_muted())
+                ("UNUSED", tok().muted)
             };
             d = d.child(
                 div()
                     .p_2()
                     .rounded_md()
-                    .bg(c_panel())
+                    .bg(tok().panel)
                     .border_1()
-                    .border_color(c_border())
+                    .border_color(tok().border)
                     .flex()
                     .gap_3()
                     .items_center()
@@ -1796,12 +1827,12 @@ impl Dashboard {
                     .child(
                         div()
                             .w(px(80.))
-                            .text_color(c_text())
+                            .text_color(tok().fg)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(name.clone()),
                     )
                     .child(chip(txt, col))
-                    .child(div().text_color(c_muted()).child(format!(
+                    .child(div().text_color(tok().muted).child(format!(
                         "ok {} · fail {} · last ok {} · {}",
                         h.ok,
                         h.fail,
@@ -1827,9 +1858,9 @@ impl Dashboard {
             let mut row = div()
                 .p_3()
                 .rounded_md()
-                .bg(c_panel())
+                .bg(tok().panel)
                 .border_1()
-                .border_color(c_border())
+                .border_color(tok().border)
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -1843,18 +1874,18 @@ impl Dashboard {
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(c_text())
+                                .text_color(tok().fg)
                                 .child(m.symbol.clone()),
                         )
-                        .child(div().text_color(c_accent()).child(m.source.clone()))
-                        .child(div().text_color(c_muted()).child(format!(
+                        .child(div().text_color(tok().accent).child(m.source.clone()))
+                        .child(div().text_color(tok().muted).child(format!(
                             "{} bars · {} .. {} · fetched {}",
                             m.bars,
                             m.start,
                             m.end,
                             local(&m.fetched_at)
                         )))
-                        .child(div().text_color(c_muted()).child(m.label.clone())),
+                        .child(div().text_color(tok().muted).child(m.label.clone())),
                 );
             match a {
                 Ok(at) => {
@@ -1898,19 +1929,22 @@ impl Dashboard {
                                         red
                                     },
                                 ))
-                                .child(div().text_color(c_muted()).font_family("monospace").child(
-                                    format!(
+                                .child(
+                                    div()
+                                        .text_color(tok().muted)
+                                        .font_family("monospace")
+                                        .child(format!(
                                             "snapshot {}",
                                             at["snapshot_sha256"]
                                                 .as_str()
                                                 .map(|x| &x[..16])
                                                 .unwrap_or("-")
-                                        ),
-                                )),
+                                        )),
+                                ),
                         )
                         .child(
                             div()
-                                .text_color(if vok { c_muted() } else { red })
+                                .text_color(if vok { tok().muted } else { red })
                                 .child(at["validation_detail"].as_str().unwrap_or("").to_string()),
                         );
                     if let Some(sample) = at["validation"]["divergent_sample"]
@@ -1953,12 +1987,12 @@ impl Dashboard {
 
     fn signals(&self) -> Div {
         let mut d = div().p_4().flex().flex_col().gap_2()
-            .child(div().p_3().rounded_md().border_1().border_color(rgb(0xd29922)).text_sm().text_color(rgb(0xf2cc60))
+            .child(callout(tok().warn)
                 .child("仅观察 OBSERVE-ONLY：未连接任何券商/实盘接口；信号仅来自人工确认晋升的策略。No broker is connected."));
         if self.snap.signals.is_empty() {
             d = d.child(
                 div()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .child("no signals yet — promote a strategy that passed the gate"),
             );
         }
@@ -1967,22 +2001,22 @@ impl Dashboard {
                 div()
                     .p_3()
                     .rounded_md()
-                    .bg(c_panel())
+                    .bg(tok().panel)
                     .border_1()
-                    .border_color(c_border())
+                    .border_color(tok().border)
                     .flex()
                     .gap_4()
                     .text_sm()
-                    .child(div().text_color(c_text()).child(s.date.clone()))
-                    .child(div().text_color(c_accent()).child(s.symbol.clone()))
+                    .child(div().text_color(tok().fg).child(s.date.clone()))
+                    .child(div().text_color(tok().accent).child(s.symbol.clone()))
                     .child(
                         div()
-                            .text_color(c_text())
+                            .text_color(tok().fg)
                             .child(format!("target position {:.2}", s.target_position)),
                     )
                     .child(
                         div()
-                            .text_color(c_muted())
+                            .text_color(tok().muted)
                             .child(format!("{title} [{st}] · job {}", &s.job_id[..8])),
                     ),
             );
@@ -1992,11 +2026,11 @@ impl Dashboard {
 
     fn paper(&self) -> Stateful<Div> {
         let mut d = div().id("paper").p_4().flex().flex_col().gap_2().overflow_y_scroll()
-            .child(div().p_3().rounded_md().border_1().border_color(rgb(0xd29922)).text_sm().text_color(rgb(0xf2cc60))
+            .child(callout(tok().warn)
                 .child("模拟撮合 SIMULATED：按交易所行情模拟成交，无券商接口、不会发出真实委托。Simulated fills against exchange quotes; no broker, no real orders."));
         if self.snap.paper.is_empty() {
             d =
-                d.child(div().text_color(c_muted()).child(
+                d.child(div().text_color(tok().muted).child(
                     "no paper sessions yet — `cmsq paper run --strategy <promoted id> ...`",
                 ));
         }
@@ -2008,27 +2042,27 @@ impl Dashboard {
             let mut card = div()
                 .p_3()
                 .rounded_md()
-                .bg(c_panel())
+                .bg(tok().panel)
                 .border_1()
-                .border_color(c_border())
+                .border_color(tok().border)
                 .flex()
                 .flex_col()
                 .gap_1()
                 .text_sm()
-                .child(div().text_color(c_accent()).child(format!(
+                .child(div().text_color(tok().accent).child(format!(
                     "{}  [{}]  strategy {}",
                     p.id,
                     p.status,
                     &p.strategy[..8.min(p.strategy.len())]
                 )))
-                .child(div().text_color(c_text()).child(format!(
+                .child(div().text_color(tok().fg).child(format!(
                     "equity {eq:.2} · cash {cash:.2} · margin {margin:.2} · fees {:.2} · day {}",
                     a["fees"].as_f64().unwrap_or(0.0),
                     a["trading_day"].as_str().unwrap_or("-")
                 )));
             if let Some(pos) = a["positions"].as_object() {
                 for (sym, x) in pos {
-                    card = card.child(div().text_color(c_text()).child(format!(
+                    card = card.child(div().text_color(tok().fg).child(format!(
                         "  {sym}: long {} (today {}) @ {:.2} · short {} (today {}) @ {:.2}",
                         x["long_today"].as_i64().unwrap_or(0) + x["long_yd"].as_i64().unwrap_or(0),
                         x["long_today"],
@@ -2041,30 +2075,57 @@ impl Dashboard {
                 }
             }
             if p.curve.len() > 1 {
-                let pts: Vec<String> = p
+                let pts: Vec<(String, f64)> = p
                     .curve
                     .iter()
-                    .map(|c| format!("{}:{:.0}", c.1.clone().unwrap_or_default(), c.2))
+                    .map(|c| (c.1.clone().unwrap_or_default(), c.2))
                     .collect();
-                card = card.child(
-                    div()
-                        .text_xs()
-                        .text_color(c_muted())
-                        .child(format!("equity by settlement: {}", pts.join("  "))),
-                );
+                card = card
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tok().muted)
+                            .child("equity by settlement 结算权益"),
+                    )
+                    .child(equity_chart(&format!("paper-{}", p.id), &pts, None, 140.));
             }
-            for f in &p.fills {
-                card = card.child(div().text_xs().text_color(c_muted()).child(format!(
-                    "fill #{} {} {} {} {} @ {} fee {:.2} · {}",
-                    f["order_id"],
-                    f["symbol"].as_str().unwrap_or(""),
-                    f["side"].as_str().unwrap_or(""),
-                    f["offset"].as_str().unwrap_or(""),
-                    f["qty"],
-                    f["price"],
-                    f["fee"].as_f64().unwrap_or(0.0),
-                    f["ts"].as_str().unwrap_or("")
-                )));
+            if !p.fills.is_empty() {
+                let h = |t: &'static str| TableHead::new().child(t);
+                let mut body = TableBody::new();
+                for f in &p.fills {
+                    let c = |v: String| TableCell::new().text_color(tok().muted).child(v);
+                    body = body.child(
+                        TableRow::new()
+                            .child(c(format!("#{}", f["order_id"])))
+                            .child(c(f["symbol"].as_str().unwrap_or("").to_string()))
+                            .child(c(format!(
+                                "{} {}",
+                                f["side"].as_str().unwrap_or(""),
+                                f["offset"].as_str().unwrap_or("")
+                            )))
+                            .child(c(f["qty"].to_string()))
+                            .child(c(f["price"].to_string()))
+                            .child(c(format!("{:.2}", f["fee"].as_f64().unwrap_or(0.0))))
+                            .child(c(f["ts"].as_str().unwrap_or("").to_string())),
+                    );
+                }
+                card = card.child(
+                    Table::new()
+                        .xsmall()
+                        .child(
+                            TableHeader::new().child(
+                                TableRow::new()
+                                    .child(h("fill"))
+                                    .child(h("symbol"))
+                                    .child(h("side"))
+                                    .child(h("qty"))
+                                    .child(h("price"))
+                                    .child(h("fee"))
+                                    .child(h("ts")),
+                            ),
+                        )
+                        .child(body),
+                );
             }
             d = d.child(card);
         }
@@ -2078,7 +2139,7 @@ impl Dashboard {
             .h_full()
             .overflow_y_scroll()
             .border_r_1()
-            .border_color(c_border())
+            .border_color(tok().border)
             .flex()
             .flex_col();
         if self.snap.runs.is_empty() {
@@ -2086,7 +2147,7 @@ impl Dashboard {
                 div()
                     .p_3()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .child("no sweep/portfolio runs yet — `cmsq sweep` / `cmsq portfolio`"),
             );
         }
@@ -2129,10 +2190,10 @@ impl Dashboard {
                     .id(SharedString::from(format!("run-{}", r.id)))
                     .p_3()
                     .border_b_1()
-                    .border_color(c_border())
+                    .border_color(tok().border)
                     .cursor_pointer()
-                    .when(on, |d| d.bg(rgb(0x1d2733)))
-                    .hover(|d| d.bg(rgb(0x1a222c)))
+                    .when(on, |d| d.bg(tok().active))
+                    .hover(|d| d.bg(tok().hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_sel = Some(id.clone());
                         cx.notify();
@@ -2145,27 +2206,27 @@ impl Dashboard {
                             .child(chip(
                                 r.kind.clone(),
                                 if r.kind == "sweep" || r.kind == "ga" {
-                                    c_accent()
+                                    tok().accent
                                 } else {
-                                    rgb(0xa371f7).into()
+                                    tok().vault
                                 },
                             ))
                             .child(chip(
                                 r.status.clone(),
                                 if r.status == "succeeded" {
-                                    rgb(0x3fb950).into()
+                                    tok().ok
                                 } else {
-                                    rgb(0xf85149).into()
+                                    tok().err
                                 },
                             ))
-                            .child(div().text_xs().text_color(c_muted()).child(format!(
+                            .child(div().text_xs().text_color(tok().muted).child(format!(
                                 "{} · {}",
                                 &r.id[..8],
                                 local(&r.created_at)
                             ))),
                     )
-                    .child(div().mt_1().text_sm().text_color(c_text()).child(title))
-                    .child(div().text_xs().text_color(c_muted()).child(what)),
+                    .child(div().mt_1().text_sm().text_color(tok().fg).child(title))
+                    .child(div().text_xs().text_color(tok().muted).child(what)),
             );
         }
         let detail = match self.snap.runs.iter().find(|r| Some(&r.id) == sel.as_ref()) {
@@ -2189,8 +2250,8 @@ impl Dashboard {
         if r.kind == "sweep" || r.kind == "ga" {
             let best = &res["best"];
             d = d.child(section(&format!("参数扫描 Sweep {} · {}", &r.id[..8], r.spec["symbol"].as_str().unwrap_or(""))))
-                .child(div().text_xs().text_color(c_muted()).child("每个扫描点都是一次独立试验，计入全库 DSR 试验账本；最优点按最终账本 N 重新计算 DSR。Every point is a trial in the library ledger; the best point is re-deflated against the final N."))
-                .child(div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).text_sm().child(format!(
+                .child(div().text_xs().text_color(tok().muted).child("每个扫描点都是一次独立试验，计入全库 DSR 试验账本；最优点按最终账本 N 重新计算 DSR。Every point is a trial in the library ledger; the best point is re-deflated against the final N."))
+                .child(div().p_3().rounded_lg().bg(tok().panel).border_1().border_color(tok().border).text_sm().child(format!(
                     "best {}  params {}  →  {}   Sharpe {}  return {}   DSR(final ledger) {} over N={}",
                     best["job"].as_str().map(|j| &j[..8.min(j.len())]).unwrap_or("-"), best["params"], res["status"].as_str().unwrap_or("-"),
                     num(&best["development"], "sharpe"), pct(&best["development"], "total_return"),
@@ -2200,7 +2261,7 @@ impl Dashboard {
                     d = d.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0xf0883e))
+                            .text_color(tok().caution)
                             .child(format!("✗ {}", x.as_str().unwrap_or(""))),
                     );
                 }
@@ -2210,14 +2271,14 @@ impl Dashboard {
                 .flex_col()
                 .p_3()
                 .rounded_lg()
-                .bg(c_panel())
+                .bg(tok().panel)
                 .border_1()
-                .border_color(c_border())
+                .border_color(tok().border)
                 .child(
                     div()
                         .flex()
                         .text_xs()
-                        .text_color(c_muted())
+                        .text_color(tok().muted)
                         .gap_2()
                         .child(div().w(px(40.)).child("#"))
                         .child(div().w(px(260.)).child("params"))
@@ -2236,11 +2297,11 @@ impl Dashboard {
                         .text_xs()
                         .gap_2()
                         .py_0p5()
-                        .when(is_best, |x| x.bg(rgb(0x1d3324)))
+                        .when(is_best, |x| x.bg(tint(tok().ok)))
                         .child(
                             div()
                                 .w(px(40.))
-                                .text_color(c_muted())
+                                .text_color(tok().muted)
                                 .child(p["point"].to_string()),
                         )
                         .child(
@@ -2253,9 +2314,9 @@ impl Dashboard {
                             div()
                                 .w(px(90.))
                                 .text_color(if p["status"] == "succeeded" {
-                                    c_text()
+                                    tok().fg
                                 } else {
-                                    rgb(0xf85149).into()
+                                    tok().err
                                 })
                                 .child(p["status"].as_str().unwrap_or("").to_string()),
                         )
@@ -2269,7 +2330,7 @@ impl Dashboard {
                                     .unwrap_or("-".into()),
                             ),
                         )
-                        .child(div().text_color(rgb(0xf85149)).child(
+                        .child(div().text_color(tok().err).child(
                             if p["lookahead"].as_bool() == Some(true) {
                                 "LOOK-AHEAD"
                             } else {
@@ -2277,7 +2338,7 @@ impl Dashboard {
                             },
                         ))
                         .when(is_best, |x| {
-                            x.child(div().text_color(rgb(0x3fb950)).child("★ best"))
+                            x.child(div().text_color(tok().ok).child("★ best"))
                         }),
                 );
             }
@@ -2285,14 +2346,14 @@ impl Dashboard {
         } else {
             let pm = &res["portfolio"];
             d = d.child(section(&format!("组合回测 Portfolio {} · {}", &r.id[..8], res["alloc"])))
-                .child(div().text_xs().text_color(c_muted()).child(format!("一个账户共享现金，先卖后买；只用各标的共同的开发期日期 {} .. {}（{} bars），金库数据从不使用。组合不可晋升（P1 门禁仅供参考）。",
+                .child(div().text_xs().text_color(tok().muted).child(format!("一个账户共享现金，先卖后买；只用各标的共同的开发期日期 {} .. {}（{} bars），金库数据从不使用。组合不可晋升（P1 门禁仅供参考）。",
                     res["window"]["start"].as_str().unwrap_or(""), res["window"]["end"].as_str().unwrap_or(""), res["window"]["bars"])))
                 .child(div().flex().gap_3()
-                    .child(card("组合收益 Return", pct(pm, "total_return"), format!("Sharpe {} · MaxDD {}", num(pm, "sharpe"), pct(pm, "max_drawdown")), c_text()))
-                    .child(card("2× 成本 Cost ×2", pct(&res["portfolio_cost_2x"], "total_return"), format!("Sharpe {}", num(&res["portfolio_cost_2x"], "sharpe")), rgb(0xd29922).into()))
-                    .child(card("等权持有 EW buy&hold", pct(&res["equal_weight_buy_and_hold"], "total_return"), format!("Sharpe {}", num(&res["equal_weight_buy_and_hold"], "sharpe")), c_muted()))
+                    .child(card("组合收益 Return", pct(pm, "total_return"), format!("Sharpe {} · MaxDD {}", num(pm, "sharpe"), pct(pm, "max_drawdown")), tok().fg))
+                    .child(card("2× 成本 Cost ×2", pct(&res["portfolio_cost_2x"], "total_return"), format!("Sharpe {}", num(&res["portfolio_cost_2x"], "sharpe")), tok().warn))
+                    .child(card("等权持有 EW buy&hold", pct(&res["equal_weight_buy_and_hold"], "total_return"), format!("Sharpe {}", num(&res["equal_weight_buy_and_hold"], "sharpe")), tok().muted))
                     .child(card("DSR", res["dsr"]["dsr"].as_f64().map(|x| format!("{x:.3}")).unwrap_or("-".into()), format!("N={} library trials · trades {}", res["dsr"]["trials"], res["trades"]),
-                        if res["gate"]["passed"].as_bool() == Some(true) { rgb(0x3fb950).into() } else { rgb(0xf0883e).into() })));
+                        if res["gate"]["passed"].as_bool() == Some(true) { tok().ok } else { tok().caution })));
             // metrics start after the warm-up bars (allocation look-back); chart the same window
             let warm = res["window"]["warmup_bars"].as_u64().unwrap_or(0) as usize;
             let pts: Vec<(String, f64)> = read_equity(&r_dir(&self.home, &r.id))
@@ -2307,10 +2368,10 @@ impl Dashboard {
                     div()
                         .p_3()
                         .rounded_lg()
-                        .bg(c_panel())
+                        .bg(tok().panel)
                         .border_1()
-                        .border_color(c_border())
-                        .child(equity_chart(&pts, None, 160.)),
+                        .border_color(tok().border)
+                        .child(equity_chart("portfolio-eq", &pts, None, 160.)),
                 );
             let mut legs = div()
                 .flex()
@@ -2318,9 +2379,9 @@ impl Dashboard {
                 .gap_1()
                 .p_3()
                 .rounded_lg()
-                .bg(c_panel())
+                .bg(tok().panel)
                 .border_1()
-                .border_color(c_border());
+                .border_color(tok().border);
             for l in res["legs"].as_array().cloned().unwrap_or_default() {
                 legs =
                     legs.child(
@@ -2331,7 +2392,7 @@ impl Dashboard {
                             .child(
                                 div()
                                     .w(px(130.))
-                                    .text_color(c_accent())
+                                    .text_color(tok().accent)
                                     .child(l["symbol"].as_str().unwrap_or("").to_string()),
                             )
                             .child(
@@ -2343,7 +2404,7 @@ impl Dashboard {
                                 "return {}",
                                 pct(&l["development"], "total_return")
                             )))
-                            .child(div().text_color(c_muted()).child(format!(
+                            .child(div().text_color(tok().muted).child(format!(
                                     "job {}",
                                     l["job"]
                                         .as_str()
@@ -2357,7 +2418,7 @@ impl Dashboard {
                     "各腿 Legs (each leg is its own sandbox job with the full look-ahead probe)",
                 ))
                 .child(legs)
-                .child(div().text_xs().text_color(c_muted()).child(format!(
+                .child(div().text_xs().text_color(tok().muted).child(format!(
                         "leg return correlation: {}",
                         res["leg_return_correlation"]
                             .as_array()
@@ -2383,7 +2444,7 @@ impl Dashboard {
                 d = d.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0xf0883e))
+                        .text_color(tok().caution)
                         .child(format!("✗ {}", x.as_str().unwrap_or(""))),
                 );
             }
@@ -2404,7 +2465,7 @@ impl Dashboard {
             d = d.child(
                 div()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .child("no futures dataset yet — `cmsq data fetch FUT_RB`"),
             );
         }
@@ -2412,17 +2473,17 @@ impl Dashboard {
             let sp = &m.extra["spec"];
             let rolls = m.extra["rolls"].as_array().cloned().unwrap_or_default();
             let val = &m.extra["validation"];
-            let mut box_ = div().p_3().rounded_lg().bg(c_panel()).border_1().border_color(c_border()).flex().flex_col().gap_1()
+            let mut box_ = div().p_3().rounded_lg().bg(tok().panel).border_1().border_color(tok().border).flex().flex_col().gap_1()
                 .child(div().flex().gap_2().items_center()
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(m.symbol.clone()))
-                    .child(chip(format!("{} {}", sp["exchange"].as_str().unwrap_or(""), sp["product"].as_str().unwrap_or("")), c_accent()))
-                    .child(chip(format!("validation: {}", val["status"].as_str().unwrap_or("none")), if val["status"] == "ok" { rgb(0x3fb950).into() } else { rgb(0xd29922).into() }))
-                    .child(div().text_xs().text_color(c_muted()).child(format!("{} bars · {} · source {}", m.bars, m.label, m.source))))
+                    .child(chip(format!("{} {}", sp["exchange"].as_str().unwrap_or(""), sp["product"].as_str().unwrap_or("")), tok().accent))
+                    .child(chip(format!("validation: {}", val["status"].as_str().unwrap_or("none")), if val["status"] == "ok" { tok().ok } else { tok().warn }))
+                    .child(div().text_xs().text_color(tok().muted).child(format!("{} bars · {} · source {}", m.bars, m.label, m.source))))
                 .child(div().text_xs().child(format!("multiplier {} · tick {} · margin {:.0}% · limit ±{:.0}% · fee {} · night {}",
                     sp["multiplier"], sp["tick"], sp["margin_rate"].as_f64().unwrap_or(0.0) * 100.0, sp["limit_pct"].as_f64().unwrap_or(0.0) * 100.0, sp["fee"],
                     sp["night"].as_array().map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("–")).unwrap_or("none".into()))))
-                .child(div().text_xs().text_color(c_muted()).child(val["note"].as_str().unwrap_or("").to_string()))
-                .child(div().text_xs().text_color(c_muted()).child(format!("main-contract rolls: {} (open-interest lead confirmed over 3 closes, effective next day, never rolls back; both legs pay fees + slippage)", rolls.len())));
+                .child(div().text_xs().text_color(tok().muted).child(val["note"].as_str().unwrap_or("").to_string()))
+                .child(div().text_xs().text_color(tok().muted).child(format!("main-contract rolls: {} (open-interest lead confirmed over 3 closes, effective next day, never rolls back; both legs pay fees + slippage)", rolls.len())));
             let mut rl = div().flex().flex_wrap().gap_2();
             for r in rolls.iter().rev().take(16) {
                 rl = rl.child(chip(
@@ -2433,7 +2494,7 @@ impl Dashboard {
                         r["to"].as_str().unwrap_or(""),
                         r["factor"].as_f64().unwrap_or(1.0)
                     ),
-                    c_muted(),
+                    tok().muted,
                 ));
             }
             box_ = box_.child(rl);
@@ -2461,7 +2522,7 @@ impl Dashboard {
                         .child(
                             div()
                                 .w(px(70.))
-                                .text_color(c_muted())
+                                .text_color(tok().muted)
                                 .child(j.id[..8].to_string()),
                         )
                         .child(div().w(px(300.)).child(title))
@@ -2481,7 +2542,7 @@ impl Dashboard {
                                 .child(format!("MaxDD {}", pct(&r["development"], "max_drawdown"))),
                         )
                         .child(
-                            div().text_color(c_muted()).child(
+                            div().text_color(tok().muted).child(
                                 r["execution"]
                                     .as_str()
                                     .or(r["futures"]["execution"].as_str())
@@ -2503,9 +2564,9 @@ impl Dashboard {
         let mut mdbox = div()
             .p_3()
             .rounded_lg()
-            .bg(c_panel())
+            .bg(tok().panel)
             .border_1()
-            .border_color(c_border())
+            .border_color(tok().border)
             .flex()
             .flex_col()
             .gap_1()
@@ -2521,7 +2582,7 @@ impl Dashboard {
             .take(4)
             .collect();
         for a in sessions {
-            mdbox = mdbox.child(div().text_xs().text_color(c_muted()).child(format!(
+            mdbox = mdbox.child(div().text_xs().text_color(tok().muted).child(format!(
                 "{} · feed {} · front {} · ticks {} · bars {} · rejected {}",
                 local(&a.ts),
                 a.details["feed"].as_str().unwrap_or(""),
@@ -2535,7 +2596,7 @@ impl Dashboard {
             mdbox = mdbox.child(
                 div()
                     .text_xs()
-                    .text_color(c_muted())
+                    .text_color(tok().muted)
                     .mt_1()
                     .child(format!("latest 1-minute bars ({path})")),
             );
@@ -2547,66 +2608,87 @@ impl Dashboard {
     }
 
     fn audit(&self) -> Stateful<Div> {
-        let mut d = div()
-            .id("audit")
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .overflow_y_scroll()
-            .size_full();
+        let head = TableRow::new()
+            .child(TableHead::new().w(px(64.)).flex_shrink_0().child("#"))
+            .child(
+                TableHead::new()
+                    .w(px(150.))
+                    .flex_shrink_0()
+                    .child("时间 time (local)"),
+            )
+            .child(TableHead::new().w(px(130.)).flex_shrink_0().child("actor"))
+            .child(TableHead::new().w(px(280.)).flex_shrink_0().child("action"))
+            .child(TableHead::new().w(px(90.)).flex_shrink_0().child("target"))
+            .child(TableHead::new().flex_1().child("hash"));
+        let mut body = TableBody::new();
         for a in &self.snap.audit {
-            d = d.child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .text_xs()
-                    .py_0p5()
+            body = body.child(
+                TableRow::new()
                     .child(
-                        div()
-                            .w(px(44.))
-                            .text_color(c_muted())
+                        TableCell::new()
+                            .w(px(64.))
+                            .flex_shrink_0()
+                            .text_color(tok().muted)
                             .child(format!("#{}", a.seq)),
                     )
-                    .child(div().w(px(150.)).text_color(c_muted()).child(local(&a.ts)))
                     .child(
-                        div()
-                            .w(px(110.))
-                            .text_color(c_accent())
+                        TableCell::new()
+                            .w(px(150.))
+                            .flex_shrink_0()
+                            .text_color(tok().muted)
+                            .child(local(&a.ts)),
+                    )
+                    .child(
+                        TableCell::new()
+                            .w(px(130.))
+                            .flex_shrink_0()
+                            .text_color(tok().accent)
                             .child(a.actor.clone()),
                     )
                     .child(
-                        div()
-                            .w(px(260.))
-                            .text_color(if a.success {
-                                c_text()
-                            } else {
-                                rgb(0xf85149).into()
-                            })
+                        TableCell::new()
+                            .w(px(280.))
+                            .text_color(if a.success { tok().fg } else { tok().err })
                             .child(a.action.clone()),
                     )
                     .child(
-                        div().w(px(70.)).text_color(c_muted()).child(
-                            a.target
-                                .clone()
-                                .map(|t| t.chars().take(8).collect::<String>())
-                                .unwrap_or_default(),
-                        ),
+                        TableCell::new()
+                            .w(px(90.))
+                            .flex_shrink_0()
+                            .text_color(tok().muted)
+                            .child(
+                                a.target
+                                    .clone()
+                                    .map(|t| t.chars().take(8).collect::<String>())
+                                    .unwrap_or_default(),
+                            ),
                     )
                     .child(
-                        div()
-                            .text_color(rgb(0x5c6773))
+                        TableCell::new()
+                            .flex_1()
+                            .text_color(tok().muted)
                             .font_family("monospace")
                             .child(a.hash[..16].to_string()),
                     ),
             );
         }
-        d
+        div()
+            .id("audit")
+            .p_4()
+            .overflow_y_scroll()
+            .size_full()
+            .child(
+                Table::new()
+                    .small()
+                    .child(TableHeader::new().child(head))
+                    .child(body),
+            )
     }
 }
 
 impl Render for Dashboard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::sync(cx);
         let body: AnyElement = match self.tab {
             Tab::Overview => div()
                 .id("ov")
@@ -2624,18 +2706,29 @@ impl Render for Dashboard {
             Tab::Futures => self.futures_view().into_any_element(),
             Tab::Audit => self.audit().into_any_element(),
         };
-        div().size_full().flex().bg(c_bg()).text_color(c_text()).font_family("Noto Sans CJK SC")
+        let docker_detail: String = self
+            .progress
+            .lock()
+            .unwrap()
+            .docker_detail
+            .chars()
+            .take(120)
+            .collect();
+        div().size_full().flex().bg(tok().bg).text_color(tok().fg).font_family("Noto Sans CJK SC")
             .child(self.sidebar(cx))
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().overflow_hidden()
                 .child(self.toolbar(cx))
-                .when(self.home.is_demo(), |x| x.child(div().px_3().py_2().bg(rgb(0x4a3b00)).border_b_1().border_color(rgb(0xf2cc60)).text_sm().text_color(rgb(0xffe9a8))
-                    .child("演示工作区 DEMO — 策略只在合成数据上验证，时间推进是模拟的；成交与收益不构成任何有效性证据。DEMO workspace: synthetic-validated, simulated time, NOT evidence.")))
-                .when(self.docker() == Some(false), |x| x.child(div().px_3().py_2().bg(rgb(0x5a1e1e)).border_b_1().border_color(rgb(0xf85149)).text_sm().text_color(rgb(0xffd7d0))
-                    .child(format!("⚠ 未连接 Docker — NOT RUNNING ON DOCKER: {}. Only DEV (bwrap) runs are possible; their results can never pass the gate or be promoted. See README “Docker setup”.",
-                        self.progress.lock().unwrap().docker_detail.chars().take(120).collect::<String>()))))
-                .child(div().flex_1().min_h_0().child(body))
-                .child(self.log_panel())
-                .child(div().px_3().py_1().border_t_1().border_color(c_border()).bg(c_panel()).text_xs().text_color(c_muted()).child(self.status.clone())))
+                .when(self.home.is_demo(), |x| x.child(
+                    Alert::warning("demo-banner", "演示工作区 DEMO — 策略只在合成数据上验证，时间推进是模拟的；成交与收益不构成任何有效性证据。DEMO workspace: synthetic-validated, simulated time, NOT evidence.")
+                        .title("DEMO").banner()))
+                .when(self.docker() == Some(false), |x| x.child(
+                    Alert::error("docker-banner", format!("未连接 Docker — NOT RUNNING ON DOCKER: {docker_detail}. Only DEV (bwrap) runs are possible; their results can never pass the gate or be promoted. See README “Docker setup”."))
+                        .banner()))
+                .child(div().flex_1().min_h_0().child(
+                    v_resizable("main-split")
+                        .child(resizable_panel().child(div().size_full().child(body)))
+                        .child(resizable_panel().size(px(132.)).size_range(px(60.)..px(420.)).child(self.log_panel()))))
+                .child(div().px_3().py_1().border_t_1().border_color(tok().border).bg(tok().panel).text_xs().text_color(tok().muted).child(self.status.clone())))
     }
 }
 
@@ -2645,26 +2738,28 @@ fn main() {
         eprintln!("cannot open workspace {}: {e:#}", home.root.display());
         std::process::exit(1);
     }
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        let opts = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1440.), px(900.)),
-                cx,
-            ))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("CMspark Quant Dashboard".into()),
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+            let opts = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(1440.), px(900.)),
+                    cx,
+                ))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("CMspark Quant Dashboard".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        gpui_kit::open_window(opts, cx, |window, cx| {
-            cx.new(|cx| Dashboard::new(home.clone(), window, cx))
-        })
-        .expect("open window");
-    });
+            };
+            gpui_kit::open_window(opts, cx, |window, cx| {
+                cx.new(|cx| Dashboard::new(home.clone(), window, cx))
+            })
+            .expect("open window");
+        });
 }
 
 fn r_dir(home: &Home, id: &str) -> String {
@@ -2765,6 +2860,21 @@ mod tests {
         w.push(c(StrategyStatus::GatePassed, None, 0.9));
         assert_eq!(pick_best(&w).unwrap().0, 5);
         assert_eq!(pick_best(&v[..3]), None);
+    }
+
+    /// docs/UI_DESIGN.md: every colour comes from the gpui-component theme tokens.
+    #[::core::prelude::v1::test]
+    fn no_raw_colour_literals() {
+        let needle = concat!("rgb", "(0x");
+        for (f, src) in [
+            ("main.rs", include_str!("main.rs")),
+            ("ui.rs", include_str!("ui.rs")),
+        ] {
+            assert!(
+                !src.contains(needle),
+                "{f} uses a raw colour literal; use ui::tok()"
+            );
+        }
     }
 
     #[::core::prelude::v1::test]
