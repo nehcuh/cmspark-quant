@@ -77,6 +77,23 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         workers: usize,
     },
+    /// Kronos synthetic stress test: generate N synthetic futures from the dev
+    /// window (sandboxed), run the strategy on them; can only ADD a rejection
+    Stress {
+        /// only "kronos" for now
+        which: String,
+        id: String,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long, default_value_t = 8)]
+        paths: usize,
+        #[arg(long, default_value_t = 60)]
+        horizon: usize,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        #[arg(long, value_enum, default_value = "docker")]
+        backend: Backend,
+    },
     /// Run sandbox backtest for an id (or all Extracted with --all)
     Backtest {
         id: Option<String>,
@@ -801,6 +818,51 @@ async fn main() -> Result<()> {
                 js.push(serde_json::to_value(&s)?);
             }
             out(serde_json::Value::Array(js), lines.join("\n"));
+        }
+        Cmd::Stress {
+            which,
+            id,
+            symbol,
+            paths,
+            horizon,
+            seed,
+            backend,
+        } => {
+            anyhow::ensure!(
+                which == "kronos",
+                "unknown stress generator {which:?} (only: kronos)"
+            );
+            let exec = executor(backend).await?;
+            let id = o.get(&id)?.id;
+            let r = o
+                .stress_kronos(
+                    &id,
+                    &symbol.to_uppercase(),
+                    exec.as_ref(),
+                    paths,
+                    horizon,
+                    seed,
+                )
+                .await?;
+            let mut lines = vec![format!(
+                "{}  {}  {}",
+                if r["passed"] == true {
+                    "STRESS OK (nothing added)"
+                } else {
+                    "STRESS FAIL → rejection added"
+                },
+                &id[..8],
+                r["detail"].as_str().unwrap_or("")
+            )];
+            for p in r["per_path"].as_array().into_iter().flatten() {
+                lines.push(format!(
+                    "  path {:>2}: tail return {} maxDD {}",
+                    p["path"],
+                    pct(&p["tail"], "total_return"),
+                    pct(&p["tail"], "max_drawdown")
+                ));
+            }
+            out(r, lines.join("\n"));
         }
         Cmd::Baseline {
             which,

@@ -50,6 +50,9 @@
 | `CMSQ_MODEL_CUTOFF_DEFAULT` | 2025-09-09 | 截止日未公开的预训练模型（如 Kronos）按此日期处理 |
 | `CMSQ_RUNNER_KRONOS_IMAGE_ID` | 读 `runner_kronos_image_id` | Kronos 镜像预期 digest（覆盖文件） |
 | `CMSQ_GATE_REQUIRE_KRONOS_BASELINE` | 未设 | `=1` 时没有 Kronos 基线的快照一律不通过 |
+| `CMSQ_STRESS_LOSS_FLOOR` | -0.20 | 合成段收益低于此值算该路径失败 |
+| `CMSQ_STRESS_DD_FLOOR` | -0.35 | 合成段最大回撤差于此值算失败 |
+| `CMSQ_STRESS_MAX_FAIL_FRAC` | 0.5 | 失败路径占比超过此值则加一条拒绝 |
 | `CMSQ_ALLOW_SYNTHETIC` | 未设 | `=1` 时合成数据可过 `real_market_data`，**仅 DEMO/测试** |
 
 ### 数据库与 Redis
@@ -104,6 +107,7 @@
 
 | 命令 | 作用 | 主要参数（默认） |
 |---|---|---|
+| `stress kronos <id> --symbol S` | Kronos 合成路径压力测试：用开发段（不碰 vault）生成 N 条合成未来，策略在每条上跑一遍，只给合成段打分；多数路径破底则 GatePassed → Rejected，通过则什么都不改 | `--paths`（8）、`--horizon`（60）、`--seed`（0）、`--backend`（docker） |
 | `baseline kronos` | 在这些标的上跑固定的 Kronos 零样本基线（需先构建 Kronos 镜像）；之后同一快照上的门槛会对比它 | `--symbols A,B`、`--backend`（docker）、`--workers`（2） |
 | `init` | 创建工作区、写入固定资源、缓存样例数据 | — |
 | `scrape` | 抓取 → 摄入 → 抽取 → 沙箱回测 | `--every`（只跑一次）、`--symbol FUT_RB`、`--backtests 3`、`--cycles`、`--backend` |

@@ -13,7 +13,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 src="$root/runner/kronos"
 docker image inspect cmsq-runner:2.2.2 >/dev/null 2>&1 || "$root/scripts/build_runner.sh"
 ctx=$(mktemp -d); trap 'rm -rf "$ctx"' EXIT
-cp "$src"/{Dockerfile,requirements.lock,SHA256SUMS,kronos.lock,cmsq_kronos.py} "$ctx/"
+cp "$src"/{Dockerfile,requirements.lock,SHA256SUMS,kronos.lock,cmsq_kronos.py,gen_synthetic.py} "$ctx/"
 cp "$root/runner/signal_runner.py" "$ctx/"  # same runner + deterministic-torch hook
 commit=$(awk '$1=="code_commit"{print $2}' "$src/kronos.lock")
 git init -q "$ctx/repo" && git -C "$ctx/repo" fetch -q --depth 1 https://github.com/shiyu-coder/Kronos "$commit"
@@ -32,7 +32,7 @@ awk '$1=="hf"{print $2, $3}' "$src/kronos.lock" | while read -r repo rev; do
   done
 done
 (cd "$ctx" && sha256sum -c --quiet SHA256SUMS)
-manifest=$(sha256sum "$src/SHA256SUMS" "$src/kronos.lock" "$src/requirements.lock" "$src/cmsq_kronos.py" "$root/runner/signal_runner.py" | sha256sum | cut -d' ' -f1)
+manifest=$(sha256sum "$src/SHA256SUMS" "$src/kronos.lock" "$src/requirements.lock" "$src/cmsq_kronos.py" "$src/gen_synthetic.py" "$root/runner/signal_runner.py" | sha256sum | cut -d' ' -f1)
 docker build --build-arg MANIFEST_SHA256="$manifest" -t cmsq-runner-kronos:2.2.2 "$ctx"
 id=$(docker image inspect cmsq-runner-kronos:2.2.2 --format '{{.Id}}')
 dir=${CMSQ_SECRETS_DIR:-$HOME/.config/cmsq}

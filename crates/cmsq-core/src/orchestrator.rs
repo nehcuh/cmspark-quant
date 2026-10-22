@@ -1385,6 +1385,197 @@ impl Orchestrator {
         )
     }
 
+    /// Kronos synthetic stress test (P3). Generator runs in the Kronos sandbox
+    /// image on DEVELOPMENT bars only (never the vault); the host validates the
+    /// paths, runs the candidate on `dev ++ path` in fresh containers and scores
+    /// only the synthetic tail. Can only ADD a rejection (GatePassed → Rejected);
+    /// no trial, signal or real-data flag is ever derived from synthetic bars.
+    pub async fn stress_kronos(
+        &self,
+        id: &str,
+        symbol: &str,
+        exec: &dyn SandboxExecutor,
+        paths: usize,
+        horizon: usize,
+        seed: u64,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!((1..=32).contains(&paths), "paths must be 1..=32");
+        anyhow::ensure!((5..=250).contains(&horizon), "horizon must be 5..=250");
+        anyhow::ensure!(
+            crate::futures::spec_for(symbol).is_none(),
+            "synthetic stress is A-share only for now"
+        );
+        let s = self.get(id)?;
+        let (_, code) = Self::code_of(&s)?;
+        let ds = self.dataset_or_refuse(&s, symbol).await?;
+        let bars = &ds.bars;
+        let dev_end = ((bars.len() as f64) * self.dev_frac) as usize;
+        anyhow::ensure!(dev_end >= 100, "need ≥100 development bars");
+        // adjusted view, factor folded in: prefix and synthetic tail share one price space
+        let dev = probe::container_view(&bars[..dev_end]);
+        let rules: scorer::Rules =
+            serde_json::from_value(ds.att["rules"].clone()).unwrap_or_default();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let jd = self.home.job_dir(&s.id, &run_id);
+        std::fs::create_dir_all(&jd)?;
+        let gen_identity = exec.runner_identity(RUNNER_KRONOS_IMAGE).await;
+        anyhow::ensure!(
+            exec.hardened()
+                && gate::runner_pinned(
+                    gen_identity.as_deref(),
+                    self.expected_runner_id_for(RUNNER_KRONOS_IMAGE).as_deref()
+                ),
+            "stress generator needs the pinned Kronos image on Docker (scripts/build_runner_kronos.sh); identity {:?}",
+            gen_identity
+        );
+        // ---- generator container ----
+        let gd = jd.join("generator");
+        let (gin, gjob, gout) = (gd.join("input"), gd.join("job"), gd.join("out"));
+        for d in [&gin, &gjob, &gout] {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(gin.join("bars.csv"), market::to_csv(&dev, false))?;
+        std::fs::write(
+            gjob.join("job.json"),
+            json!({"paths": paths, "horizon": horizon, "lookback": 256, "seed": seed, "model": "mini"}).to_string(),
+        )?;
+        crate::sandbox::pin_times(&[
+            gin.join("bars.csv"),
+            gjob.join("job.json"),
+            gin.clone(),
+            gjob.clone(),
+            gout.clone(),
+        ]);
+        let abs = |p: &Path| std::fs::canonicalize(p);
+        let req = SandboxRequest {
+            id: format!("{}-gen", &run_id[..8]),
+            image: RUNNER_KRONOS_IMAGE.into(),
+            command: ["python3", "-I", "-B", "/runner/kronos/gen_synthetic.py"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            env: vec![],
+            mounts: vec![
+                Mount {
+                    host: abs(&gin)?,
+                    container: "/input".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: abs(&gjob)?,
+                    container: "/job".into(),
+                    read_only: true,
+                },
+                Mount {
+                    host: abs(&gout)?,
+                    container: "/out".into(),
+                    read_only: false,
+                },
+            ],
+            limits: self.limits.clone(),
+        };
+        let r = {
+            let _permit = self.slots.acquire().await?;
+            exec.execute(&req)
+                .await
+                .map_err(|e| anyhow::anyhow!("generator sandbox error: {e}"))?
+        };
+        let _ = std::fs::write(gd.join("stderr.log"), &r.stderr);
+        anyhow::ensure!(
+            r.outcome == Outcome::Exited && r.exit_code == 0,
+            "generator failed ({:?}, exit {}): {}",
+            r.outcome,
+            r.exit_code,
+            r.stderr.lines().last().unwrap_or("")
+        );
+        // the sandbox returns exactly one framed file, named positions.csv
+        let f = gout.join("positions.csv");
+        let md = std::fs::symlink_metadata(&f)?;
+        anyhow::ensure!(
+            md.file_type().is_file() && md.len() < 16 << 20,
+            "generator output not a regular file < 16 MiB"
+        );
+        let synth = crate::stress::parse_synthetic(
+            &std::fs::read_to_string(&f)?,
+            paths,
+            horizon,
+            dev.last().unwrap(),
+        )
+        .map_err(|e| anyhow::anyhow!("generator output rejected: {e}"))?;
+        // ---- candidate on dev ++ synthetic, one fresh container per path ----
+        let lo = 0.0;
+        let mut tails = vec![];
+        let mut per_path = vec![];
+        for (i, tail) in synth.iter().enumerate() {
+            // generator works in the adjusted (container) space; map the tail back to
+            // raw prices with the last dev factor so lot sizing / limits use raw prices
+            let fa = bars[dev_end - 1].adj_factor;
+            let f = fa.unwrap_or(1.0);
+            let raw_tail = tail.iter().map(|b| Bar {
+                open: b.open / f,
+                high: b.high / f,
+                low: b.low / f,
+                close: b.close / f,
+                adj_factor: fa,
+                ..b.clone()
+            });
+            let series: Vec<Bar> = bars[..dev_end].iter().cloned().chain(raw_tail).collect();
+            let v = Variant {
+                name: format!("synthetic#{i}"),
+                cut: series.len(),
+                bars: probe::container_view(&series),
+            };
+            let params = s
+                .extracted
+                .as_ref()
+                .map(|e| Self::params_for(e, None))
+                .unwrap_or_else(|| json!({}));
+            let (pos, _) = self
+                .run_variant(exec, &jd, i, &v, &code, &params, (lo, 0.01))
+                .await
+                .map_err(|(st, why)| {
+                    anyhow::anyhow!("candidate on synthetic path {i} failed ({st}): {why}")
+                })?;
+            let sim = scorer::simulate_with(symbol, &series, &pos, &self.costs, &rules);
+            let m = scorer::metrics(&series, &sim, dev.len(), series.len());
+            per_path.push(json!({"path": i, "tail": m}));
+            tails.push(m);
+        }
+        let cfg = crate::stress::StressConfig::default();
+        let v = crate::stress::verdict(&tails, &cfg);
+        let report = json!({
+            "label": crate::stress::LABEL, "synthetic": true, "strategy": s.id, "symbol": symbol,
+            "dataset_sha256": ds.att["snapshot_sha256"], "context": {"start": dev[0].date, "end": dev.last().unwrap().date, "bars": dev.len(), "note": "development bars only; vault never used"},
+            "generator_identity": gen_identity, "paths": paths, "horizon": horizon, "seed": seed.to_string(),
+            "config": cfg, "per_path": per_path, "passed": v.is_ok(), "detail": v.clone().unwrap_or_else(|e| e),
+            "computed_by": "cmsq-core scorer (host, trusted)",
+        });
+        std::fs::write(
+            jd.join("synthetic_stress.json"),
+            serde_json::to_vec_pretty(&report)?,
+        )?;
+        self.store.audit(
+            "system",
+            "synthetic_stress",
+            Some(&s.id),
+            report.clone(),
+            true,
+        )?;
+        if let Err(why) = &v {
+            let cur = self.get(&s.id)?;
+            if cur.status == StrategyStatus::GatePassed {
+                self.transition(
+                    &cur,
+                    StrategyStatus::Rejected,
+                    "gate",
+                    Some(&format!("synthetic_stress: {why}")),
+                    json!({"stress_run": run_id}),
+                )?;
+            }
+        }
+        Ok(report)
+    }
+
     /// Latest host-scored Kronos baseline run on exactly this dataset snapshot.
     /// Read from trusted job records (metrics computed by the Rust scorer).
     pub fn kronos_baseline_for(&self, dataset_sha: &str) -> Option<crate::pretrained::Baseline> {

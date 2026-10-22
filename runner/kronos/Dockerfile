@@ -8,7 +8,7 @@ COPY requirements.lock /runner/kronos/requirements.lock
 RUN pip install --no-cache-dir -r /runner/kronos/requirements.lock
 COPY kronos_code /runner/kronos/kronos_code
 COPY weights /runner/kronos/weights
-COPY SHA256SUMS kronos.lock cmsq_kronos.py /runner/kronos/
+COPY SHA256SUMS kronos.lock cmsq_kronos.py gen_synthetic.py /runner/kronos/
 COPY signal_runner.py /runner/signal_runner.py
 # fail the build if any pinned artifact differs
 RUN cd /runner/kronos && sha256sum -c --quiet SHA256SUMS && chmod -R a-w /runner/kronos
