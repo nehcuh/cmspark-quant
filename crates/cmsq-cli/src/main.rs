@@ -63,6 +63,20 @@ enum Cmd {
     Ingest { path: Option<PathBuf> },
     /// Extract all Ingested strategies (or one id)
     Extract { id: Option<String> },
+    /// Run the fixed Kronos zero-shot baseline (needs scripts/build_runner_kronos.sh)
+    /// on symbols; later gate runs on the same snapshot report beats_kronos_baseline
+    Baseline {
+        /// only "kronos" for now
+        #[arg(default_value = "kronos")]
+        which: String,
+        /// comma list of symbols
+        #[arg(long)]
+        symbols: String,
+        #[arg(long, value_enum, default_value = "docker")]
+        backend: Backend,
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+    },
     /// Run sandbox backtest for an id (or all Extracted with --all)
     Backtest {
         id: Option<String>,
@@ -785,6 +799,60 @@ async fn main() -> Result<()> {
                         .unwrap_or_default()
                 ));
                 js.push(serde_json::to_value(&s)?);
+            }
+            out(serde_json::Value::Array(js), lines.join("\n"));
+        }
+        Cmd::Baseline {
+            which,
+            symbols,
+            backend,
+            workers,
+        } => {
+            anyhow::ensure!(
+                which == "kronos",
+                "unknown baseline {which:?} (only: kronos)"
+            );
+            let exec = executor(backend).await?;
+            let f = o.home.drop_dir().join("cmsq_baseline_kronos.json");
+            std::fs::create_dir_all(o.home.drop_dir())?;
+            std::fs::write(&f, cmsq_core::pretrained::KRONOS_BASELINE_POST)?;
+            let id = match o.ingest_path(&f)?.into_iter().next().map(|(_, r)| r) {
+                Some(IngestOutcome::New(id)) | Some(IngestOutcome::Duplicate(id)) => id,
+                Some(IngestOutcome::Invalid(e)) => {
+                    anyhow::bail!("bundled baseline post invalid: {e}")
+                }
+                None => anyhow::bail!("bundled baseline post not ingested"),
+            };
+            if o.store.get_strategy(&id)?.status == StrategyStatus::Ingested {
+                let ex = extract::from_env()?;
+                o.extract(&id, ex.as_ref()).await?;
+            }
+            let pairs: Vec<(String, String)> = symbols
+                .split(',')
+                .map(|x| x.trim().to_uppercase())
+                .filter(|x| !x.is_empty())
+                .map(|sym| (id.clone(), sym))
+                .collect();
+            let mut lines = vec![format!("Kronos baseline strategy {}", &id[..8])];
+            let mut js = vec![];
+            for (_, sym, r) in o.backtest_batch(&pairs, exec.as_ref(), workers).await {
+                match r {
+                    Ok(r) => {
+                        let m = r.oos.clone().unwrap_or_default();
+                        lines.push(format!(
+                            "{sym:<10} job={} [{}]  baseline dev ret {} Sharpe {}",
+                            &r.job_id[..8],
+                            r.job_status,
+                            pct(&m, "total_return"),
+                            m["sharpe"]
+                                .as_f64()
+                                .map(|x| format!("{x:.2}"))
+                                .unwrap_or("-".into())
+                        ));
+                        js.push(serde_json::to_value(&r)?);
+                    }
+                    Err(e) => lines.push(format!("{sym:<10} ERROR {e:#}")),
+                }
             }
             out(serde_json::Value::Array(js), lines.join("\n"));
         }

@@ -49,6 +49,7 @@
 | `CMSQ_GATE_MODEL_GAP_DAYS` | 20 | 预训练模型截止日之后的最少交易日间隔 |
 | `CMSQ_MODEL_CUTOFF_DEFAULT` | 2025-09-09 | 截止日未公开的预训练模型（如 Kronos）按此日期处理 |
 | `CMSQ_RUNNER_KRONOS_IMAGE_ID` | 读 `runner_kronos_image_id` | Kronos 镜像预期 digest（覆盖文件） |
+| `CMSQ_GATE_REQUIRE_KRONOS_BASELINE` | 未设 | `=1` 时没有 Kronos 基线的快照一律不通过 |
 | `CMSQ_ALLOW_SYNTHETIC` | 未设 | `=1` 时合成数据可过 `real_market_data`，**仅 DEMO/测试** |
 
 ### 数据库与 Redis
@@ -103,6 +104,7 @@
 
 | 命令 | 作用 | 主要参数（默认） |
 |---|---|---|
+| `baseline kronos` | 在这些标的上跑固定的 Kronos 零样本基线（需先构建 Kronos 镜像）；之后同一快照上的门槛会对比它 | `--symbols A,B`、`--backend`（docker）、`--workers`（2） |
 | `init` | 创建工作区、写入固定资源、缓存样例数据 | — |
 | `scrape` | 抓取 → 摄入 → 抽取 → 沙箱回测 | `--every`（只跑一次）、`--symbol FUT_RB`、`--backtests 3`、`--cycles`、`--backend` |
 | `source-scores` | 各抓取源的质量分 | — |
@@ -174,6 +176,7 @@
 | `max_drawdown` | 不差于 −35% |
 | `exposure` | 平均总敞口 ≥ 5% |
 | `beats_buy_and_hold` | Sharpe 高于同期买入持有 |
+| `beats_kronos_baseline` | 同一数据快照上跑过 Kronos 基线时，Sharpe 必须高于基线；没跑过时只提示（`CMSQ_GATE_REQUIRE_KRONOS_BASELINE=1` 则直接不通过） |
 | `capacity` | ≥ `CMSQ_GATE_MIN_CAPACITY` |
 | `futures_roll_ledger` | 期货换月腿完整可成交 |
 

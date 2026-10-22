@@ -45,6 +45,22 @@ const GENERIC: &[&str] = &[
     "moirai",
 ];
 
+/// The fixed Kronos zero-shot baseline (also the example strategy).
+pub const KRONOS_BASELINE_CODE: &str = include_str!("../../../examples/kronos_direction.py");
+/// The same code as a CMspark drop post (`cmsq baseline kronos` ingests it).
+pub const KRONOS_BASELINE_POST: &str =
+    include_str!("../../../examples/posts/kronos_direction.json");
+
+/// Identity of the baseline code (whitespace at the ends ignored).
+pub fn baseline_code_sha(code: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(code.trim().as_bytes()))
+}
+
+pub fn is_kronos_baseline(code: &str) -> bool {
+    baseline_code_sha(code) == baseline_code_sha(KRONOS_BASELINE_CODE)
+}
+
 pub fn default_cutoff() -> String {
     std::env::var("CMSQ_MODEL_CUTOFF_DEFAULT")
         .ok()
@@ -93,6 +109,13 @@ pub fn trading_days_between(calendar: &[String], cutoff: &str, start: &str) -> u
             d > cutoff && d < &start[..10.min(start.len())]
         })
         .count()
+}
+
+/// Kronos baseline result on one dataset snapshot (host-scored, from its job record).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Baseline {
+    pub job_id: String,
+    pub dev: crate::scorer::Metrics,
 }
 
 /// Everything the gate needs (all computed by trusted host code).
@@ -230,6 +253,18 @@ mod tests {
         };
         let e = check(&bad, 20).unwrap_err();
         assert!(e.contains("fold 1") && !e.contains("dev starts"), "{e}");
+    }
+
+    #[test]
+    fn bundled_baseline_post_embeds_the_baseline_code() {
+        let post: serde_json::Value = serde_json::from_str(KRONOS_BASELINE_POST).unwrap();
+        let body = post["content"]["body"].as_str().unwrap();
+        assert!(body.contains(KRONOS_BASELINE_CODE.trim()));
+        assert!(is_kronos_baseline(&format!("\n{KRONOS_BASELINE_CODE}\n\n")));
+        assert!(!is_kronos_baseline("def generate_signals(df): return 0"));
+        assert!(detect(KRONOS_BASELINE_CODE)
+            .iter()
+            .any(|m| m.name.starts_with("kronos")));
     }
 
     #[test]

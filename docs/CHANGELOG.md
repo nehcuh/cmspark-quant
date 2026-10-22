@@ -1,5 +1,7 @@
 # 开发日志（CHANGELOG）
 
+* 2026-10-22：Kronos P2：`cmsq baseline kronos`、门槛 `beats_kronos_baseline`（同快照对比，可选强制）、看板基线对比卡片。
+
 * 2026-10-22：Kronos P1：可选沙箱镜像 `cmsq-runner-kronos`（权重/代码按 sha256 固定，manifest 写入 runner identity）、宿主按代码选镜像、模型配置逐个计入 DSR、示例策略 `examples/kronos_direction.py`。
 
 * 2026-10-22：门槛新增 `model_lookahead`（Kronos P0）：检测预训练模型，要求所有评分窗口在训练截止日后 ≥20 个交易日。
