@@ -9,11 +9,11 @@
 # 不涉及任何真实下单；不读取/打印 Tushare token。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-HOT=0; ANCHOR=""; HOME_DIR=${CMSQ_HOME:-$HOME/cmsq-home}
+ARGS="$*"; HOT=0; ANCHOR=""; HOME_DIR=${CMSQ_HOME:-$HOME/cmsq-home}
 while [ $# -gt 0 ]; do case $1 in
   --hot) HOT=1;; --anchor-repo) ANCHOR=$2; shift;; --home) HOME_DIR=$2; shift;;
   -h|--help) sed -n 2,9p "$0"; exit 0;; *) echo "unknown option $1"; exit 2;; esac; shift; done
-docker info >/dev/null 2>&1 || { echo "当前用户无法访问 Docker：sudo usermod -aG docker \$USER 后重新登录（或 sg docker -c \"$0 $*\"）"; exit 1; }
+docker info >/dev/null 2>&1 || { echo "当前用户无法访问 Docker：sudo usermod -aG docker \$USER 后重新登录（或 sg docker -c \"$0 $ARGS\"）"; exit 1; }
 
 export CMSQ_SECRETS_DIR=${CMSQ_SECRETS_DIR:-$HOME/.config/cmsq}
 export CMSQ_HOST_UID=$(id -u) CMSQ_HOST_GID=$(id -g "$(id -un)")   # primary group, also under `sg docker`
@@ -69,6 +69,8 @@ CMSQ_SECRETS_DIR=$CMSQ_SECRETS_DIR
 CMSQ_AUDIT_SIGNER=$SOCK
 PATH=$HOME/.local/bin:\$PATH
 ENV
+# akshare/baostock 交叉校验用的 python（部署时 export CMSQ_PYTHON=... 才写入）
+[ -n "${CMSQ_PYTHON:-}" ] && echo "CMSQ_PYTHON=$CMSQ_PYTHON" >> "$CMSQ_SECRETS_DIR/cmsq.env"
 
 echo "== 6/6 锚点仓库"
 if [ -n "$ANCHOR" ]; then
