@@ -24,6 +24,7 @@ pub mod scrape;
 pub mod signer;
 pub mod state;
 pub mod store;
+pub mod stress;
 pub mod tradestats;
 
 pub use home::Home;

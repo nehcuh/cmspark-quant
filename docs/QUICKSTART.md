@@ -186,6 +186,8 @@ sg docker -c "scripts/kronos_e2e.sh SH600519"   # 用临时工作区在真实行
 
 想让其他策略和 Kronos 比一比：`cmsq baseline kronos --symbols SH600519`，之后在同一份行情上回测的策略，门槛里会多一项 `beats_kronos_baseline`，看板上也会显示对比卡片。
 
+对过了门槛的策略再加一道合成压力测试：`cmsq stress kronos <id> --symbol SH600519`。它只会把策略打回 Rejected，不会让任何策略通过。
+
 ## 7. 常见问题
 
 | 现象 | 原因与处理 |
