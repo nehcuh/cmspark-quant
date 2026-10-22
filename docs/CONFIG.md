@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `~/.config/cmsq/`（`CMSQ_SECRETS_DIR`） | 密钥目录，0700，必须在工作区之外 | 部署脚本 | **否** |
 | `~/.config/cmsq/secrets.env` | `TUSHARE_TOKEN=...` | 你 | **绝不** |
-| `~/.config/cmsq/cmsq.env` | `CMSQ_HOME`、`CMSQ_SECRETS_DIR`、`CMSQ_AUDIT_SIGNER`、`PATH`、（可选）`CMSQ_PYTHON` | `deploy.sh`（每次覆盖） | 否 |
+| `~/.config/cmsq/cmsq.env` | `CMSQ_HOME`、`CMSQ_SECRETS_DIR`、`CMSQ_AUDIT_SIGNER`、`PATH`、（可选）`CMSQ_PYTHON` | `deploy.sh`（每次整份覆盖，`CMSQ_HOME` = 本次 `--home`；不带 `--home` 时取当前环境的 `CMSQ_HOME`，否则 `~/cmsq-home`。测试部署后须 `scripts/deploy.sh --home <真实工作区>` 指回；查看：`grep CMSQ_HOME ~/.config/cmsq/cmsq.env`，详见 [QUICKSTART](QUICKSTART.md#1-一键部署)） | 否 |
 | `~/.config/cmsq/db.env` | `CMSQ_DATABASE_URL`（cmsq_app）、`CMSQ_DATABASE_MIGRATE_URL`（cmsq_owner） | `db_up.sh` | 否 |
 | `~/.config/cmsq/pg_app_pw`、`pg_owner_pw` | 数据库口令 | `db_up.sh` | 否 |
 | `~/.config/cmsq/redis.env`、`redis_pw` | `CMSQ_REDIS_URL` 与口令 | `redis_up.sh` | 否 |

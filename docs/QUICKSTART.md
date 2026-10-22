@@ -40,7 +40,19 @@ cmsq list                          # 空表头，说明一切就绪
 
 可选参数：`--hot`（同时启用 Redis 热层，见 [DESIGN.md](DESIGN.md#7-redis-热层可选)）、`--anchor-repo <私有仓库URL>`（每小时把审计链头推到 git）、`--home DIR`（换工作区目录）。
 
-> 注意：`cmsq.env` 只有一份，记录的是**最后一次** `deploy.sh` 用的 `--home`。用别的 `--home` 部署过之后，再用默认工作区要重新跑一次 `scripts/deploy.sh`（或改 `cmsq.env` 里的 `CMSQ_HOME`）。
+> **⚠️ `cmsq.env` 只有一份，每次部署都会覆盖 `CMSQ_HOME`。**
+> - `~/.config/cmsq/cmsq.env` 全机只有一份，`scripts/deploy.sh` 每次运行都会整份重写它，`CMSQ_HOME` 被设为**这次运行**的工作区。
+> - 不带 `--home` 时，工作区取当前 shell 里的 `CMSQ_HOME` 环境变量（若已 `source` 过 cmsq.env，就是上次的值），没有才用 `~/cmsq-home`。所以试跑后**不要**指望不带参数重跑就能恢复默认。
+> - 做过试跑/测试部署（例如 `--home /tmp/qs-home`）之后，务必用你真正的工作区再跑一次，把它指回去：
+>   ```bash
+>   scripts/deploy.sh --home <你的真实工作区>     # 例如 --home ~/cmsq-home
+>   ```
+>   重跑不会丢数据（数据库、签名进程、已有工作区都是幂等处理）。
+> - 查看当前指向哪个工作区：
+>   ```bash
+>   grep CMSQ_HOME ~/.config/cmsq/cmsq.env
+>   ```
+>   改完后已打开的终端需要重新 `set -a; . ~/.config/cmsq/cmsq.env; set +a`。
 
 ## 2. 配置行情数据源
 

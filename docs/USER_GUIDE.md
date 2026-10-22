@@ -18,6 +18,21 @@ scripts/deploy.sh [--hot] [--anchor-repo URL] [--home DIR]
 
 部署写出 `~/.config/cmsq/cmsq.env`（`CMSQ_HOME`、`CMSQ_AUDIT_SIGNER` 等），使用前 `set -a; . ~/.config/cmsq/cmsq.env; set +a`。
 
+> **⚠️ `cmsq.env` 只有一份，每次部署都会覆盖 `CMSQ_HOME`。**
+> - `~/.config/cmsq/cmsq.env` 全机只有一份，`scripts/deploy.sh` 每次运行都会整份重写它，`CMSQ_HOME` 被设为**这次运行**的工作区。
+> - 不带 `--home` 时，工作区取当前 shell 里的 `CMSQ_HOME` 环境变量（若已 `source` 过 cmsq.env，就是上次的值），没有才用 `~/cmsq-home`。所以试跑后**不要**指望不带参数重跑就能恢复默认。
+> - 做过试跑/测试部署（例如 `--home /tmp/qs-home`）之后，务必用你真正的工作区再跑一次，把它指回去：
+>   ```bash
+>   scripts/deploy.sh --home <你的真实工作区>     # 例如 --home ~/cmsq-home
+>   ```
+>   重跑不会丢数据（数据库、签名进程、已有工作区都是幂等处理）。
+> - 查看当前指向哪个工作区：
+>   ```bash
+>   grep CMSQ_HOME ~/.config/cmsq/cmsq.env
+>   ```
+>   改完后已打开的终端需要重新 `set -a; . ~/.config/cmsq/cmsq.env; set +a`。
+
+
 已有工作区若仍用应用侧 `audit.key`，部署会自动迁移：导入签名进程 → 按已验证链头登记 → 经签名进程全链验证 → 覆写删除旧密钥。新工作区通过显式登记（`cmsq audit signer-enroll`）接入签名进程，签名进程不接受未登记的链。
 
 ## 2. 数据源与日常流程
