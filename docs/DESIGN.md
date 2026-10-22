@@ -85,6 +85,16 @@ flowchart LR
 每笔不超过新增成交量的 10%（`--participation`）；涨停不买、跌停不卖；A 股 T+1、100 股一手、佣金与印花税；期货平今/平昨、保证金、按结算价盯市。
 订单与成交按哈希链存 PG，可导出 QIFI。只允许 Promoted 策略下模拟单。见 [PAPER_TRADING.md](PAPER_TRADING.md)。
 
+## 8b. 预训练模型（Kronos）怎么接入
+[Kronos](https://github.com/shiyu-coder/Kronos)（MIT）是 K 线基础模型。它只作为**不可信策略内部的特征**使用：
+- **只在沙箱里跑**：torch 和权重只存在于可选镜像 `cmsq-runner-kronos`，宿主（可信的 Rust 进程）从不加载 torch。容器仍然只输出仓位，冻结时钟、seccomp、无网络与普通镜像一致。
+- **镜像选择由宿主决定**：宿主静态扫描策略代码，提到 Kronos 就用 Kronos 镜像，并按 `runner_kronos_image_id` 校验 digest（`runner_pinned`）。
+- **溯源**：Kronos 代码提交、权重和 tokenizer 的 sha256 固定在 `runner/kronos/kronos.lock` 与 `SHA256SUMS`，构建时和镜像内各校验一次；它们的总哈希作为镜像标签 `cmsq.runner.kronos.manifest` 写进每个任务的 runner identity，随任务和签名审计记录保存。
+- **确定性**：在 bar t 的预测只用 t 及以前的数据，随机种子由 t 决定；所以截断或改动未来不会改变过去的仓位。不确定的输出会被前视探针当作偷看直接拒绝。
+- **DSR 计数**：模型配置（尺寸、lookback、预测长度、采样、阈值）多半写在代码字面量里，而 idea_key 会把数字抹掉；所以用模型的策略按**完整代码文本**区分试验，每种配置都单独计入 N（宁可多算）。
+- **训练数据泄漏**：见第 3 节 `model_lookahead`。目前截至 2026-10 只有约一年“干净”数据，Kronos 策略在长历史上会被这一项直接拒绝，这是预期结果。
+- 许可：镜像内保留 Kronos 的 LICENSE（`/runner/kronos/kronos_code/LICENSE`），镜像标签注明版权。
+
 ## 9. 关键取舍与已知局限
 | 取舍 / 局限 | 说明 |
 |---|---|
@@ -96,6 +106,9 @@ flowchart LR
 | 交叉校验来源 | 实际只有 tushare↔akshare 一对；只有 tushare 有复权因子 |
 | 单机 | 一台机器一个共享数据库；签名进程与应用同机 |
 | CTP 实时行情 | 本机连不上 openctp，实时源只用回放测试过 |
+| Kronos 截止日 | 训练数据截止日未公开，按权重发布日 2025-09-09 保守处理；若实际更晚，仍可能有少量泄漏 |
+| Kronos 时间特征 | 容器里看到的是平移后的假日期，Kronos 的星期/月份时间特征因此与真实日历不符（安全优先） |
+| Kronos 速度 | CPU 推理，示例每 5–10 根 K 线预测一次；32 个探针容器在 420 根日线上约 40 秒 |
 | 价格形态 | 真实价格本身可能泄露年代 |
 | 容器清理保证 | 调用方取消（含"daemon 已创建、ID 响应未到"窗口，#19）、宿主复制失败、超时都会删除本任务容器：create 由独立后台任务持有，回传的消息本身带已武装的清理守卫，调用方取走所有权前（含已送达但未被 poll）被丢弃即按确切 ID 删除；传输层未知结果按本任务唯一名称删除，从不按前缀扫描别的容器。**不保证**：进程被 SIGKILL、tokio runtime 整体退出、daemon 不可达时，残留的 `cmsq-<job>`（标签 `cmsq.job`）需在下次运行前人工或按确切名称回收 |
 | 模拟盘快照 | 快照摘要绑定 HMAC 审计链；修复前写入的旧快照一律拒绝恢复（不自动重新认证），需新开会话 |

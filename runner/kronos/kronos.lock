@@ -1,0 +1,7 @@
+# Pinned Kronos artifacts (verified by scripts/build_runner_kronos.sh and again inside the image).
+# code: https://github.com/shiyu-coder/Kronos (MIT, Copyright (c) 2025 ShiYu)
+code_commit 67b630e67f6a18c9e9be918d9b4337c960db1e9a
+hf NeoQuasar/Kronos-mini f4e68697d9d5aed55cef5c96aabc3376bcad9f81
+hf NeoQuasar/Kronos-small 901c26c1332695a2a8f243eb2f37243a37bea320
+hf NeoQuasar/Kronos-Tokenizer-2k 26966d0035065a0cae0ebad7af8ece35bc1fb51c
+hf NeoQuasar/Kronos-Tokenizer-base 0e0117387f39004a9016484a186a908917e22426

@@ -48,6 +48,7 @@
 | `CMSQ_GATE_REGIME_MAX_LOSS` | -0.10 | 任一状态亏损下限 |
 | `CMSQ_GATE_MODEL_GAP_DAYS` | 20 | 预训练模型截止日之后的最少交易日间隔 |
 | `CMSQ_MODEL_CUTOFF_DEFAULT` | 2025-09-09 | 截止日未公开的预训练模型（如 Kronos）按此日期处理 |
+| `CMSQ_RUNNER_KRONOS_IMAGE_ID` | 读 `runner_kronos_image_id` | Kronos 镜像预期 digest（覆盖文件） |
 | `CMSQ_ALLOW_SYNTHETIC` | 未设 | `=1` 时合成数据可过 `real_market_data`，**仅 DEMO/测试** |
 
 ### 数据库与 Redis
@@ -89,6 +90,8 @@
 | `scripts/db_up.sh` | 只启动/修复 PostgreSQL（口令自愈） |
 | `scripts/redis_up.sh` | 只启动 Redis 热层 |
 | `scripts/build_runner.sh` | 构建沙箱镜像 `cmsq-runner:2.2.2` 并记录 digest |
+| `scripts/build_runner_kronos.sh` | **可选**：构建 Kronos 镜像 `cmsq-runner-kronos:2.2.2`（torch CPU + Kronos-mini/small 权重，按 `runner/kronos/SHA256SUMS` 校验，约 1 GB），记录 digest 到 `runner_kronos_image_id` |
+| `scripts/kronos_e2e.sh [SYMBOL]` | **可选**：真实行情上用 Docker 沙箱跑 Kronos 示例策略（临时工作区） |
 | `scripts/dashboard_demo.sh` | 合成样本工作区 `/tmp/cmsq-demo` + 打开看板 |
 | `scripts/paper_demo.sh` | DEMO 工作区完整流程（晋升 → 信号 → 模拟盘） |
 | `scripts/e2e.sh` / `scripts/e2e_real.sh` | 合成数据 / 真实数据完整闭环验证 |

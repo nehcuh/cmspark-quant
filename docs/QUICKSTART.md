@@ -174,6 +174,16 @@ cmsq audit verify                           # 审计链完整性
 `promote` 是唯一需要你做决定的地方，也是不可逆的：留存样本只能用一次，失败就永久拒绝。
 晋升后的策略可以跑模拟盘（`cmsq paper run ...`，见 [PAPER_TRADING.md](PAPER_TRADING.md)），**系统里没有任何真实下单路径**。
 
+## 6b. （可选）Kronos 模型策略
+
+```bash
+sg docker -c "scripts/build_runner_kronos.sh"   # 一次性，约 1 GB，需要联网下载 torch 和权重
+sg docker -c "scripts/kronos_e2e.sh SH600519"   # 用临时工作区在真实行情上跑示例策略
+```
+
+你会看到 Kronos 示例策略被拒，第一条原因是 `model_lookahead`：评分区间落在模型训练数据之内，结果不可信。
+这是门槛在正确工作。原理见 [DESIGN.md](DESIGN.md) 8b 节。
+
 ## 7. 常见问题
 
 | 现象 | 原因与处理 |
