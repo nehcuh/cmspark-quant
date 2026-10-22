@@ -14,6 +14,7 @@ pub mod ingest;
 pub mod market;
 pub mod models;
 pub mod orchestrator;
+pub mod pretrained;
 pub mod probe;
 pub mod qifi;
 pub mod replay;

@@ -153,6 +153,7 @@ async fn sample_metadata_edit_bypasses_real_data_check() {
             capacity: sc.capacity,
             roll_unpriced: sc.roll_unpriced,
             regimes: &sc.regimes,
+            model_use: &sc.model_use,
         },
         &o.gate,
     );

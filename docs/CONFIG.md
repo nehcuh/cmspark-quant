@@ -46,6 +46,8 @@
 | `CMSQ_GATE_REGIME_MIN_BARS` | 60 | 市场状态至少多少根 K 线才计入 |
 | `CMSQ_GATE_REGIME_MAX_LOSING` | 1 | 每组最多几个状态允许亏钱 |
 | `CMSQ_GATE_REGIME_MAX_LOSS` | -0.10 | 任一状态亏损下限 |
+| `CMSQ_GATE_MODEL_GAP_DAYS` | 20 | 预训练模型截止日之后的最少交易日间隔 |
+| `CMSQ_MODEL_CUTOFF_DEFAULT` | 2025-09-09 | 截止日未公开的预训练模型（如 Kronos）按此日期处理 |
 | `CMSQ_ALLOW_SYNTHETIC` | 未设 | `=1` 时合成数据可过 `real_market_data`，**仅 DEMO/测试** |
 
 ### 数据库与 Redis
@@ -155,6 +157,7 @@
 | `runner_pinned` | 镜像标签 `cmsq.runner.version=2.2.2` 且 digest 与记录一致 |
 | `min_bars` | ≥ 250 根 |
 | `no_lookahead` | 所有前视探针变体一致 |
+| `model_lookahead` | 未用预训练模型；或所有评分窗口（开发段/各折/vault/组合）起点在模型训练截止日后 ≥ `CMSQ_GATE_MODEL_GAP_DAYS` 个交易日 |
 | `static_risks` | 静态检查无前视 |
 | `real_market_data` | 签名的 tushare/rstdx 来源（`CMSQ_ALLOW_SYNTHETIC=1` 例外） |
 | `data_cross_validated` | 交叉校验 `ok` 或 `ok_with_flags` |

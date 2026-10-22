@@ -238,6 +238,7 @@ fn unpriced_roll_is_rejected_by_actual_gate() {
         capacity: Some(5e7),
         roll_unpriced: 0,
         regimes: &regimes,
+        model_use: &Default::default(),
     };
     assert!(gate::evaluate(&i, &gate::GateConfig::default()).passed);
     i.roll_unpriced = 1;

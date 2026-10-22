@@ -1,5 +1,7 @@
 # 开发日志（CHANGELOG）
 
+* 2026-10-22：门槛新增 `model_lookahead`（Kronos P0）：检测预训练模型，要求所有评分窗口在训练截止日后 ≥20 个交易日。
+
 从 `docs/STATUS.md` 与旧 README 迁来的开发记录，按原样保留。当前状态见 [STATUS.md](STATUS.md)。
 
 ## 3. 真实数据结果（e2e_real，2026-10-20 17:20 UTC+8）
