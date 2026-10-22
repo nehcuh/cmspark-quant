@@ -270,6 +270,12 @@ pub enum Event {
         order_id: u64,
         reason: String,
     },
+    /// Quote-only state recorded at a checkpoint (issue #39): marks and cumulative
+    /// volumes moved without any order event, so the snapshot needs its own seq.
+    Marked {
+        trading_day: Option<String>,
+        marks: BTreeMap<String, (Option<f64>, Option<f64>)>,
+    },
     Settled {
         trading_day: String,
         prices: BTreeMap<String, f64>,
@@ -416,6 +422,20 @@ impl PaperEngine {
         h.update(prev.as_bytes());
         h.update(serde_json::to_vec(e).unwrap());
         hex::encode(h.finalize())
+    }
+    /// Record the current marks / cumulative volumes as an event so a checkpoint of
+    /// quote-only state gets a fresh, chained sequence number.
+    pub fn record_marks(&mut self) {
+        let marks = self
+            .inst
+            .iter()
+            .map(|(k, i)| (k.clone(), (i.last.as_ref().map(|q| q.last), i.last_cum)))
+            .collect();
+        let td = self.account.trading_day.clone();
+        self.push(Event::Marked {
+            trading_day: td,
+            marks,
+        });
     }
     fn push(&mut self, e: Event) {
         self.event_chain = Self::chain_step(&self.event_chain, &e);
@@ -798,6 +818,12 @@ impl PaperEngine {
             })
             .map(|o| o.id)
             .collect();
+        // Displayed level-1 depth is ONE shared pool per quote and side (issue #37):
+        // every order that takes from the book (market / marketable limit) draws it
+        // down, so N orders cannot each consume the same `ask_vol1`. `None` = unknown
+        // depth (only the participation budget applies). Depth refills on the next quote.
+        let mut ask_left: Option<i64> = q.ask1.and(q.ask_vol1).map(|v| v.max(0.0).floor() as i64);
+        let mut bid_left: Option<i64> = q.bid1.and(q.bid_vol1).map(|v| v.max(0.0).floor() as i64);
         let mut fills = vec![];
         for id in ids {
             if budget <= 0 {
@@ -806,8 +832,8 @@ impl PaperEngine {
             let o = self.orders.get(&id).unwrap().clone();
             let rest = o.qty - o.filled;
             let (px, depth) = match o.side {
-                Side::Buy => (q.ask1.unwrap_or(q.last), q.ask1.and(q.ask_vol1)),
-                Side::Sell => (q.bid1.unwrap_or(q.last), q.bid1.and(q.bid_vol1)),
+                Side::Buy => (q.ask1.unwrap_or(q.last), ask_left.map(|v| v as f64)),
+                Side::Sell => (q.bid1.unwrap_or(q.last), bid_left.map(|v| v as f64)),
             };
             // price-limit blocks
             if o.side == Side::Buy && up.is_some_and(|u| px >= u - EPS && q.last >= u - EPS) {
@@ -817,6 +843,7 @@ impl PaperEngine {
                 continue;
             }
             let mut cap = budget;
+            let mut takes_book = true;
             let (fpx, extra_cap) = match o.kind {
                 OrderKind::Market => (px, depth),
                 OrderKind::Limit { price: l } => {
@@ -832,6 +859,9 @@ impl PaperEngine {
                     if marketable {
                         (px, depth)
                     } else if through {
+                        // passive fill: the tape traded through our resting price; that
+                        // volume is not the displayed book, only the participation budget caps it
+                        takes_book = false;
                         (l, None)
                     } else if touch && self.cfg.limit_fill == LimitFill::TouchQueue {
                         let ahead = o.queue_ahead - dv;
@@ -839,6 +869,7 @@ impl PaperEngine {
                         if ahead >= 0.0 {
                             continue;
                         }
+                        takes_book = false; // queue position at our own price, not the opposite book
                         (l, Some(-ahead))
                     } else {
                         continue;
@@ -856,6 +887,15 @@ impl PaperEngine {
                 continue;
             }
             budget -= n;
+            if takes_book {
+                let left = match o.side {
+                    Side::Buy => &mut ask_left,
+                    Side::Sell => &mut bid_left,
+                };
+                if let Some(l) = left {
+                    *l -= n;
+                }
+            }
             let f = self.apply_fill(id, fpx, n, q);
             fills.push(f);
         }

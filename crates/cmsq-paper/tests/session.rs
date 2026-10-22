@@ -231,3 +231,162 @@ fn signal_driver_trades_next_day_and_replays_identically() {
     };
     assert_eq!(run(), run());
 }
+
+// ---- issue #38: snapshot state must be bound to the keyed audit chain ----
+fn traded<'a>(store: &'a Store, id: &str) -> (PaperSession<'a>, f64) {
+    let s = strat(StrategyStatus::Promoted);
+    let mut ps = PaperSession::start(store, id, &s, engine()).unwrap();
+    ps.engine
+        .on_quote(&q("2026-10-19", "09:00:00", 3500., 100.));
+    ps.engine
+        .submit(
+            &s,
+            "FUT_RB",
+            Side::Buy,
+            Offset::Open,
+            OrderKind::Market,
+            1,
+            "09:00:00",
+        )
+        .unwrap();
+    ps.engine
+        .on_quote(&q("2026-10-19", "09:00:01", 3500., 1000.));
+    let c = ps.engine.account.cash;
+    (ps, c)
+}
+
+#[test]
+fn snapshot_cash_tamper_must_be_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let (ps, expected) = traded(&store, "snap");
+    ps.stop().unwrap();
+    assert_eq!(
+        PaperSession::resume(&store, "snap")
+            .unwrap()
+            .engine
+            .account
+            .cash,
+        expected
+    );
+    store.raw_batch("DROP TRIGGER paper_snapshots_no_update;
+        UPDATE paper_snapshots SET state_json=json_set(state_json,'$.account.cash',2000000.0)
+        WHERE session_id='snap' AND seq=(SELECT MAX(seq) FROM paper_snapshots WHERE session_id='snap');").unwrap();
+    assert!(verify_chain(&store, "snap").is_ok());
+    assert!(store.verify_audit().unwrap().ok);
+    let r = PaperSession::resume(&store, "snap");
+    assert!(r.is_err(), "unauthenticated snapshot accepted");
+}
+
+#[test]
+fn snapshot_transplanted_from_another_session_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let (a, _) = traded(&store, "a");
+    a.stop().unwrap();
+    let s = strat(StrategyStatus::Promoted);
+    let b = PaperSession::start(&store, "b", &s, engine()).unwrap();
+    b.stop().unwrap();
+    // copy a's latest state over b's (same seq 0 is not required: replace b's latest row)
+    store.raw_batch("DROP TRIGGER paper_snapshots_no_update;
+        UPDATE paper_snapshots SET state_json=(SELECT state_json FROM paper_snapshots WHERE session_id='a' ORDER BY seq DESC LIMIT 1),
+          seq=(SELECT MAX(seq) FROM paper_snapshots WHERE session_id='a')
+        WHERE session_id='b';").unwrap();
+    assert!(
+        PaperSession::resume(&store, "b").is_err(),
+        "cross-session snapshot accepted"
+    );
+}
+
+#[test]
+fn snapshot_without_audit_binding_is_refused_not_reauthenticated() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let (ps, _) = traded(&store, "legacy");
+    ps.stop().unwrap();
+    let state = store.latest_paper_snapshot("legacy").unwrap().unwrap();
+    // a legacy/unknown snapshot row (no audit binding) at a newer seq
+    store
+        .insert_paper_snapshot("legacy", state.0 + 1, None, 0.0, &state.1)
+        .unwrap();
+    assert!(PaperSession::resume(&store, "legacy").is_err());
+}
+
+// ---- issue #39: stop must persist quote-only state ----
+#[test]
+fn stop_must_preserve_quote_only_state() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let (mut ps, _) = traded(&store, "mark");
+    ps.flush().unwrap();
+    ps.engine
+        .on_quote(&q("2026-10-20", "09:00:00", 3500., 100.));
+    ps.flush().unwrap();
+    ps.engine
+        .on_quote(&q("2026-10-20", "14:59:00", 3600., 2000.));
+    ps.flush().unwrap();
+    let expected = ps.engine.equity();
+    let before = serde_json::to_value(&ps.engine).unwrap();
+    ps.stop().unwrap();
+    let r = PaperSession::resume(&store, "mark").unwrap();
+    assert_eq!(r.engine.equity(), expected);
+    let mut after = serde_json::to_value(&r.engine).unwrap();
+    // only the checkpoint marker event may differ
+    for k in ["event_seq", "event_chain"] {
+        after[k] = before[k].clone();
+    }
+    assert_eq!(
+        after, before,
+        "resumed engine state differs from the stopped one"
+    );
+}
+
+#[test]
+fn resumed_session_replays_identically_to_uninterrupted_one() {
+    let tape = |day: &str, ts: &str, px: f64, cum: f64| q(day, ts, px, cum);
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db"), AuditConfig::insecure_test()).unwrap();
+    let s = strat(StrategyStatus::Promoted);
+    // uninterrupted reference
+    let mut refe = engine();
+    refe.on_quote(&tape("2026-10-19", "09:00:00", 3500., 100.));
+    refe.on_quote(&tape("2026-10-19", "09:00:05", 3510., 400.));
+    refe.submit(
+        &s,
+        "FUT_RB",
+        Side::Buy,
+        Offset::Open,
+        OrderKind::Market,
+        3,
+        "09:00:06",
+    )
+    .unwrap();
+    let rf: Vec<_> = refe.on_quote(&tape("2026-10-19", "09:00:07", 3510., 430.));
+    // stop after the quote-only update, resume, continue with the same tape
+    let mut ps = PaperSession::start(&store, "rp", &s, engine()).unwrap();
+    ps.engine
+        .on_quote(&tape("2026-10-19", "09:00:00", 3500., 100.));
+    ps.engine
+        .on_quote(&tape("2026-10-19", "09:00:05", 3510., 400.));
+    ps.stop().unwrap();
+    let mut r = PaperSession::resume(&store, "rp").unwrap();
+    r.engine
+        .submit(
+            &s,
+            "FUT_RB",
+            Side::Buy,
+            Offset::Open,
+            OrderKind::Market,
+            3,
+            "09:00:06",
+        )
+        .unwrap();
+    let f: Vec<_> = r
+        .engine
+        .on_quote(&tape("2026-10-19", "09:00:07", 3510., 430.));
+    assert_eq!(
+        f, rf,
+        "stale last_cum after resume would make volume reusable"
+    );
+    assert_eq!(r.engine.equity(), refe.equity());
+}

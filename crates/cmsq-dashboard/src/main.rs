@@ -617,10 +617,15 @@ impl Dashboard {
                     .into_iter()
                     .take(10)
                     .map(|(id, strategy, _, status, _)| {
+                        // show only an audited snapshot (#38); forged/legacy state renders empty
                         let state = st
                             .latest_paper_snapshot(&id)
                             .ok()
                             .flatten()
+                            .filter(|(seq, s)| {
+                                cmsq_paper::session::verify_snapshot_binding(&st, &id, *seq, s)
+                                    .is_ok()
+                            })
                             .map(|x| x.1)
                             .unwrap_or_default();
                         let curve = st.paper_equity_curve(&id).unwrap_or_default();

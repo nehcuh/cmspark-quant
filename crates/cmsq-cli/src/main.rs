@@ -1769,9 +1769,15 @@ fn paper_cmd(
         }
         PaperCmd::Verify { session } => {
             let (n, h) = verify_chain(&o.store, &session)?;
+            // the account state shown by `paper show` must be the audited snapshot (#38)
+            let (seq, state) = o
+                .store
+                .latest_paper_snapshot(&session)?
+                .context("session has no snapshot")?;
+            cmsq_paper::session::verify_snapshot_binding(&o.store, &session, seq, &state)?;
             out(
-                serde_json::json!({"session": session, "events": n, "chain": h, "ok": true}),
-                format!("{session}: {n} events, chain {h} verified"),
+                serde_json::json!({"session": session, "events": n, "chain": h, "snapshot_seq": seq, "snapshot_bound": true, "ok": true}),
+                format!("{session}: {n} events, chain {h} verified; snapshot @{seq} bound to audit chain"),
             );
         }
         PaperCmd::Show { session } => {

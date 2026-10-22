@@ -20,6 +20,7 @@ fn kind(e: &Event) -> &'static str {
         Event::Filled { .. } => "filled",
         Event::Cancelled { .. } => "cancelled",
         Event::Settled { .. } => "settled",
+        Event::Marked { .. } => "marked",
     }
 }
 
@@ -60,6 +61,7 @@ impl<'a> PaperSession<'a> {
         let (seq, state) = store
             .latest_paper_snapshot(id)?
             .context("session has no snapshot")?;
+        verify_snapshot_binding(store, id, seq, &state)?;
         let engine: PaperEngine = serde_json::from_value(state)?;
         ensure!(engine.event_seq as i64 == seq, "snapshot seq mismatch");
         let head = verify_chain(store, id)?;
@@ -121,25 +123,50 @@ impl<'a> PaperSession<'a> {
         Ok(rows.len())
     }
 
-    /// Flush, then store a full state snapshot.
+    /// Flush, then store a full state snapshot bound to the keyed audit chain.
+    ///
+    /// Snapshots are append-only and keyed by event seq. If only quotes moved
+    /// since the last snapshot (marks / cumulative volume, issue #39), a `Marked`
+    /// event is emitted first so that state gets its own seq instead of being lost.
     pub fn checkpoint(&mut self) -> Result<()> {
         if !self.engine.events().is_empty() {
             self.flush()?;
         }
-        let e = &self.engine;
-        if self
-            .store
-            .latest_paper_snapshot(&self.id)?
-            .is_some_and(|(seq, _)| seq == e.event_seq as i64)
-        {
-            return Ok(()); // nothing new since the last snapshot (quotes alone are not state worth keeping)
+        if let Some((seq, prev)) = self.store.latest_paper_snapshot(&self.id)? {
+            if seq == self.engine.event_seq as i64 {
+                if prev == serde_json::to_value(&self.engine)? {
+                    return Ok(()); // identical state already stored
+                }
+                self.engine.record_marks();
+                self.flush()?;
+                if self
+                    .store
+                    .latest_paper_snapshot(&self.id)?
+                    .is_some_and(|(s, _)| s == self.engine.event_seq as i64)
+                {
+                    return Ok(());
+                }
+            }
         }
+        let e = &self.engine;
+        let state = serde_json::to_value(e)?;
+        let seq = e.event_seq as i64;
         self.store.insert_paper_snapshot(
             &self.id,
-            e.event_seq as i64,
+            seq,
             e.account.trading_day.as_deref(),
             e.equity(),
-            &serde_json::to_value(e)?,
+            &state,
+        )?;
+        // Bind (session, seq, full state digest) into the HMAC audit chain (issue #38):
+        // a DB owner who edits state_json without the audit key cannot re-bind it.
+        self.store.audit(
+            "paper",
+            "paper_snapshot",
+            Some(&snapshot_target(&self.id)),
+            json!({"session": self.id, "seq": seq, "state_sha256": state_digest(&self.id, seq, &state),
+                   "chain": e.event_chain, "simulated": true}),
+            true,
         )?;
         Ok(())
     }
@@ -150,6 +177,55 @@ impl<'a> PaperSession<'a> {
         self.store.audit("paper", "paper_session_stop", Some(&self.strategy_id), json!({"session": self.id, "equity": self.engine.equity(), "chain": self.engine.event_chain}), true)?;
         Ok(())
     }
+}
+
+fn snapshot_target(id: &str) -> String {
+    format!("paper-session:{id}")
+}
+
+/// sha256 over (session id, seq, canonical state JSON).
+pub fn state_digest(id: &str, seq: i64, state: &serde_json::Value) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(id.as_bytes());
+    h.update([0u8]);
+    h.update(seq.to_string().as_bytes());
+    h.update([0u8]);
+    h.update(serde_json::to_vec(state).unwrap_or_default());
+    hex::encode(h.finalize())
+}
+
+/// Refuse a snapshot unless the keyed audit chain verifies and its newest
+/// `paper_snapshot` entry for this session binds exactly this (seq, state).
+/// Legacy snapshots written before the binding existed are refused, never
+/// silently re-authenticated: start a new session (the event log stays verifiable).
+pub fn verify_snapshot_binding(
+    store: &Store,
+    id: &str,
+    seq: i64,
+    state: &serde_json::Value,
+) -> Result<()> {
+    let rep = store.verify_audit()?;
+    ensure!(
+        rep.ok,
+        "audit chain does not verify; refusing to trust paper snapshots"
+    );
+    let entry = store
+        .audit_entries(Some(&snapshot_target(id)), 1_000_000)?
+        .into_iter()
+        .find(|a| a.action == "paper_snapshot")
+        .context(
+            "snapshot is not bound to the audit chain (legacy or forged); refusing to resume",
+        )?;
+    ensure!(
+        entry.details["session"] == id && entry.details["seq"] == seq,
+        "latest snapshot (seq {seq}) is not the one bound in the audit chain"
+    );
+    ensure!(
+        entry.details["state_sha256"] == state_digest(id, seq, state),
+        "snapshot state does not match its audited digest (tampered); refusing to resume"
+    );
+    Ok(())
 }
 
 fn chain_at(store: &Store, id: &str, seq: i64) -> Result<String> {

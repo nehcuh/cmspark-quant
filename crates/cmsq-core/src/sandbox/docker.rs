@@ -80,6 +80,18 @@ impl DockerSandboxExecutor {
         Ok(Self { docker })
     }
 
+    /// Connect through an explicit unix socket (tests / non-default daemons).
+    pub async fn connect_unix(path: &std::path::Path) -> Result<Self, SandboxError> {
+        let docker =
+            Docker::connect_with_unix(&path.to_string_lossy(), 120, bollard::API_DEFAULT_VERSION)
+                .map_err(|e| SandboxError::Unavailable(e.to_string()))?;
+        docker
+            .ping()
+            .await
+            .map_err(|e| SandboxError::Unavailable(format!("docker ping failed: {e}")))?;
+        Ok(Self { docker })
+    }
+
     /// Writable `/out` is NOT a host bind mount (issue #9): it is a tmpfs capped
     /// at `out_bytes` / `out_inodes` (charged to the container's memory cgroup),
     /// owned by the job user. The host gets positions.csv back over a framed
@@ -220,16 +232,50 @@ impl SandboxExecutor for DockerSandboxExecutor {
             labels: Some(HashMap::from([("cmsq.job".to_string(), req.id.clone())])),
             ..Default::default()
         };
-        let created = self
-            .docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: name.clone(),
-                    platform: None,
-                }),
-                cfg,
-            )
+        // Issue #19: the create call is owned by a detached task, not by this
+        // (cancellable) future. If the caller is dropped after the daemon committed
+        // the create but before the id reached us, the task still receives the id,
+        // finds nobody listening and force-removes exactly that container. On an
+        // unknown outcome (transport error) it removes by our unique job name.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let docker = self.docker.clone();
+            let name = name.clone();
+            tokio::spawn(async move {
+                let r = docker
+                    .create_container(
+                        Some(CreateContainerOptions {
+                            name: name.clone(),
+                            platform: None,
+                        }),
+                        cfg,
+                    )
+                    .await;
+                let rm = RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                };
+                match r {
+                    Ok(c) => {
+                        if let Err(Ok(c)) = tx.send(Ok(c)) {
+                            let _ = docker.remove_container(&c.id, Some(rm)).await;
+                        }
+                    }
+                    Err(e) => {
+                        let unknown =
+                            !matches!(e, bollard::errors::Error::DockerResponseServerError { .. });
+                        let _ = tx.send(Err(e));
+                        if unknown {
+                            // the daemon may have committed it; our name is unique per job
+                            let _ = docker.remove_container(&name, Some(rm)).await;
+                        }
+                    }
+                }
+            });
+        }
+        let created = rx
             .await
+            .map_err(|_| SandboxError::Execution("create: task lost".into()))?
             .map_err(|e| SandboxError::Execution(format!("create: {e}")))?;
         let id = created.id;
         let mut cleanup = ContainerCleanup {
