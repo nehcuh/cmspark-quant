@@ -29,6 +29,11 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vnpy_shim  # noqa: E402
 
+# Kronos image only (python -I ignores PYTHONPATH): baked-in, read-only helper + model code
+for _p in ("/runner/kronos", "/runner/kronos/kronos_code"):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
+
 IN = os.environ.get("CMSQ_INPUT", "/input")
 JOB = os.environ.get("CMSQ_JOB", "/job")
 OUT = os.environ.get("CMSQ_OUT", "/out")
@@ -42,6 +47,18 @@ def main():
     for c in ("open", "high", "low", "close", "volume"):
         df[c] = df[c].astype(float)
     vnpy_shim.install()
+    if os.environ.get("CMSQ_DETERMINISTIC_TORCH") == "1":
+        # Kronos image only: fixed seeds before any strategy code runs
+        import random
+
+        import numpy as np
+        import torch
+
+        random.seed(0)
+        np.random.seed(0)
+        torch.manual_seed(0)
+        torch.use_deterministic_algorithms(True)
+        torch.set_num_threads(1)
     spec = importlib.util.spec_from_file_location("strategy", os.path.join(JOB, "strategy.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

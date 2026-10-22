@@ -189,13 +189,19 @@ impl SandboxExecutor for DockerSandboxExecutor {
     }
     async fn runner_identity(&self, image: &str) -> Option<String> {
         let i = self.docker.inspect_image(image).await.ok()?;
-        let ver = i
-            .config
-            .and_then(|c| c.labels)
-            .and_then(|l| l.get("cmsq.runner.version").cloned())
+        let labels = i.config.and_then(|c| c.labels).unwrap_or_default();
+        let ver = labels
+            .get("cmsq.runner.version")
+            .cloned()
             .unwrap_or_else(|| "none".into());
+        // Kronos variant: the manifest hash (code commit + weight/tokenizer sha256)
+        // rides in the identity, which is recorded with every job and audit entry
+        let kronos = labels
+            .get("cmsq.runner.kronos.manifest")
+            .map(|m| format!("|cmsq.runner.kronos.manifest={m}"))
+            .unwrap_or_default();
         Some(format!(
-            "{}|cmsq.runner.version={ver}",
+            "{}|cmsq.runner.version={ver}{kronos}",
             i.id.unwrap_or_default()
         ))
     }

@@ -23,6 +23,29 @@ use std::path::{Path, PathBuf};
 pub use crate::scorer::CostModel;
 
 pub const RUNNER_IMAGE: &str = "cmsq-runner:2.2.2";
+/// Optional Kronos variant (torch CPU + pinned weights); torch never runs on the host.
+pub const RUNNER_KRONOS_IMAGE: &str = "cmsq-runner-kronos:2.2.2";
+
+/// Image a strategy runs in: chosen by the trusted host-side scan of its code.
+pub fn image_for(code: &str) -> &'static str {
+    if crate::pretrained::detect(code)
+        .iter()
+        .any(|m| m.name.starts_with("kronos"))
+    {
+        RUNNER_KRONOS_IMAGE
+    } else {
+        RUNNER_IMAGE
+    }
+}
+
+/// File (in the secrets dir) holding the recorded image id for `image`.
+pub fn image_id_file(image: &str) -> &'static str {
+    if image == RUNNER_KRONOS_IMAGE {
+        "runner_kronos_image_id"
+    } else {
+        "runner_image_id"
+    }
+}
 pub const RUNNER_CMD: [&str; 4] = ["python3", "-I", "-B", "/runner/signal_runner.py"];
 
 /// Progress sink (dashboard log stream / CLI stderr). Called from the job thread.
@@ -649,20 +672,32 @@ impl Orchestrator {
 
     /// Expected runner image id, written by scripts/build_runner.sh.
     pub fn expected_runner_id(&self) -> Option<String> {
+        self.expected_runner_id_for(RUNNER_IMAGE)
+    }
+
+    /// Expected id for a specific runner image (base or Kronos variant).
+    pub fn expected_runner_id_for(&self, image: &str) -> Option<String> {
+        let file = image_id_file(image);
         let read = |p: PathBuf| {
             std::fs::read_to_string(p)
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| s.starts_with("sha256:"))
         };
-        std::env::var("CMSQ_RUNNER_IMAGE_ID")
+        let env = if image == RUNNER_KRONOS_IMAGE {
+            "CMSQ_RUNNER_KRONOS_IMAGE_ID"
+        } else {
+            "CMSQ_RUNNER_IMAGE_ID"
+        };
+        std::env::var(env)
             .ok()
             .filter(|s| s.starts_with("sha256:"))
-            .or_else(|| read(self.home.secrets.join("runner_image_id")))
+            .or_else(|| read(self.home.secrets.join(file)))
             .or_else(|| {
                 read(
                     PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                        .join(".config/cmsq/runner_image_id"),
+                        .join(".config/cmsq")
+                        .join(file),
                 )
             })
     }
@@ -770,7 +805,7 @@ impl Orchestrator {
         }
         let req = SandboxRequest {
             id: format!("{}-{idx:02}", jd.file_name().unwrap().to_string_lossy()),
-            image: RUNNER_IMAGE.into(),
+            image: image_for(code).into(),
             command: RUNNER_CMD.iter().map(|s| s.to_string()).collect(),
             env: vec![],
             mounts,
@@ -1034,7 +1069,7 @@ impl Orchestrator {
         let fut = crate::futures::spec_for(symbol);
         let dev_end = ((bars.len() as f64) * self.dev_frac) as usize;
         let dev = &bars[..dev_end];
-        let identity = exec.runner_identity(RUNNER_IMAGE).await;
+        let identity = exec.runner_identity(image_for(code)).await;
         let job_id = uuid::Uuid::new_v4().to_string();
         let jd = self.home.job_dir(&s.id, &job_id);
         std::fs::create_dir_all(&jd)?;
@@ -1043,7 +1078,7 @@ impl Orchestrator {
             strategy_id: s.id.clone(),
             backend: exec.name().into(),
             image: if exec.hardened() {
-                RUNNER_IMAGE.into()
+                image_for(code).into()
             } else {
                 "host-python (dev)".into()
             },
@@ -1196,7 +1231,7 @@ impl Orchestrator {
 
         // ---- library-wide trial ledger + DSR (insert and snapshot are one locked transaction) ----
         let ikey = crate::extract::idea_key(code);
-        let phash = params_hash(params);
+        let phash = trial_params_hash(params, code);
         let all = self.store.record_trial(&NewTrial {
             strategy_id: &s.id,
             job_id: &job_id,
@@ -1306,6 +1341,7 @@ impl Orchestrator {
             roll_unpriced: sim.roll_unpriced,
             regimes,
             model_use,
+            image: image_for(code).into(),
         })))
     }
 
@@ -1363,7 +1399,7 @@ impl Orchestrator {
                 data_validated: sc.validated.clone(),
                 high_risks: &sc.high_risks,
                 buy_hold: &sc.bhm,
-                expected_runner: self.expected_runner_id().as_deref(),
+                expected_runner: self.expected_runner_id_for(&sc.image).as_deref(),
                 synthetic: sc.synthetic,
                 capacity: sc.capacity,
                 roll_unpriced: sc.roll_unpriced,
@@ -1990,7 +2026,10 @@ impl Orchestrator {
         let bhm = scorer::metrics(pb, &ew_bh.sim, warm, n);
         let regimes = scorer::regime_slices(&ew_bh.sim.equity, &ps.sim.equity, warm, n);
         let ikey = crate::extract::idea_key(&code);
-        let phash = params_hash(&json!({"params": params, "symbols": symbols, "alloc": alloc}));
+        let phash = trial_params_hash(
+            &json!({"params": params, "symbols": symbols, "alloc": alloc}),
+            &code,
+        );
         let label = format!("PORTFOLIO:{}", symbols.join("+"));
         let all = self.store.record_trial(&NewTrial {
             strategy_id: &s.id,
@@ -2070,7 +2109,7 @@ impl Orchestrator {
                 data_validated: validated,
                 high_risks: &high,
                 buy_hold: &bhm,
-                expected_runner: self.expected_runner_id().as_deref(),
+                expected_runner: self.expected_runner_id_for(&scored[0].image).as_deref(),
                 synthetic: scored.iter().any(|x| x.synthetic),
                 capacity: scored
                     .iter()
@@ -2268,14 +2307,14 @@ impl Orchestrator {
         let rules: scorer::Rules = serde_json::from_value(att["rules"].clone()).unwrap_or_default();
         let fut = crate::futures::spec_for(&symbol);
         let dev_end = ((bars.len() as f64) * self.dev_frac) as usize;
-        let identity = exec.runner_identity(RUNNER_IMAGE).await;
+        let identity = exec.runner_identity(image_for(&code)).await;
         let jd = self.home.job_dir(&s.id, &job_id);
         std::fs::create_dir_all(&jd)?;
         self.store.insert_job(&JobRecord {
             id: job_id.clone(),
             strategy_id: s.id.clone(),
             backend: exec.name().into(),
-            image: RUNNER_IMAGE.into(),
+            image: image_for(&code).into(),
             symbol: symbol.clone(),
             data_source: dev_job.data_source.clone(),
             status: "running".into(),
@@ -2518,12 +2557,12 @@ impl Orchestrator {
         let job_id = uuid::Uuid::new_v4().to_string();
         let jd = self.home.job_dir(&s.id, &job_id);
         std::fs::create_dir_all(&jd)?;
-        let identity = exec.runner_identity(RUNNER_IMAGE).await;
+        let identity = exec.runner_identity(image_for(&code)).await;
         self.store.insert_job(&JobRecord {
             id: job_id.clone(),
             strategy_id: s.id.clone(),
             backend: exec.name().into(),
-            image: RUNNER_IMAGE.into(),
+            image: image_for(&code).into(),
             symbol: symbol.clone(),
             data_source: att["source"].as_str().unwrap_or("-").into(),
             status: "running".into(),
@@ -2779,6 +2818,8 @@ pub struct Scored {
     pub roll_unpriced: usize,
     pub regimes: Vec<scorer::RegimeSlice>,
     pub model_use: crate::pretrained::ModelUse,
+    /// runner image the strategy ran in (base or Kronos variant)
+    pub image: String,
 }
 
 pub enum RunOutcome {
@@ -2967,6 +3008,23 @@ impl Ga {
         }
         out
     }
+}
+
+/// Trial identity for the DSR ledger. Pretrained-model strategies hide their
+/// configuration (model size, lookback, horizon, sampling, thresholds) in code
+/// literals that `idea_key` normalises away, so every distinct model-using code
+/// text is its own trial (over-counting is the conservative side).
+pub fn trial_params_hash(p: &serde_json::Value, code: &str) -> String {
+    let models = crate::pretrained::detect(code);
+    if models.is_empty() {
+        return params_hash(p);
+    }
+    let names: Vec<_> = models.iter().map(|m| m.name.clone()).collect();
+    params_hash(&json!({
+        "params": p,
+        "models": names,
+        "model_code_sha256": hex::encode(sha2::Sha256::digest(code.as_bytes())),
+    }))
 }
 
 pub fn params_hash(p: &serde_json::Value) -> String {
@@ -3221,5 +3279,38 @@ mod ga_tests {
         );
         assert!(n1 < 120, "searched only part of the 120-point space: {n1}");
         assert!(fit_of(&b1) >= -2.0, "GA got close to the optimum: {b1:?}");
+    }
+}
+
+#[cfg(test)]
+mod kronos_tests {
+    use super::*;
+
+    #[test]
+    fn kronos_code_selects_kronos_image_and_its_own_id_file() {
+        let k = "from cmsq_kronos import rolling_forecast  # Kronos-mini";
+        assert_eq!(image_for(k), RUNNER_KRONOS_IMAGE);
+        assert_eq!(image_id_file(image_for(k)), "runner_kronos_image_id");
+        assert_eq!(
+            image_for("def generate_signals(df): return df.close*0"),
+            RUNNER_IMAGE
+        );
+        assert_eq!(image_id_file(RUNNER_IMAGE), "runner_image_id");
+    }
+
+    #[test]
+    fn every_model_config_is_its_own_dsr_trial() {
+        let p = json!({"threshold": 0.0});
+        let a = "# kronos-mini\nrolling_forecast(df, model='mini', lookback=64)";
+        let b = "# kronos-mini\nrolling_forecast(df, model='mini', lookback=128)";
+        // idea_key normalises the literal away …
+        assert_eq!(crate::extract::idea_key(a), crate::extract::idea_key(b));
+        // … but the trial identity does not
+        assert_ne!(trial_params_hash(&p, a), trial_params_hash(&p, b));
+        // non-model strategies keep the old identity (ledger compatibility)
+        assert_eq!(
+            trial_params_hash(&p, "def generate_signals(df): pass"),
+            params_hash(&p)
+        );
     }
 }
